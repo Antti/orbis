@@ -443,12 +443,18 @@ fn protects_modified_backups_and_rejects_base_path_conflicts() {
 }
 
 #[test]
-fn rejects_unknown_metadata_reserved_paths_and_insufficient_space() {
+fn retains_unknown_metadata_and_rejects_reserved_paths_and_insufficient_space() {
     let tmp = tempfile::tempdir().unwrap();
     let base = base_game(tmp.path());
     let mut bytes = update("01.01", "file", b"NEW");
     be32(&mut bytes, 0x1000, 0xfeedcafe);
-    assert!(plan(&Pkg::parse(bytes).unwrap(), &base).is_err());
+    let planned = plan(&Pkg::parse(bytes).unwrap(), &base).unwrap();
+    assert!(
+        planned
+            .files
+            .iter()
+            .any(|f| f.path == "sce_sys/entry_FEEDCAFE.bin")
+    );
     for name in [".orbis-install.json", "NUL", "bad.", "bad:stream"] {
         assert!(plan(&package("01.01", name), &base).is_err());
     }

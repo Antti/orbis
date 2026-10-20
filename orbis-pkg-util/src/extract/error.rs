@@ -4,6 +4,10 @@ use std::path::PathBuf;
 /// Errors that can occur during PKG extraction.
 #[derive(Debug, Snafu)]
 pub enum ExtractError {
+    #[snafu(display("integrity verification failed: {source}"))]
+    Integrity { source: std::io::Error },
+    #[snafu(display("{source}"))]
+    EntryName { source: orbis_pkg::EntryNameError },
     #[snafu(display(
         "operation interrupted; completed files remain and unfinished files were discarded"
     ))]

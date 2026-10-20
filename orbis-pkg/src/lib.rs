@@ -53,8 +53,12 @@ use open_error::*;
 
 pub mod entry;
 pub mod header;
+pub mod integrity;
 pub mod keys;
+mod names;
+pub mod passcode;
 pub mod sfo;
+pub use names::EntryNameError;
 
 #[cfg(doctest)]
 #[doc = include_str!("../README.md")]
@@ -74,6 +78,7 @@ pub struct Pkg<R: AsRef<[u8]>> {
     raw: R,
     header: PkgHeader,
     entry_key3: Vec<u8>,
+    passcode_keys: Option<[[u8; 32]; 7]>,
     ekpfs: Vec<u8>,
 }
 
@@ -122,13 +127,14 @@ impl<R: AsRef<[u8]>> Pkg<R> {
             raw,
             header,
             entry_key3: Vec::new(),
+            passcode_keys: None,
             ekpfs: Vec::new(),
         })
     }
 
     /// Loads the supported entry key (slot 3), independently of the PFS key.
     pub fn load_entry_keys(&mut self) -> Result<(), OpenError> {
-        if self.entry_key3.is_empty() {
+        if self.passcode_keys.is_none() && self.entry_key3.is_empty() {
             self.load_entry_key3()?;
         }
         Ok(())
@@ -212,7 +218,7 @@ impl<R: AsRef<[u8]>> Pkg<R> {
     /// ```
     pub fn entry_data(&self, entry: &PkgEntry) -> Result<Vec<u8>, EntryDataError> {
         // Check if we have a decryption key for encrypted entries.
-        if entry.is_encrypted() && (entry.key_index() != 3 || self.entry_key3.is_empty()) {
+        if entry.is_encrypted() && self.entry_key(entry.key_index()).is_none() {
             return Err(EntryDataError::NoDecryptionKey {
                 key_index: entry.key_index(),
             });
@@ -322,7 +328,7 @@ impl<R: AsRef<[u8]>> Pkg<R> {
         debug_assert_eq!(encrypted.len() % 16, 0);
 
         // Setup decryptor.
-        let (key, iv) = self.derive_entry_key3(entry);
+        let (key, iv) = self.derive_entry_key(entry);
         let mut decryptor = cbc::Decryptor::<aes::Aes128>::new(&key.into(), &iv.into());
 
         // Decrypt blocks.
@@ -338,12 +344,24 @@ impl<R: AsRef<[u8]>> Pkg<R> {
         out
     }
 
-    /// Get key and IV for `entry` using `entry_key3`.
-    fn derive_entry_key3(&self, entry: &PkgEntry) -> ([u8; 16], [u8; 16]) {
+    fn entry_key(&self, index: usize) -> Option<&[u8]> {
+        if let Some(keys) = &self.passcode_keys {
+            keys.get(index).map(|key| key.as_slice())
+        } else if index == 3 && !self.entry_key3.is_empty() {
+            Some(&self.entry_key3)
+        } else {
+            None
+        }
+    }
+
+    fn derive_entry_key(&self, entry: &PkgEntry) -> ([u8; 16], [u8; 16]) {
         // Calculate secret.
         let mut sha256 = sha2::Sha256::new();
         sha256.update(entry.as_bytes());
-        sha256.update(&self.entry_key3);
+        sha256.update(
+            self.entry_key(entry.key_index())
+                .expect("key checked by entry_data"),
+        );
         let secret = sha256.finalize();
 
         // Extract key and IV.

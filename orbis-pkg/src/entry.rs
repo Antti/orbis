@@ -49,6 +49,11 @@ impl PkgEntry {
         self.raw_entry.id.get()
     }
 
+    /// Byte offset into the PKG entry-name table.
+    pub const fn filename_offset(&self) -> usize {
+        self.raw_entry.filename_offset.get() as usize
+    }
+
     /// Returns the parsed entry identifier.
     #[must_use]
     pub const fn entry_id(&self) -> EntryId {

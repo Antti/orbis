@@ -28,6 +28,7 @@ fn package(bytes: Vec<u8>) -> Pkg<Vec<u8>> {
         header: PkgHeader::read(bytes.as_slice()).unwrap(),
         raw: bytes,
         entry_key3: Vec::new(),
+        passcode_keys: None,
         ekpfs: vec![0x43; 32],
     }
 }

@@ -36,7 +36,8 @@ pub mod progress;
 mod test_support;
 
 pub use self::extract::{
-    ExtractError, ExtractOptions, ExtractionReport, ListedItem, PkgExtractor, SkippedEntry,
+    ExtractError, ExtractOptions, ExtractionReport, IntegrityReport, ListedItem, PkgExtractor,
+    SkippedEntry,
 };
 pub use self::progress::{ExtractProgress, SilentProgress};
 

@@ -71,7 +71,8 @@ for compatibility checks, space requirements, and crash recovery.
 
 See the [CLI guide](orbis-pkg-util/README.md) for path selection, JSON fields,
 exit codes, safe replacement behavior, and shell completions. `verify` checks
-readability and decompression; it does not verify authenticity.
+readability and decompression. Add `--integrity` for stored SHA-256 and PFS HMAC
+checks; missing checks return exit 3. Neither mode verifies publisher authenticity.
 
 ## Crates
 

@@ -8,9 +8,15 @@ pub(super) struct Filesystem<'a> {
     pub files: Vec<FileWork<'a>>,
 }
 
-pub(super) fn read_filesystem<R: AsRef<[u8]>>(
+pub(super) fn open_filesystems<R: AsRef<[u8]>>(
     pkg: &Pkg<R>,
-) -> Result<Filesystem<'_>, ExtractError> {
+) -> Result<
+    (
+        std::sync::Arc<orbis_pfs::Pfs<'_>>,
+        std::sync::Arc<orbis_pfs::Pfs<'_>>,
+    ),
+    ExtractError,
+> {
     // Get PFS image and encryption key.
     let pfs_image = pkg.get_pfs_image().ok_or(ExtractError::NoPfsImage)?;
 
@@ -51,6 +57,13 @@ pub(super) fn read_filesystem<R: AsRef<[u8]>>(
             .map_err(|e| ExtractError::OpenInnerPfsFailed { source: e })?
     };
 
+    Ok((outer_pfs, inner_pfs))
+}
+
+pub(super) fn read_filesystem<R: AsRef<[u8]>>(
+    pkg: &Pkg<R>,
+) -> Result<Filesystem<'_>, ExtractError> {
+    let (_, inner_pfs) = open_filesystems(pkg)?;
     let mut inner_root = inner_pfs
         .root()
         .open()

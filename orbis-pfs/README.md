@@ -35,3 +35,13 @@ for (name, item) in root {
 # Ok(())
 # }
 ```
+
+## Stored integrity checks
+
+`Pfs::verify_integrity(Some(ekpfs), || false)` checks stored HMACs over decrypted
+signed header, inode-table and data blocks. It walks direct and supported indirect
+block references and returns counts of verified and unavailable checks. Supply a
+cancellation callback for long-running checks. Unsigned images have no HMACs;
+missing keys or zero signatures never count as verified. This does not verify
+publisher authenticity. See the [CLI integrity documentation](../orbis-pkg-util/README.md#check-data-without-extracting-it)
+for supported layouts and incomplete-result handling.

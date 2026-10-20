@@ -19,19 +19,31 @@ Prebuilt Linux and macOS packages and installation instructions are described in
 ```sh
 orbis-pkg-util info game.pkg
 orbis-pkg-util info game.pkg --json
+orbis-pkg-util info game.pkg --sfo
+orbis-pkg-util info game.pkg --header-only
 orbis-pkg-util list game.pkg
 orbis-pkg-util list game.pkg --entries
 orbis-pkg-util list game.pkg --files --json
 ```
 
-`info` reads header metadata without requiring decryption keys. Sizes include
-human-readable units; `content_version` is the version field in the content ID,
-not the application's version from `param.sfo`.
+`info` shows header metadata and an application summary from `param.sfo`: title,
+application/package versions, category, required system version, content-ID region,
+and available build fields such as SDK version. `--sfo` shows every typed SFO field.
+`--json` includes all SFO fields, preserving integer values and encoding binary
+values as hex. Region is inferred from the content ID, not a compatibility check.
+
+`--header-only` skips SFO and key loading. Without it, unreadable or malformed SFO
+produces a warning and exit 3 while retaining header output. Packages without an
+SFO entry return a null application/SFO result. `content_version` remains the
+content-ID version; `application.app_version` is the application's `APP_VER`.
 
 `list` shows both PKG metadata and embedded filesystem contents. Paths match full
 extraction destinations: metadata appears under `sce_sys/`. `--entries` lists
 only the PKG entry table without requiring keys; `--files` lists only filesystem
-files and directories. Unknown metadata IDs have no known extraction path.
+files and directories. Known metadata IDs retain canonical paths. Unknown IDs
+use safe filenames from the PKG name table, or `sce_sys/entry_XXXXXXXX.bin` when
+unnamed. Invalid names/offsets are rejected; extraction refuses duplicate paths,
+including case-only collisions, before publishing files.
 
 If the filesystem cannot be read, the default listing still returns metadata,
 prints a warning, and exits with code 3. Use `--entries` when only metadata is
@@ -74,8 +86,7 @@ unfinished staged files, and exits 130. A process killed forcibly or a power
 failure can leave `.orbis-*.tmp` staging files. After investigating a failure,
 retry with `--force` to replace completed files safely.
 
-Missing decryption keys and unknown entry IDs are reported as omissions. An
-incomplete extraction returns exit code 3 and identifies skipped entries;
+Missing decryption keys are reported as omissions. An incomplete extraction returns exit code 3 and identifies skipped entries;
 `--quiet` does not hide these warnings.
 
 ## Check data without extracting it
@@ -84,17 +95,33 @@ incomplete extraction returns exit code 3 and identifies skipped entries;
 orbis-pkg-util verify game.pkg
 orbis-pkg-util verify game.pkg --metadata-only
 orbis-pkg-util verify game.pkg --path textures
+orbis-pkg-util verify game.pkg --integrity
+orbis-pkg-util verify game.pkg --integrity --metadata-only
 ```
 
 `verify` reads selected metadata payloads and filesystem data, checks file lengths,
 and decompresses compressed files. It creates no extracted files. Unknown entry
-IDs can still be checked because verification does not require an output filename.
+IDs use the same resolved/generated paths as extraction.
 Unreadable encrypted entries are reported as skipped and return exit code 3.
 
-This is a readability and decompression check. It does **not** validate PKG/PFS
-signatures, MACs, stored digest tables, licenses, executable contents, or
-publisher authenticity. A successful check does not establish that the package
-is trusted.
+By default this checks readability and decompression. `--integrity` additionally
+checks stored SHA-256 hashes for the PKG header, body, SC entry chains, digest
+table, individual stored entry payloads, and full/signed PFS regions. It also
+checks the signed outer/inner PFS header, inode-table blocks, and file/directory
+blocks through direct, single-indirect and double-indirect pointers. SHA-256
+covers on-disk bytes, including ciphertext; HMACs cover decrypted PFS blocks.
+
+Integrity checks apply to the whole selected scope and cannot use `--path`.
+`--metadata-only` excludes PFS hashes/HMACs. Missing/all-zero hashes, unavailable
+signing keys, contiguous signed extents without individual signatures, and
+inode-table signature descriptors beyond 12 direct blocks return exit 3.
+A nonzero digest/MAC mismatch returns exit 1. These distinctions also apply with
+`--quiet`. Ctrl-C interrupts both hashing and readability checks with exit 130.
+Expect additional I/O: whole-image hashing and block verification read data
+beyond the ordinary file checks. No extracted files are written.
+
+Neither mode verifies publisher RSA signatures, licenses, executable behavior,
+or publisher authenticity. Matching stored hashes does not establish trust.
 
 ## Output for scripts
 
@@ -106,13 +133,17 @@ causes. These options can appear before or after the subcommand.
 `info` returns `package` and a `metadata` object containing the content ID fields,
 content/DRM types and names, flags, file and entry counts, sizes, and offsets.
 Numeric sizes are bytes and offsets are numeric, not hexadecimal strings.
-The `package` display path replaces invalid UTF-8 with the replacement character.
+The additional `application` object contains the SFO summary, `sfo` maps keys to
+`{"type":"string","value":...}`, `{"type":"integer","value":...}`, or
+`{"type":"binary","hex":...}`, and `warnings` lists unavailable SFO details.
+These additive fields retain schema version 1. The `package` display path replaces
+invalid UTF-8 with the replacement character.
 
 `list` returns `package`, `items`, and `warnings`. Each item has:
 
 | Field | Meaning |
 | --- | --- |
-| `path` | Extraction-relative path, or `null` for an unknown metadata ID |
+| `path` | Extraction-relative path, including resolved/generated unknown-entry names |
 | `source` | `metadata` or `filesystem` |
 | `kind` | `file` or `directory` |
 | `size` | File bytes; zero for directories |
@@ -130,7 +161,7 @@ Consumers should accept added fields within schema version 1.
 | 0 | Requested operation completed |
 | 1 | Input, data, or output failure |
 | 2 | Invalid command-line arguments |
-| 3 | Incomplete extraction, verification, or listing |
+| 3 | Incomplete inspection, extraction, verification, or listing |
 | 130 | Extraction or verification interrupted with Ctrl-C |
 
 Closing a stdout pipe early, for example through `head`, exits without a panic.
@@ -155,10 +186,27 @@ and `completions elvish`.
 
 ## Encryption support
 
-Header inspection and entry-table listing require no keys. Extraction supports
-the built-in entry key for slot 3 and the FPKG filesystem key scheme. It does not
-provide arbitrary retail-PKG decryption or options to import alternative keys.
-Readable unencrypted metadata remains accessible when other keys are unavailable.
+Header inspection and entry-table listing require no keys. By default extraction
+uses the built-in entry key for slot 3 and the FPKG filesystem key scheme.
+
+Provide a **known** package passcode to derive all seven entry keys:
+
+```sh
+orbis-pkg-util info game.pkg --passcode-file ./passcode.txt --json
+orbis-pkg-util extract game.pkg --passcode-file ./passcode.txt -o ./game
+orbis-pkg-util install update.pkg --base ./game --passcode-file ./passcode.txt
+orbis-pkg-util verify game.pkg --integrity --passcode-file - < ./passcode.txt
+```
+
+The file/stdin must contain 32 printable ASCII characters, optionally followed
+by LF or CRLF. Passcodes are checked against the package's stored key digests
+before use; an incorrect passcode fails instead of falling back to a built-in
+key. Passcodes are not included in JSON, diagnostics, or installation state.
+Use a file with appropriate access permissions; no passcode value is accepted
+on the command line. The library exposes `Pkg::load_passcode` for callers.
+
+This does not provide arbitrary retail-PKG decryption or alternative RSA-key
+import. Readable unencrypted metadata remains accessible when keys are missing.
 
 ## Install a full-file update
 
@@ -186,7 +234,8 @@ Supported inputs must have PS4 content type `0x1A`, a cumulative-update flag
 format. The update version must be newer than the active version. Reinstalling
 the same version and downgrades are refused; use `rollback` for the retained version.
 Delta type `0x1E`, delta flags, unsupported classifications, missing identity fields,
-and unknown metadata entries are rejected. The existing FPKG key limitations apply.
+and unsafe metadata paths are rejected. Unknown metadata is retained under
+resolved/generated filenames. The existing FPKG key limitations apply.
 No compatibility bypass is provided.
 
 The entire update directory is replaced on upgrade. Files absent from the new

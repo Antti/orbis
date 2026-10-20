@@ -20,6 +20,132 @@ fn inode_offset(index: usize, signed: bool) -> usize {
     BLOCK_SIZE + index * if signed { 712 } else { 168 }
 }
 
+// Independent signed-image encoder, including single and double indirect blocks.
+fn authenticated_pfs(count: usize, encrypted: bool) -> Vec<u8> {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let mut bytes = pfs_bytes(&vec![0x5a; count * BLOCK_SIZE], true);
+    bytes[0x370..0x380].fill(0x17);
+    if encrypted {
+        bytes[0x1c] |= 4;
+    }
+    let mut key = <Hmac<Sha256> as Mac>::new_from_slice(&EKPFS).unwrap();
+    key.update(&[2, 0, 0, 0]);
+    key.update(&[0x17; 16]);
+    let key = key.finalize().into_bytes();
+    let sign = |b: &mut [u8], slot: usize, block: usize| {
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&key).unwrap();
+        mac.update(&b[block * BLOCK_SIZE..(block + 1) * BLOCK_SIZE]);
+        b[slot..slot + 32].copy_from_slice(&mac.finalize().into_bytes());
+        put_u32(b, slot + 32, block as u32);
+    };
+    let inode = inode_offset(2, true);
+    let capacity = BLOCK_SIZE / 36;
+    for i in 0..count.min(12) {
+        sign(&mut bytes, inode + 100 + i * 36, 4 + i);
+    }
+    if count > 12 {
+        let single = bytes.len() / BLOCK_SIZE;
+        bytes.resize(bytes.len() + BLOCK_SIZE, 0);
+        for i in 0..(count - 12).min(capacity) {
+            sign(&mut bytes, single * BLOCK_SIZE + i * 36, 16 + i);
+        }
+        sign(&mut bytes, inode + 100 + 12 * 36, single);
+        if count > 12 + capacity {
+            let double = bytes.len() / BLOCK_SIZE;
+            bytes.resize(bytes.len() + 2 * BLOCK_SIZE, 0);
+            for i in 0..count - 12 - capacity {
+                sign(
+                    &mut bytes,
+                    (double + 1) * BLOCK_SIZE + i * 36,
+                    16 + capacity + i,
+                );
+            }
+            sign(&mut bytes, double * BLOCK_SIZE, double + 1);
+            sign(&mut bytes, inode + 100 + 13 * 36, double);
+        }
+    }
+    for i in 0..2 {
+        sign(&mut bytes, inode_offset(i, true) + 100, 2 + i);
+    }
+    // Header S64 descriptor authenticates the inode-table block.
+    sign(&mut bytes, 0xb8, 1);
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&key).unwrap();
+    mac.update(&bytes[..0x5a0]);
+    bytes[0x380..0x3a0].copy_from_slice(&mac.finalize().into_bytes());
+    if encrypted {
+        encrypt_pfs(&mut bytes);
+    }
+    bytes
+}
+
+#[test]
+fn integrity_verifies_direct_indirect_and_encrypted_pfs_blocks() {
+    for count in [1, 12, 13, 12 + BLOCK_SIZE / 36 + 1] {
+        for encrypted in [false, true] {
+            let bytes = authenticated_pfs(count, encrypted);
+            let pfs = open_slice(&bytes, Some(&EKPFS)).unwrap();
+            let report = pfs.verify_integrity(Some(&EKPFS), || false).unwrap();
+            assert_eq!(report.missing, 0, "count {count}, encrypted {encrypted}");
+            assert!(report.checked >= count + 4);
+            assert_eq!(
+                pfs.verify_integrity(Some(&EKPFS), || true)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::Interrupted
+            );
+            // Readability still succeeds after changing data, integrity must not.
+            let mut bad = bytes.clone();
+            bad[4 * BLOCK_SIZE + 127] ^= 1;
+            let pfs = open_slice(&bad, Some(&EKPFS)).unwrap();
+            assert!(
+                pfs.verify_integrity(Some(&EKPFS), || false)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("HMAC mismatch")
+            );
+            if count > 12 {
+                let mut bad = bytes.clone();
+                bad[(4 + count - 1) * BLOCK_SIZE + 127] ^= 1;
+                let pfs = open_slice(&bad, Some(&EKPFS)).unwrap();
+                assert!(pfs.verify_integrity(Some(&EKPFS), || false).is_err());
+            }
+        }
+    }
+}
+
+#[test]
+fn integrity_never_certifies_absent_macs_or_missing_keys() {
+    let bytes = pfs_bytes(b"hello", true);
+    let pfs = open_slice(&bytes, None).unwrap();
+    assert!(
+        pfs.verify_integrity(Some(&EKPFS), || false)
+            .unwrap()
+            .missing
+            > 0
+    );
+    assert_eq!(pfs.verify_integrity(None, || false).unwrap().missing, 1);
+    let bytes = authenticated_pfs(1, false);
+    for at in [0x380, 0xb8, BLOCK_SIZE + 100] {
+        let mut bad = bytes.clone();
+        bad[at] ^= 1;
+        let pfs = open_slice(&bad, None).unwrap();
+        assert!(pfs.verify_integrity(Some(&EKPFS), || false).is_err());
+    }
+    assert!(
+        open_slice(&bytes, None)
+            .unwrap()
+            .verify_integrity(Some(&[0x99; 32]), || false)
+            .is_err()
+    );
+    let unsigned = pfs_bytes(b"hello", false);
+    let report = open_slice(&unsigned, None)
+        .unwrap()
+        .verify_integrity(None, || false)
+        .unwrap();
+    assert_eq!((report.checked, report.missing), (0, 0));
+}
+
 fn pointer_offset(index: usize, signed: bool) -> usize {
     100 + if signed { index * 36 + 32 } else { index * 4 }
 }
