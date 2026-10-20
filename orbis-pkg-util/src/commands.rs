@@ -27,6 +27,84 @@ enum Error {
 
 pub(crate) fn run(cli: &Cli, out: &mut impl Write, cancelled: Arc<AtomicBool>) -> Result<u8> {
     match &cli.command {
+        Command::Install {
+            pkg_path,
+            base,
+            dry_run,
+            json,
+        } => {
+            let mut pkg = open(pkg_path)?;
+            let _ = pkg.load_entry_keys();
+            orbis_pkg_util::install::update_metadata(&pkg)?;
+            prepare_filesystem(&mut pkg)?;
+            if *dry_run {
+                let plan = orbis_pkg_util::install::plan_with_progress(
+                    &pkg,
+                    base,
+                    ConsoleProgress::with_options(cli.quiet, cancelled),
+                )?;
+                if *json {
+                    write_json(out, &json!({ "schema_version": 1, "plan": plan }))?;
+                } else {
+                    writeln!(
+                        out,
+                        "{}: {} -> {}",
+                        plan.title_id, plan.current_version, plan.update_version
+                    )?;
+                    writeln!(out, "Destination: {}", escaped(&plan.destination))?;
+                    writeln!(
+                        out,
+                        "Temporary space: approximately {} ({} available)",
+                        human_size(plan.required_free_bytes),
+                        human_size(plan.available_bytes)
+                    )?;
+                    for file in plan.files {
+                        let action = match file.change {
+                            orbis_pkg_util::install::ChangeKind::Add => "add",
+                            orbis_pkg_util::install::ChangeKind::Replace => "replace",
+                            orbis_pkg_util::install::ChangeKind::RemoveFromUpdate => {
+                                "remove from update"
+                            }
+                        };
+                        writeln!(out, "{action}: {}", file.path.escape_debug())?;
+                    }
+                    writeln!(
+                        out,
+                        "The base stays unchanged; paths removed from the update fall back to the base."
+                    )?;
+                }
+            } else {
+                let progress = ConsoleProgress::with_options(cli.quiet, cancelled);
+                let plan = orbis_pkg_util::install::install(&pkg, base, progress)?;
+                if !cli.quiet {
+                    diagnostic(&format!(
+                        "Installed {} version {} to {}. Previous installation is available with rollback --base {}.",
+                        plan.title_id,
+                        plan.update_version,
+                        escaped(&plan.destination),
+                        escaped(base)
+                    ));
+                }
+            }
+            Ok(0)
+        }
+        Command::Rollback { base } => {
+            orbis_pkg_util::install::rollback_with_progress(
+                base,
+                ConsoleProgress::with_options(cli.quiet, cancelled),
+            )?;
+            if !cli.quiet {
+                diagnostic("Previous installation restored.");
+            }
+            Ok(0)
+        }
+        Command::Recover { base } => {
+            orbis_pkg_util::install::recover(base)?;
+            if !cli.quiet {
+                diagnostic("Recovery and staging cleanup completed.");
+            }
+            Ok(0)
+        }
         Command::Info { pkg_path, json } => info(pkg_path, *json, out),
         Command::List {
             pkg_path,

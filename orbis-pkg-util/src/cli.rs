@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
 #[command(name = "orbis-pkg-util", version, propagate_version = true)]
-#[command(about = "Inspect, extract, and check PS4 PKG files")]
+#[command(about = "Inspect, extract, check, and install PS4 PKG updates")]
 #[command(
     after_help = "Examples:\n  orbis-pkg-util info game.pkg\n  orbis-pkg-util list game.pkg --json\n  orbis-pkg-util extract game.pkg -o ./game\n  orbis-pkg-util verify game.pkg\n\nExit codes: 0 complete, 1 failed, 2 invalid arguments, 3 incomplete, 130 interrupted."
 )]
@@ -30,6 +30,39 @@ pub struct Selection {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Install a full-file update into the base directory's sibling -UPDATE directory
+    #[command(
+        after_help = "Examples:\n  orbis-pkg-util install update.pkg --base ./games/CUSA12345 --dry-run\n  orbis-pkg-util install update.pkg --base ./games/CUSA12345\n\nStop the emulator first. The base directory is preserved. Only full-file cumulative\nor first updates with matching title/content IDs and a newer APP_VER are accepted.\nBinary deltas, downgrades, modified managed updates, and unmanaged update directories\nare refused. One previous installation is kept for rollback.\nAfter a process crash, run recover --base <DIR> before retrying."
+    )]
+    Install {
+        #[arg(value_name = "PKG_FILE")]
+        pkg_path: PathBuf,
+        /// Original extracted base game directory
+        #[arg(long, value_name = "DIR")]
+        base: PathBuf,
+        /// Show the version, path changes, and space estimate without writing anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit the dry-run plan as schema-versioned JSON
+        #[arg(long, requires = "dry_run")]
+        json: bool,
+    },
+    /// Restore the previous managed update, or return to the base game
+    #[command(
+        after_help = "Example:\n  orbis-pkg-util rollback --base ./games/CUSA12345\n\nStop the emulator first. One rollback is available after each successful install.\nLocally modified update files are preserved by refusing rollback."
+    )]
+    Rollback {
+        #[arg(long, value_name = "DIR")]
+        base: PathBuf,
+    },
+    /// Recover an interrupted installation or rollback; clean abandoned staging files
+    #[command(
+        after_help = "Example:\n  orbis-pkg-util recover --base ./games/CUSA12345\n\nStop the emulator first. A pending transaction restores the previous installation.\nA committed transaction remains installed. Recovery is safe to repeat."
+    )]
+    Recover {
+        #[arg(long, value_name = "DIR")]
+        base: PathBuf,
+    },
     /// Extract metadata and filesystem contents to a directory
     #[command(
         after_help = "Examples:\n  orbis-pkg-util extract game.pkg\n  orbis-pkg-util extract game.pkg -o ./game --path sce_sys/param.sfo --metadata-only\n  orbis-pkg-util extract game.pkg -o ./game --path textures\n\nThe default destination is ./<TITLE_ID> in the current directory. Existing files\nare preserved unless --force is supplied. Each file is published after a complete\nwrite; files completed before a later failure remain. Exit 3 means entries were\nskipped. --quiet never hides those warnings."
