@@ -259,10 +259,15 @@ pub(super) fn read_json<T: DeserializeOwned>(dir: &Dir, name: &str) -> Result<T>
     Ok(serde_json::from_slice(&data)?)
 }
 pub(super) fn write_json(dir: &Dir, name: &str, value: &impl Serialize) -> Result<()> {
+    let data = serde_json::to_vec(value)?;
+    // Never activate an update whose manifest our own recovery reader refuses.
+    if data.len() as u64 > MAX_JSON {
+        return Err(invalid("installation manifest is too large"));
+    }
     let tmp = format!(".write-{:032x}.tmp", fastrand::u128(..));
     let result = (|| {
         let mut file = dir.open_with(&tmp, OpenOptions::new().write(true).create_new(true))?;
-        file.write_all(&serde_json::to_vec(value)?)?;
+        file.write_all(&data)?;
         file.sync_all()?;
         drop(file);
         dir.rename(&tmp, dir, name)?;
@@ -403,4 +408,21 @@ pub(super) fn verify_manifest<P: ExtractProgress>(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oversized_state_is_refused_before_replacing_readable_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Dir::open_ambient_dir(temp.path(), ambient_authority()).unwrap();
+        write_json(&dir, "state.json", &State::default()).unwrap();
+        let oversized = "x".repeat(MAX_JSON as usize);
+        assert!(write_json(&dir, "state.json", &oversized).is_err());
+        let state: State = read_json(&dir, "state.json").unwrap();
+        assert_eq!(state, State::default());
+        assert_eq!(dir.entries().unwrap().count(), 1);
+    }
 }
