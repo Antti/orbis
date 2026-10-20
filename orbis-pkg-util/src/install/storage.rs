@@ -275,7 +275,9 @@ pub(super) fn write_json(dir: &Dir, name: &str, value: &impl Serialize) -> Resul
 }
 pub(super) fn sync_dir(dir: &Dir) -> Result<()> {
     #[cfg(unix)]
-    dir.try_clone()?.into_std_file().sync_all()?;
+    // On Linux, Dir may hold an O_PATH descriptor, which fsync rejects with
+    // EBADF. Reopen "." for reading while retaining the directory capability.
+    dir.open(".")?.sync_all()?;
     #[cfg(not(unix))]
     let _ = dir;
     Ok(())
