@@ -622,11 +622,12 @@ fn compressed_file_images_use_stored_size_when_decoding() {
         let mut bytes = pfs_bytes(&container, false);
         let base = inode_offset(2, false);
         put_u32(&mut bytes, base + 4, 1);
-        put_u64(&mut bytes, base + 8, contents.len() as u64);
+        put_u64(&mut bytes, base + 16, contents.len() as u64);
         let pfs = open_slice(&bytes, None).unwrap();
         let file = payload(&pfs);
         assert!(file.is_compressed());
         assert!(file.as_slice().is_none());
+        assert_eq!(file.len(), contents.len() as u64);
         assert_eq!(file.compressed_len(), container.len() as u64);
         let mut reader = file.reader();
         assert_eq!(

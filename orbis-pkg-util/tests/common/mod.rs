@@ -58,10 +58,10 @@ pub fn pfs(name: &str, contents: &[u8], compressed: bool) -> Vec<u8> {
         } else {
             BS
         };
-        le64(&mut b, base + 8, len as u64);
+        le64(&mut b, base + 16, len as u64);
         le64(
             &mut b,
-            base + 16,
+            base + 8,
             if i == 2 {
                 contents.len() as u64
             } else {

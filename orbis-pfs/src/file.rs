@@ -62,12 +62,18 @@ impl<'a> File<'a> {
 
     #[must_use]
     pub fn len(&self) -> u64 {
-        self.inode_ref().size()
+        let inode = self.inode_ref();
+        if self.is_compressed() {
+            inode.compressed_len()
+        } else {
+            inode.size()
+        }
     }
 
+    /// Stored byte length, including the PFSC header and block table.
     #[must_use]
     pub fn compressed_len(&self) -> u64 {
-        self.inode_ref().compressed_len()
+        self.inode_ref().size()
     }
 
     /// Returns the last access time as seconds since the Unix epoch.
@@ -318,11 +324,7 @@ impl Image for PfsFileImage<'_> {
 }
 
 fn stored_size(inode: &Inode) -> u64 {
-    if inode.flags().is_compressed() {
-        inode.compressed_len()
-    } else {
-        inode.size()
-    }
+    inode.size()
 }
 
 fn pfs_read_at(pfs: &Pfs<'_>, inode: usize, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
