@@ -8,6 +8,14 @@ Rust library for parsing and extracting PlayStation 4 PKG files.
 - Extract PKG metadata (content ID, title ID, content type, flags)
 - Decrypt PKG entries
 
+## Inspecting unsupported packages
+
+`Pkg::parse(bytes)` reads metadata without decrypting keys. Headers, the entry
+table, and unencrypted entry payloads remain available. Call `load_entry_keys()`
+before reading encrypted entries and `load_pfs_key()` before opening encrypted
+filesystem data. The existing `Pkg::new(bytes)` constructor still loads both
+keys eagerly and fails if either cannot be loaded.
+
 ## Usage
 
 ```no_run

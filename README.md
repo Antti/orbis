@@ -42,11 +42,23 @@ View PKG metadata:
 orbis-pkg-util info game.pkg
 ```
 
-List PKG entries:
+List metadata and filesystem contents:
 
 ```bash
 orbis-pkg-util list game.pkg
 ```
+
+Select files, inspect metadata as JSON, or check data without extracting:
+
+```bash
+orbis-pkg-util extract game.pkg -o ./extracted --path sce_sys/param.sfo --metadata-only
+orbis-pkg-util info game.pkg --json
+orbis-pkg-util verify game.pkg
+```
+
+See the [CLI guide](orbis-pkg-util/README.md) for path selection, JSON fields,
+exit codes, safe replacement behavior, and shell completions. `verify` checks
+readability and decompression; it does not verify authenticity.
 
 ## Crates
 

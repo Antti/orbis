@@ -19,8 +19,13 @@ headers, block reads, decompression, extraction boundaries, and overwrite policy
 without downloading game data. Extraction tests write only into temporary
 directories. Unix-specific symlink tests run on Linux and macOS.
 
-Library README examples are included in doctests. CLI smoke tests check the
-documented commands and help output.
+Library README examples are included in doctests. CLI integration tests run
+synthetic packages through metadata inspection, filesystem listing, JSON output,
+selected extraction, verification, completion generation, and failure handling.
+They check exit codes and stdout/stderr separately, including warnings in quiet
+mode and closed-pipe handling on Unix. Library tests cover atomic replacement,
+concurrent destination creation, cancellation, and cleanup after corrupt input.
+The shared fixture builders live in `orbis-pkg-util/tests/common/`.
 
 Synthetic fixtures do not replace compatibility checks against real packages.
 Before a release, extract a known package and compare file contents with a trusted
