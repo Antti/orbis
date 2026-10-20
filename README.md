@@ -36,7 +36,7 @@ orbis-pkg-util extract game.pkg
 View PKG metadata:
 
 ```bash
-orbis-pkg-util metadata game.pkg
+orbis-pkg-util info game.pkg
 ```
 
 List PKG entries:
@@ -52,6 +52,12 @@ orbis-pkg-util list game.pkg
 | [orbis-pfs](orbis-pfs/) | Library for reading PFS (PlayStation File System) images |
 | [orbis-pkg](orbis-pkg/) | Library for parsing and extracting PS4 PKG files |
 | [orbis-pkg-util](orbis-pkg-util/) | Command-line utility for PKG operations |
+
+## Development
+
+Run `cargo test --workspace --all-features --locked` for the regression tests and
+documentation examples. See [TESTING.md](TESTING.md) for the CI checks and fixture
+coverage.
 
 ## Performance
 
