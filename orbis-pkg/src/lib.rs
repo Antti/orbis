@@ -54,6 +54,7 @@ use open_error::*;
 pub mod entry;
 pub mod header;
 pub mod keys;
+pub mod sfo;
 
 #[cfg(doctest)]
 #[doc = include_str!("../README.md")]

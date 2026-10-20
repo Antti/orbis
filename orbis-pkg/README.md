@@ -7,6 +7,12 @@ Rust library for parsing and extracting PlayStation 4 PKG files.
 - Parse PKG headers and entry tables
 - Extract PKG metadata (content ID, title ID, content type, flags)
 - Decrypt PKG entries
+- Parse bounds-checked PARAM.SFO identity fields and numeric application versions
+
+`sfo::Sfo::parse` retains string, integer, and binary value types.
+`sfo::AppMetadata::parse` requires `TITLE_ID`, `CONTENT_ID`, `CATEGORY`, and
+`APP_VER`, and checks that the content ID names the same title. Application
+versions are compared numerically; the content ID's version field is unrelated.
 
 ## Inspecting unsupported packages
 
