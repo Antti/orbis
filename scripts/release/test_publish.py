@@ -34,7 +34,9 @@ def make_assets(directory: Path) -> None:
 class FakeGitHub:
     """An intentionally small state machine that rejects unexpected GH calls."""
 
-    def __init__(self, tag_sha=None, draft=None, fail=None, assets=(), verification=None):
+    def __init__(
+        self, tag_sha=None, draft=None, fail=None, assets=(), verification=None, release_id=123
+    ):
         self.tag_sha = tag_sha
         self.draft = draft
         self.fail = fail
@@ -42,6 +44,7 @@ class FakeGitHub:
         self.uploads = []
         self.assets = list(assets)
         self.verification = verification
+        self.release_id = release_id
 
     def __call__(self, *args):
         self.calls.append(args)
@@ -63,17 +66,41 @@ class FakeGitHub:
         if args == ("api", "--paginate", "--slurp", f"repos/{REPO}/releases?per_page=100"):
             self.maybe_fail("releases")
             matching = [] if self.draft is None else [
-                {"tag_name": TAG, "draft": self.draft, "assets": [{"name": name} for name in self.assets]}
+                {
+                    "id": self.release_id, "tag_name": TAG, "draft": self.draft,
+                    "assets": [{"name": name} for name in self.assets],
+                }
             ]
             return json.dumps([[{"tag_name": "v0.0.1", "draft": False}], matching])
-        if args[:3] == ("release", "create", TAG):
+        if args[:4] == ("api", "--method", "POST", f"repos/{REPO}/releases"):
             self.maybe_fail("create")
             if self.draft is not None or self.tag_sha != SHA:
                 raise AssertionError("Draft requires an existing matching tag and no release")
-            if "--draft" not in args or "--verify-tag" not in args:
-                raise AssertionError("Release must start as a draft using the verified tag")
+            if len(args[4:]) % 2:
+                raise AssertionError("Creation fields must be flag/value pairs")
+            fields = {}
+            for flag, value in zip(args[4::2], args[5::2]):
+                name, separator, data = value.partition("=")
+                if not separator or name in fields:
+                    raise AssertionError(f"Invalid or duplicate creation field: {value}")
+                fields[name] = (flag, data)
+            expected_fields = {
+                "tag_name": ("-f", TAG),
+                "target_commitish": ("-f", SHA),
+                "name": ("-f", f"Orbis {VERSION}"),
+                "draft": ("-F", "true"),
+                "generate_release_notes": ("-F", "true"),
+                "body": (
+                    "-f",
+                    f"Built from `{SHA}`. Includes Linux x86_64 AppImage/Flatpak bundles "
+                    "and unsigned macOS Intel/Apple Silicon CLI archives. "
+                    "Verify downloads with SHA256SUMS. See RELEASE.md for installation.",
+                ),
+            }
+            if fields != expected_fields:
+                raise AssertionError(f"Unexpected release creation fields: {fields}")
             self.draft = True
-            return "https://example.invalid/draft"
+            return self.release_response()
         if args[:3] == ("release", "upload", TAG):
             if self.fail == "upload":
                 # A failed multi-file upload may already have installed a subset.
@@ -90,21 +117,22 @@ class FakeGitHub:
             self.assets = [path.name for path in paths]
             return ""
         if args == ("api", f"repos/{REPO}/releases/tags/{TAG}"):
+            # GitHub's by-tag endpoint cannot retrieve a draft, even when the
+            # token can list it, upload to it, and retrieve it by release ID.
+            if self.draft is not False:
+                raise subprocess.CalledProcessError(
+                    1, ["gh", *args], stderr="gh: Not Found (HTTP 404)"
+                )
+            return self.release_response()
+        if args == ("api", f"repos/{REPO}/releases/{self.release_id}"):
             self.maybe_fail("verify")
-            assets = [{"name": path.name, "size": path.stat().st_size} for path in self.uploads[-1]]
-            if self.verification == "extra":
-                assets.append({"name": "extra.zip", "size": 3})
-            elif self.verification == "missing":
-                assets.pop()
-            elif self.verification == "size":
-                assets[0]["size"] += 1
-            return json.dumps({
-                "id": 123,
-                "draft": False if self.verification == "public" else self.draft,
-                "assets": assets,
-            })
+            if self.draft is None:
+                raise subprocess.CalledProcessError(
+                    1, ["gh", *args], stderr="gh: Not Found (HTTP 404)"
+                )
+            return self.release_response()
         if args == (
-            "api", "--method", "PATCH", f"repos/{REPO}/releases/123",
+            "api", "--method", "PATCH", f"repos/{REPO}/releases/{self.release_id}",
             "-F", "draft=false", "-f", "make_latest=legacy",
         ):
             self.maybe_fail("edit")
@@ -113,6 +141,22 @@ class FakeGitHub:
             self.draft = False
             return ""
         raise AssertionError(f"Unexpected GitHub command: {args}")
+
+    def release_response(self):
+        sizes = {path.name: path.stat().st_size for path in self.uploads[-1]} if self.uploads else {}
+        assets = [{"name": name, "size": sizes.get(name, 0)} for name in self.assets]
+        if self.uploads:
+            if self.verification == "extra":
+                assets.append({"name": "extra.zip", "size": 3})
+            elif self.verification == "missing":
+                assets.pop()
+            elif self.verification == "size":
+                assets[0]["size"] += 1
+        return json.dumps({
+            "id": self.release_id,
+            "draft": False if self.verification == "public" else self.draft,
+            "assets": assets,
+        })
 
     def maybe_fail(self, stage):
         if self.fail == stage:
@@ -207,9 +251,9 @@ class PublishTests(unittest.TestCase):
                 ("api", f"repos/{REPO}/git/matching-refs/tags/{TAG}"),
                 ("api", "--method", "POST"),
                 ("api", "--paginate", "--slurp"),
-                ("release", "create", TAG),
+                ("api", "--method", "POST"),
                 ("release", "upload", TAG),
-                ("api", f"repos/{REPO}/releases/tags/{TAG}"),
+                ("api", f"repos/{REPO}/releases/123"),
                 ("api", "--method", "PATCH"),
             ],
         )
@@ -227,8 +271,39 @@ class PublishTests(unittest.TestCase):
         remote = FakeGitHub(tag_sha=SHA)
         self.run_publish(remote)
         self.assertIn(("api", f"repos/{REPO}/commits/{TAG}"), remote.calls)
-        self.assertFalse(any(call[:3] == ("api", "--method", "POST") for call in remote.calls))
+        self.assertFalse(any(
+            call[:4] == ("api", "--method", "POST", f"repos/{REPO}/git/refs")
+            for call in remote.calls
+        ))
         self.assertFalse(remote.draft)
+
+    def test_new_and_resumed_drafts_are_verified_by_id_when_tag_lookup_returns_404(self):
+        for resumed, release_id in [(False, 418330940), (True, 418330941)]:
+            with self.subTest(resumed=resumed, release_id=release_id):
+                remote = FakeGitHub(
+                    tag_sha=SHA if resumed else None,
+                    draft=True if resumed else None,
+                    release_id=release_id,
+                )
+                if resumed:
+                    with self.assertRaises(subprocess.CalledProcessError) as error:
+                        remote("api", f"repos/{REPO}/releases/tags/{TAG}")
+                    self.assertIn("HTTP 404", error.exception.stderr)
+                    existing = json.loads(remote("api", f"repos/{REPO}/releases/{release_id}"))
+                    self.assertEqual(existing["id"], release_id)
+                    self.assertTrue(existing["draft"])
+                    remote.calls.clear()
+                self.run_publish(remote)
+                self.assertNotIn(("api", f"repos/{REPO}/releases/tags/{TAG}"), remote.calls)
+                self.assertIn(("api", f"repos/{REPO}/releases/{release_id}"), remote.calls)
+                self.assertEqual(
+                    sum(
+                        call[:4] == ("api", "--method", "POST", f"repos/{REPO}/releases")
+                        for call in remote.calls
+                    ),
+                    0 if resumed else 1,
+                )
+                self.assertFalse(remote.draft)
 
     def test_tag_pointing_to_another_commit_fails_without_mutations(self):
         remote = FakeGitHub(tag_sha="b" * 40)
@@ -251,7 +326,10 @@ class PublishTests(unittest.TestCase):
             with self.subTest(assets=assets):
                 remote = FakeGitHub(tag_sha=SHA, draft=True, assets=assets)
                 self.run_publish(remote)
-                self.assertFalse(any(call[:3] == ("release", "create", TAG) for call in remote.calls))
+                self.assertFalse(any(
+                    call[:4] == ("api", "--method", "POST", f"repos/{REPO}/releases")
+                    for call in remote.calls
+                ))
                 self.assertFalse(any(call[:3] == ("api", "--method", "POST") for call in remote.calls))
                 self.assertEqual(len(remote.uploads), 1)
                 self.assertFalse(remote.draft)
@@ -274,7 +352,18 @@ class PublishTests(unittest.TestCase):
                 self.run_publish(remote)
                 self.assertFalse(remote.draft)
                 self.assertEqual(
-                    sum(call[:3] == ("api", "--method", "POST") for call in remote.calls), 1
+                    sum(
+                        call[:4] == ("api", "--method", "POST", f"repos/{REPO}/git/refs")
+                        for call in remote.calls
+                    ),
+                    1,
+                )
+                self.assertEqual(
+                    sum(
+                        call[:4] == ("api", "--method", "POST", f"repos/{REPO}/releases")
+                        for call in remote.calls
+                    ),
+                    2 if failure == "create" else 1,
                 )
                 # Once public, a further rerun must not replace any assets.
                 uploads = len(remote.uploads)
