@@ -13,15 +13,26 @@ categories = ["command-line-utilities"]
 
 [features]
 default = ["cli"]
-cli = ["dep:clap", "dep:indicatif"]
+cli = ["dep:clap", "dep:clap_complete", "dep:ctrlc", "dep:indicatif", "dep:serde_json"]
 
 [dependencies]
 cap-std = "4.0.3"
+fastrand = "2"
 memmap2 = "0.9"
 rayon = "1.10"
 orbis-pkg.workspace = true
 orbis-pfs.workspace = true
 snafu.workspace = true
+clap_complete = { version = "4.5", optional = true }
+ctrlc = { version = "3.5", optional = true }
+serde_json = { version = "1", optional = true }
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+rustix = { version = "1", features = ["fs"] }
+
+[target.'cfg(windows)'.dependencies]
+winx = "0.36.4"
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
 
 [dependencies.clap]
 version = "4.5"
@@ -37,6 +48,11 @@ name = "orbis-pkg-util"
 required-features = ["cli"]
 
 [dev-dependencies]
+aes.workspace = true
+sha2.workspace = true
+cbc = "0.1.2"
+hmac = "0.12.1"
+xts-mode = "0.5.1"
 rsa = "0.9"
 rand = "0.8"
 flate2 = "1.1.9"

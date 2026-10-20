@@ -4,6 +4,37 @@ use std::path::PathBuf;
 /// Errors that can occur during PKG extraction.
 #[derive(Debug, Snafu)]
 pub enum ExtractError {
+    #[snafu(display(
+        "operation interrupted; completed files remain and unfinished files were discarded"
+    ))]
+    Cancelled,
+
+    #[snafu(display("extraction incomplete: {skipped} entries skipped"))]
+    Incomplete { skipped: usize },
+
+    #[snafu(display(
+        "invalid selection '{path}'; use relative paths with / separators, without . or .."
+    ))]
+    InvalidSelection { path: String },
+
+    #[snafu(display(
+        "path '{path}' was not found in the selected scope; use list to inspect available paths"
+    ))]
+    PathNotFound { path: String },
+
+    #[snafu(display("multiple package items target '{path}'"))]
+    DuplicatePath { path: String },
+
+    #[snafu(display("combined file sizes exceed the supported range"))]
+    SizeOverflow,
+
+    #[snafu(display("file '{path}' has {actual} bytes, expected {expected}"))]
+    FileSizeMismatch {
+        path: String,
+        expected: u64,
+        actual: u64,
+    },
+
     #[snafu(display("directory inode appears more than once at {path}"))]
     RepeatedDirectory { path: String },
 

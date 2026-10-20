@@ -32,6 +32,11 @@ use zerocopy::byteorder::little_endian::{U16, U32, U64};
 const VERSION: u64 = 1;
 const FORMAT: u64 = 20130315;
 
+/// Reads filesystem mode flags without loading inodes or requiring a key.
+pub fn read_mode(data: &[u8]) -> Result<Mode, ReadError> {
+    Ok(PfsHeader::from_bytes(data)?.mode())
+}
+
 /// The size of the full PFS header on disk (includes key seed area).
 pub(crate) const HEADER_SIZE: usize = 0x380;
 

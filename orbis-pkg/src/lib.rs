@@ -103,17 +103,43 @@ impl<R: AsRef<[u8]>> Pkg<R> {
     /// # }
     /// ```
     pub fn new(raw: R) -> Result<Self, OpenError> {
+        let mut pkg = Self::parse(raw)?;
+        pkg.load_entry_keys()?;
+        pkg.load_pfs_key()?;
+        Ok(pkg)
+    }
+
+    /// Parses metadata without decrypting keys.
+    ///
+    /// Headers, entry tables, and unencrypted entries remain readable when a
+    /// package uses unsupported keys. Call [`Self::load_entry_keys`] before
+    /// reading encrypted entries and [`Self::load_pfs_key`] before opening PFS.
+    pub fn parse(raw: R) -> Result<Self, OpenError> {
         let header = PkgHeader::read(raw.as_ref()).context(ReadHeaderFailedSnafu)?;
 
-        let mut pkg = Self {
+        Ok(Self {
             raw,
             header,
             entry_key3: Vec::new(),
             ekpfs: Vec::new(),
-        };
-        pkg.load_entry_key3()?;
-        pkg.load_ekpfs()?;
-        Ok(pkg)
+        })
+    }
+
+    /// Loads the supported entry key (slot 3), independently of the PFS key.
+    pub fn load_entry_keys(&mut self) -> Result<(), OpenError> {
+        if self.entry_key3.is_empty() {
+            self.load_entry_key3()?;
+        }
+        Ok(())
+    }
+
+    /// Loads the FPKG filesystem key. Encrypted image-key entries require
+    /// [`Self::load_entry_keys`] first.
+    pub fn load_pfs_key(&mut self) -> Result<(), OpenError> {
+        if self.ekpfs.is_empty() {
+            self.load_ekpfs()?;
+        }
+        Ok(())
     }
 
     /// Returns a reference to the PKG header.
