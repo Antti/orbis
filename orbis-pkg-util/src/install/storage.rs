@@ -324,11 +324,23 @@ pub(super) fn validate_path(path: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn inventory<P: ExtractProgress>(dir: &Dir, progress: &P) -> Result<Vec<FileRecord>> {
+pub(super) fn inventory<P: ExtractProgress>(root: &Dir, progress: &P) -> Result<Vec<FileRecord>> {
     let mut records = Vec::new();
-    let mut pending = vec![(dir.try_clone()?, String::new())];
+    // Queue paths, not open handles: a wide tree must not exhaust the process's
+    // file descriptors before we get a chance to process its subdirectories.
+    let mut pending = vec![String::new()];
     let mut buffer = vec![0; 1024 * 1024];
-    while let Some((dir, prefix)) = pending.pop() {
+    while let Some(prefix) = pending.pop() {
+        if progress.is_cancelled() {
+            return Err(ExtractError::Cancelled.into());
+        }
+        let path = if prefix.is_empty() {
+            "."
+        } else {
+            prefix.trim_end_matches('/')
+        };
+        require_directory(root, path)?;
+        let dir = root.open_dir(path)?;
         for entry in dir.entries()? {
             if progress.is_cancelled() {
                 return Err(ExtractError::Cancelled.into());
@@ -345,7 +357,7 @@ pub(super) fn inventory<P: ExtractProgress>(dir: &Dir, progress: &P) -> Result<V
             validate_path(&path)?;
             let kind = entry.file_type()?;
             if kind.is_dir() {
-                pending.push((dir.open_dir(&name)?, format!("{path}/")));
+                pending.push(format!("{path}/"));
             } else if kind.is_file() {
                 let mut file = dir.open(&name)?;
                 let mut hash = Sha256::new();
@@ -413,6 +425,49 @@ pub(super) fn verify_manifest<P: ExtractProgress>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inventories_wide_trees_with_bounded_handles() {
+        // Limit only a subprocess: changing this process's limit would interfere
+        // with unrelated tests running on other threads.
+        #[cfg(unix)]
+        if std::env::var_os("ORBIS_TEST_INVENTORY_LIMIT").is_none() {
+            let output = std::process::Command::new("sh")
+                .args(["-c", "ulimit -n 256 && exec \"$@\"", "inventory-test"])
+                .arg(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "install::storage::tests::inventories_wide_trees_with_bounded_handles",
+                    "--nocapture",
+                ])
+                .env("ORBIS_TEST_INVENTORY_LIMIT", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "stdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut expected = Vec::new();
+        for index in 0..300 {
+            let directory = format!("directory-{index:03}/nested");
+            std::fs::create_dir_all(temp.path().join(&directory)).unwrap();
+            let path = format!("{directory}/file");
+            std::fs::write(temp.path().join(&path), b"hello").unwrap();
+            expected.push(FileRecord {
+                path,
+                bytes: 5,
+                sha256: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824".into(),
+            });
+        }
+        let dir = Dir::open_ambient_dir(temp.path(), ambient_authority()).unwrap();
+        assert_eq!(inventory(&dir, &SilentProgress).unwrap(), expected);
+    }
 
     #[test]
     fn oversized_state_is_refused_before_replacing_readable_state() {
