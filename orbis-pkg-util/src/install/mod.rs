@@ -282,6 +282,7 @@ fn check_space(required: u64, available: u64) -> Result<()> {
 
 /// Installs a complete update. A failed extraction never changes the active update.
 /// Keeps one previous update (or the base-only state) available for [`rollback`].
+/// Final sync failures after commit are reported through [`ExtractProgress::warning`].
 pub fn install<R: AsRef<[u8]> + Sync, P: ExtractProgress>(
     pkg: &Pkg<R>,
     base: &Path,
@@ -347,10 +348,10 @@ pub fn install<R: AsRef<[u8]> + Sync, P: ExtractProgress>(
         // Do not interrupt the short activation sequence. Journal recovery is used
         // if the process exits or an I/O operation fails during these renames.
         progress.phase("Activating update");
-        location.activate()
+        location.activate(&progress)
     })();
     if let Err(error) = result {
-        location.restore_after_error(&error)?;
+        location.restore_after_error(&error, &progress)?;
         return Err(error);
     }
     Ok(plan)
@@ -363,6 +364,7 @@ pub fn rollback(base: &Path) -> Result<()> {
 }
 
 /// Rolls back with cancellable checks of the active and previous file inventories.
+/// Final sync failures after commit are reported through [`ExtractProgress::warning`].
 pub fn rollback_with_progress<P: ExtractProgress>(base: &Path, progress: P) -> Result<()> {
     let location = Layout::open(base, true)?;
     location.require_recovered()?;
@@ -382,8 +384,8 @@ pub fn rollback_with_progress<P: ExtractProgress>(base: &Path, progress: P) -> R
         return Err(ExtractError::Cancelled.into());
     }
     location.clean_uncommitted()?;
-    if let Err(error) = location.rollback_transaction() {
-        location.restore_after_error(&error)?;
+    if let Err(error) = location.rollback_transaction(&progress) {
+        location.restore_after_error(&error, &progress)?;
         return Err(error);
     }
     Ok(())
@@ -392,8 +394,14 @@ pub fn rollback_with_progress<P: ExtractProgress>(base: &Path, progress: P) -> R
 /// Recovers an interrupted activation/rollback and removes abandoned staging data.
 /// With no pending transaction this is a harmless cleanup operation.
 pub fn recover(base: &Path) -> Result<()> {
+    recover_with_progress(base, SilentProgress)
+}
+
+/// Recovers with non-fatal warnings through [`ExtractProgress::warning`].
+/// Recovery is not cancellable once directory restoration begins.
+pub fn recover_with_progress<P: ExtractProgress>(base: &Path, progress: P) -> Result<()> {
     let location = Layout::open(base, true)?;
-    location.recover_transaction()?;
+    location.recover_transaction(&progress)?;
     location.clean_uncommitted()
 }
 

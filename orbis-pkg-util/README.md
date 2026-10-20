@@ -222,8 +222,11 @@ a brief interval with no active update directory.
 
 Extraction failures and cooperative Ctrl-C discard staging and preserve the
 active update. Ctrl-C returns 130 during cancellable work; once activation starts,
-the short commit sequence completes before returning. An I/O failure during
-activation attempts recovery automatically.
+the short commit sequence completes before returning. An I/O failure before
+commit attempts recovery automatically. Once journal removal commits the operation,
+a failed final directory sync emits a warning (even with `--quiet`) and returns
+success: the installed or restored version is already active, so do not retry the
+operation. The warning means durability across power loss is uncertain.
 
 After a process crash or forced termination:
 
@@ -246,5 +249,7 @@ directory syncing is not available through this implementation.
 
 The library exposes the same operations through `orbis_pkg_util::install`:
 `update_metadata`, `plan`, `install`, `rollback`, and `recover`, with cancellable
-planning and rollback variants. The package passed to planning/installation must
-already have any required entry and filesystem keys loaded.
+planning and rollback variants. Progress reporters receive non-fatal commit
+warnings through `ExtractProgress::warning`; use `recover_with_progress` to receive
+them during recovery. The package passed to planning/installation must already
+have any required entry and filesystem keys loaded.

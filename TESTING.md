@@ -35,7 +35,10 @@ and recovery after simulated process exits at each persisted activation/rollback
 boundary. Recovery is repeated to check idempotency. CLI tests verify dry-run JSON,
 quiet installation, rollback, and actionable recovery errors. These tests run
 through the existing Linux, macOS, and Windows jobs; library-only builds include
-the installer as well.
+the installer as well. A wide-tree inventory regression uses a subprocess capped
+at 256 file descriptors on Unix, without changing parallel tests' resource limits.
+Injected failures of the final directory sync verify successful install, rollback,
+and recovery outcomes with warnings; quiet console output retains these warnings.
 
 Synthetic fixtures do not replace compatibility checks against real packages.
 Before a release, extract a known package and compare file contents with a trusted

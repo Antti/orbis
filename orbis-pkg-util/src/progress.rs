@@ -8,6 +8,9 @@ pub trait ExtractProgress: Send + Sync {
     /// A new inspection, extraction, or verification phase.
     fn phase(&self, _name: &str) {}
 
+    /// A non-fatal operation warning, retained even when normal progress is hidden.
+    fn warning(&self, _message: &str) {}
+
     /// Total bytes to process, including metadata and uncompressed file data.
     fn bytes_total(&self, _bytes: u64) {}
 
@@ -47,6 +50,9 @@ pub trait ExtractProgress: Send + Sync {
 impl<P: ExtractProgress + ?Sized> ExtractProgress for &P {
     fn phase(&self, name: &str) {
         (**self).phase(name);
+    }
+    fn warning(&self, message: &str) {
+        (**self).warning(message);
     }
     fn bytes_total(&self, bytes: u64) {
         (**self).bytes_total(bytes);
@@ -89,7 +95,7 @@ pub struct SilentProgress;
 impl ExtractProgress for SilentProgress {}
 
 /// Console progress with byte counts and throughput. All output goes to stderr.
-/// Quiet mode suppresses progress, but always retains skipped-entry warnings.
+/// Quiet mode suppresses progress, but always retains warnings.
 #[cfg(feature = "cli")]
 pub struct ConsoleProgress {
     bar: indicatif::ProgressBar,
@@ -160,11 +166,10 @@ impl ExtractProgress for ConsoleProgress {
         self.cancelled.load(std::sync::atomic::Ordering::Relaxed)
     }
     fn entry_skipped(&self, path: &Path, reason: &str) {
-        let warning = format!(
-            "warning: skipped {}: {}",
-            path.display().to_string().escape_debug(),
-            reason.escape_debug()
-        );
+        self.warning(&format!("skipped {}: {reason}", path.display()));
+    }
+    fn warning(&self, message: &str) {
+        let warning = format!("warning: {}", message.escape_debug());
         if self.bar.is_hidden() {
             let _ = std::io::Write::write_fmt(
                 &mut std::io::stderr().lock(),
@@ -183,5 +188,36 @@ impl ExtractProgress for ConsoleProgress {
 impl Drop for ConsoleProgress {
     fn drop(&mut self) {
         self.bar.finish_and_clear();
+    }
+}
+
+#[cfg(all(test, feature = "cli"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quiet_progress_retains_warnings() {
+        if std::env::var_os("ORBIS_TEST_QUIET_WARNING").is_some() {
+            ConsoleProgress::with_options(
+                true,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            )
+            .warning("Operation committed\nsync failed");
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "progress::tests::quiet_progress_retains_warnings",
+                "--nocapture",
+            ])
+            .env("ORBIS_TEST_QUIET_WARNING", "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            "warning: Operation committed\\nsync failed\n"
+        );
     }
 }

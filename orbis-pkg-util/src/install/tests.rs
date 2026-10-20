@@ -3,7 +3,10 @@ use crate::test_support::*;
 use std::{
     fs,
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 fn package(version: &str, name: &str) -> Pkg<Vec<u8>> {
@@ -192,6 +195,7 @@ fn recovery_restores_prior_installation_at_every_activation_boundary() {
             "previous",
             "activated",
             "state",
+            "final_sync",
             "committed",
         ] {
             let tmp = tempfile::tempdir().unwrap();
@@ -207,7 +211,7 @@ fn recovery_restores_prior_installation_at_every_activation_boundary() {
             });
             recover(&base).unwrap();
             recover(&base).unwrap();
-            if point == "committed" {
+            if matches!(point, "final_sync" | "committed") {
                 assert_eq!(version(&base), "01.03");
                 rollback(&base).unwrap();
             } else if existing == 0 {
@@ -232,7 +236,14 @@ fn recovery_restores_prior_installation_at_every_activation_boundary() {
 #[test]
 fn recovery_restores_prior_installation_at_every_rollback_boundary() {
     for existing in [1, 2] {
-        for point in ["journal", "retired", "activated", "state", "committed"] {
+        for point in [
+            "journal",
+            "retired",
+            "activated",
+            "state",
+            "final_sync",
+            "committed",
+        ] {
             let tmp = tempfile::tempdir().unwrap();
             let base = base_game(tmp.path());
             install(&package("01.01", "one"), &base, SilentProgress).unwrap();
@@ -244,7 +255,7 @@ fn recovery_restores_prior_installation_at_every_rollback_boundary() {
             });
             recover(&base).unwrap();
             recover(&base).unwrap();
-            if point == "committed" {
+            if matches!(point, "final_sync" | "committed") {
                 if existing == 1 {
                     assert!(!active(&base).exists());
                 } else {
@@ -310,6 +321,105 @@ fn io_failure_during_activation_recovers_automatically() {
         assert!(!manager(&base).join("journal.json").exists());
         assert!(!manager(&base).join("staging").exists());
     }
+    rollback(&base).unwrap();
+    assert!(!active(&base).exists());
+}
+
+#[derive(Default)]
+struct Warnings(Mutex<Vec<String>>);
+impl ExtractProgress for Warnings {
+    fn warning(&self, message: &str) {
+        self.0.lock().unwrap().push(message.into());
+    }
+}
+impl Warnings {
+    fn assert_committed_warning(&self) {
+        let warnings = self.0.lock().unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("committed"));
+        assert!(warnings[0].contains("simulated write failure"));
+    }
+}
+
+#[test]
+fn final_sync_failure_reports_success_for_committed_installs() {
+    for existing in [0, 1, 2] {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = base_game(tmp.path());
+        if existing >= 1 {
+            install(&package("01.01", "one"), &base, SilentProgress).unwrap();
+        }
+        if existing >= 2 {
+            install(&package("01.02", "two"), &base, SilentProgress).unwrap();
+        }
+        let warnings = Warnings::default();
+        transaction::ERROR_AT.with(|f| f.set(Some("final_sync")));
+        let result = install(&package("01.03", "three"), &base, &warnings);
+        transaction::ERROR_AT.with(|f| f.set(None));
+        assert_eq!(result.unwrap().update_version, "01.03");
+        warnings.assert_committed_warning();
+        assert_eq!(version(&base), "01.03");
+        assert!(!manager(&base).join("journal.json").exists());
+        recover(&base).unwrap();
+        assert_eq!(version(&base), "01.03");
+        rollback(&base).unwrap();
+        if existing == 0 {
+            assert!(!active(&base).exists());
+        } else {
+            assert_eq!(
+                version(&base),
+                if existing == 1 { "01.01" } else { "01.02" }
+            );
+        }
+    }
+}
+
+#[test]
+fn final_sync_failure_reports_success_for_committed_rollbacks() {
+    for existing in [1, 2] {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = base_game(tmp.path());
+        install(&package("01.01", "one"), &base, SilentProgress).unwrap();
+        if existing == 2 {
+            install(&package("01.02", "two"), &base, SilentProgress).unwrap();
+        }
+        let warnings = Warnings::default();
+        transaction::ERROR_AT.with(|f| f.set(Some("final_sync")));
+        let result = rollback_with_progress(&base, &warnings);
+        transaction::ERROR_AT.with(|f| f.set(None));
+        result.unwrap();
+        warnings.assert_committed_warning();
+        assert!(!manager(&base).join("journal.json").exists());
+        recover(&base).unwrap();
+        if existing == 1 {
+            assert!(!active(&base).exists());
+        } else {
+            assert_eq!(version(&base), "01.01");
+        }
+        assert!(rollback(&base).is_err(), "the rollback slot was consumed");
+    }
+}
+
+#[test]
+fn final_sync_failure_reports_success_for_completed_recovery() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = base_game(tmp.path());
+    install(&package("01.01", "one"), &base, SilentProgress).unwrap();
+    interrupted("activated", || {
+        let _ = install(&package("01.02", "two"), &base, SilentProgress);
+    });
+
+    let warnings = Warnings::default();
+    transaction::ERROR_AT.with(|f| f.set(Some("final_sync")));
+    let result = recover_with_progress(&base, &warnings);
+    transaction::ERROR_AT.with(|f| f.set(None));
+    result.unwrap();
+    warnings.assert_committed_warning();
+    assert_eq!(version(&base), "01.01");
+    assert!(!manager(&base).join("journal.json").exists());
+    assert!(!manager(&base).join("staging").exists());
+    recover(&base).unwrap();
+    assert_eq!(version(&base), "01.01");
     rollback(&base).unwrap();
     assert!(!active(&base).exists());
 }

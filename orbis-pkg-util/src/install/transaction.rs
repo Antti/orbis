@@ -35,19 +35,32 @@ impl Layout {
         sync_dir(self.manager()?)?;
         sync_dir(&self.parent)
     }
-    fn commit(&self, state: &State) -> Result<()> {
+    fn finish_journal<P: ExtractProgress>(&self, progress: &P) -> Result<()> {
+        let root = self.manager()?;
+        root.remove_file("journal.json")?;
+        // Journal removal commits the operation. A failed durability sync cannot
+        // undo it, so report the warning without taking the pre-commit error path.
+        if let Err(error) = checkpoint("final_sync").and_then(|()| sync_dir(root)) {
+            let cause = std::error::Error::source(&error).unwrap_or(&error);
+            progress.warning(&format!(
+                "Operation committed, but final directory sync failed: {cause}. \
+                 Power-loss durability is uncertain."
+            ));
+        }
+        Ok(())
+    }
+    fn commit<P: ExtractProgress>(&self, state: &State, progress: &P) -> Result<()> {
         let root = self.manager()?;
         write_json(root, "state.json", state)?;
         checkpoint("state")?;
-        root.remove_file("journal.json")?;
-        sync_dir(root)?;
-        checkpoint("committed")?;
+        self.finish_journal(progress)?;
+        let _ = checkpoint("committed");
         // Old backups can be large; cleanup can be retried by recover. Once the
         // journal is removed, installation has committed and must report success.
         let _ = self.clean_uncommitted();
         Ok(())
     }
-    pub fn activate(&self) -> Result<()> {
+    pub fn activate<P: ExtractProgress>(&self, progress: &P) -> Result<()> {
         let root = self.manager()?;
         let before = self.journal(Operation::Install)?;
         if exists(root, "previous")? {
@@ -64,17 +77,20 @@ impl Layout {
         root.rename("staging", &self.parent, &self.active)?;
         self.sync_renames()?;
         checkpoint("activated")?;
-        self.commit(&State {
-            schema_version: 1,
-            active: true,
-            rollback: if before.active {
-                RollbackTarget::Update
-            } else {
-                RollbackTarget::Base
+        self.commit(
+            &State {
+                schema_version: 1,
+                active: true,
+                rollback: if before.active {
+                    RollbackTarget::Update
+                } else {
+                    RollbackTarget::Base
+                },
             },
-        })
+            progress,
+        )
     }
-    pub fn rollback_transaction(&self) -> Result<()> {
+    pub fn rollback_transaction<P: ExtractProgress>(&self, progress: &P) -> Result<()> {
         let root = self.manager()?;
         let before = self.journal(Operation::Rollback)?;
         self.parent.rename(&self.active, root, "retired")?;
@@ -86,13 +102,16 @@ impl Layout {
             self.sync_renames()?;
         }
         checkpoint("activated")?;
-        self.commit(&State {
-            schema_version: 1,
-            active,
-            rollback: RollbackTarget::None,
-        })
+        self.commit(
+            &State {
+                schema_version: 1,
+                active,
+                rollback: RollbackTarget::None,
+            },
+            progress,
+        )
     }
-    pub fn recover_transaction(&self) -> Result<()> {
+    pub fn recover_transaction<P: ExtractProgress>(&self, progress: &P) -> Result<()> {
         let root = self.manager()?;
         if !exists(root, "journal.json")? {
             return Ok(());
@@ -153,12 +172,14 @@ impl Layout {
             }
         }
         write_json(root, "state.json", &journal.before)?;
-        root.remove_file("journal.json")?;
-        sync_dir(root)?;
-        Ok(())
+        self.finish_journal(progress)
     }
-    pub fn restore_after_error(&self, error: &InstallError) -> Result<()> {
-        self.recover_transaction().and_then(|()| self.clean_uncommitted()).map_err(|recovery| invalid(format!(
+    pub fn restore_after_error<P: ExtractProgress>(
+        &self,
+        error: &InstallError,
+        progress: &P,
+    ) -> Result<()> {
+        self.recover_transaction(progress).and_then(|()| self.clean_uncommitted()).map_err(|recovery| invalid(format!(
             "{error}; automatic recovery failed: {recovery}; run recover --base <DIR> before retrying"
         )))
     }

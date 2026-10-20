@@ -99,7 +99,10 @@ pub(crate) fn run(cli: &Cli, out: &mut impl Write, cancelled: Arc<AtomicBool>) -
             Ok(0)
         }
         Command::Recover { base } => {
-            orbis_pkg_util::install::recover(base)?;
+            orbis_pkg_util::install::recover_with_progress(
+                base,
+                ConsoleProgress::with_options(cli.quiet, cancelled),
+            )?;
             if !cli.quiet {
                 diagnostic("Recovery and staging cleanup completed.");
             }
