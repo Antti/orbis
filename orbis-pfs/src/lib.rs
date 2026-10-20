@@ -43,6 +43,7 @@ pub mod file;
 pub mod header;
 pub mod image;
 pub mod inode;
+pub mod integrity;
 pub mod pfsc;
 
 #[cfg(test)]

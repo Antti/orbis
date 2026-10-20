@@ -71,12 +71,10 @@ pub enum LoadBlocksError {
 pub struct Inode {
     index: usize,
     raw: InodeRaw,
-    direct_blocks: [u32; 12],
-    #[allow(dead_code)] // Reserved for future signature verification
-    direct_sigs: [Option<[u8; 32]>; 12],
-    indirect_blocks: [u32; 5],
-    #[allow(dead_code)] // Reserved for future signature verification
-    indirect_sigs: [Option<[u8; 32]>; 5],
+    pub(crate) direct_blocks: [u32; 12],
+    pub(crate) direct_sigs: [Option<[u8; 32]>; 12],
+    pub(crate) indirect_blocks: [u32; 5],
+    pub(crate) indirect_sigs: [Option<[u8; 32]>; 5],
     /// Whether this inode uses signed (36-byte) indirect block entries.
     /// When `false`, indirect entries are plain 4-byte block pointers.
     signed: bool,
