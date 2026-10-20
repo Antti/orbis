@@ -4,7 +4,16 @@ use std::process::Command;
 
 #[test]
 fn documented_commands_have_help() {
-    for command in ["extract", "info", "list", "verify", "completions"] {
+    for command in [
+        "extract",
+        "info",
+        "list",
+        "verify",
+        "completions",
+        "install",
+        "rollback",
+        "recover",
+    ] {
         let output = Command::new(env!("CARGO_BIN_EXE_orbis-pkg-util"))
             .args([command, "--help"])
             .output()

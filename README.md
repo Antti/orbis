@@ -56,6 +56,19 @@ orbis-pkg-util info game.pkg --json
 orbis-pkg-util verify game.pkg
 ```
 
+Install a supported full-file update alongside an extracted base game:
+
+```sh
+orbis-pkg-util install update.pkg --base ./games/CUSA12345 --dry-run
+orbis-pkg-util install update.pkg --base ./games/CUSA12345
+orbis-pkg-util rollback --base ./games/CUSA12345
+```
+
+Stop the emulator first. Installation uses shadPS4's sibling `-UPDATE` directory,
+preserves the base, and keeps one previous installation for rollback. Binary
+deltas are rejected. See the [update installation guide](orbis-pkg-util/README.md#install-a-full-file-update)
+for compatibility checks, space requirements, and crash recovery.
+
 See the [CLI guide](orbis-pkg-util/README.md) for path selection, JSON fields,
 exit codes, safe replacement behavior, and shell completions. `verify` checks
 readability and decompression; it does not verify authenticity.

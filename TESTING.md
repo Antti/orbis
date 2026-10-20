@@ -27,6 +27,22 @@ mode and closed-pipe handling on Unix. Library tests cover atomic replacement,
 concurrent destination creation, cancellation, and cleanup after corrupt input.
 The shared fixture builders live in `orbis-pkg-util/tests/common/`.
 
+Installer tests encode SFO identity/version metadata independently of the parser
+and build synthetic base/update pairs. They cover read-only planning, delta and
+identity rejection, complete update replacement, one-level rollback, modified or
+unmanaged directories, concurrent operation locks, cancellation, corrupt payloads,
+and recovery after simulated process exits at each persisted activation/rollback
+boundary. Recovery is repeated to check idempotency. CLI tests verify dry-run JSON,
+quiet installation, rollback, and actionable recovery errors. These tests run
+through the existing Linux, macOS, and Windows jobs; library-only builds include
+the installer as well. A wide-tree inventory regression uses a subprocess capped
+at 256 file descriptors on Unix, without changing parallel tests' resource limits.
+Injected failures of the final directory sync verify successful install, rollback,
+and recovery outcomes with warnings; quiet console output retains these warnings.
+
 Synthetic fixtures do not replace compatibility checks against real packages.
 Before a release, extract a known package and compare file contents with a trusted
-reference extraction.
+reference extraction. For installation, use a representative original base plus
+full-file update, compare the resulting update tree with a trusted extraction,
+check the version in shadPS4, and exercise upgrade/rollback while the emulator is
+stopped. No real base/update pair was available during implementation.

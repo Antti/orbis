@@ -1,6 +1,6 @@
 # orbis-pkg-util
 
-Inspect, extract, and check PlayStation 4 PKG files. Run `orbis-pkg-util --help`
+Inspect, extract, check, and install updates from PlayStation 4 PKG files. Run `orbis-pkg-util --help`
 or add `--help` after any command for examples.
 
 ## Installation
@@ -159,3 +159,97 @@ Header inspection and entry-table listing require no keys. Extraction supports
 the built-in entry key for slot 3 and the FPKG filesystem key scheme. It does not
 provide arbitrary retail-PKG decryption or options to import alternative keys.
 Readable unencrypted metadata remains accessible when other keys are unavailable.
+
+## Install a full-file update
+
+`install` targets an extracted game used by shadPS4. It creates a sibling
+`<base>-UPDATE` directory; it does not modify the original base, create a new PKG,
+or install anything onto a console.
+
+```sh
+# First extract the original base game, if needed.
+orbis-pkg-util extract base.pkg -o ./games/CUSA12345
+
+# Stop the emulator, inspect the plan, then install.
+orbis-pkg-util install update.pkg --base ./games/CUSA12345 --dry-run
+orbis-pkg-util install update.pkg --base ./games/CUSA12345 --dry-run --json
+orbis-pkg-util install update.pkg --base ./games/CUSA12345
+
+# Restore the previous update (or return to the base after the first install).
+orbis-pkg-util rollback --base ./games/CUSA12345
+```
+
+Supported inputs must have PS4 content type `0x1A`, a cumulative-update flag
+(`0x60000000`) or a first-update flag without the subsequent-update flag, and
+`PARAM.SFO` category `gp`. The base must have category `gd`. Both must have matching
+`TITLE_ID` and full `CONTENT_ID` strings and valid `APP_VER` values in `NN.NN`
+format. The update version must be newer than the active version. Reinstalling
+the same version and downgrades are refused; use `rollback` for the retained version.
+Delta type `0x1E`, delta flags, unsupported classifications, missing identity fields,
+and unknown metadata entries are rejected. The existing FPKG key limitations apply.
+No compatibility bypass is provided.
+
+The entire update directory is replaced on upgrade. Files absent from the new
+update disappear from the update layer; a same-named base file then becomes
+visible again. This does not implement deletion instructions or binary deltas.
+The planner reports `add`, `replace`, and `remove_from_update` operations; `replace`
+indicates a path overlap, not a byte-for-byte content comparison. A sibling
+`-patch` directory or an unmanaged `-UPDATE` directory causes refusal, so existing
+manual installations are not silently adopted or removed.
+
+`--dry-run` creates no files or directories and does not reserve disk space.
+Its JSON has `schema_version: 1` and a `plan` containing identity, old/new versions,
+destination, extracted byte count, estimated required/available space, and path
+changes. The destination uses a lossy UTF-8 representation for non-UTF-8 host paths.
+Planning walks the update filesystem but does not decompress every payload.
+Installation rechecks the plan while holding an exclusive OS lock.
+
+Installation stages and reads the complete update before activation. A SHA-256
+inventory records the extracted files in `.orbis-install.json`; future installs
+and rollbacks verify managed files and refuse locally modified content. These
+hashes detect changes relative to the recorded installation; they do not establish
+publisher authenticity. Reading/hashing the active update, rollback copy, and new
+staging tree adds I/O. During an upgrade, space is needed for the new update while
+the current update and its previous backup still exist. Only one rollback is
+retained after a successful install.
+
+### Interruption and recovery
+
+Keep the emulator stopped and do not modify the base, update, or installation
+state while an operation runs. Activation uses two directory renames and a
+recovery journal; it is not an atomic exchange of directory trees. There can be
+a brief interval with no active update directory.
+
+Extraction failures and cooperative Ctrl-C discard staging and preserve the
+active update. Ctrl-C returns 130 during cancellable work; once activation starts,
+the short commit sequence completes before returning. An I/O failure before
+commit attempts recovery automatically. Once journal removal commits the operation,
+a failed final directory sync emits a warning (even with `--quiet`) and returns
+success: the installed or restored version is already active, so do not retry the
+operation. The warning means durability across power loss is uncertain.
+
+After a process crash or forced termination:
+
+```sh
+orbis-pkg-util recover --base ./games/CUSA12345
+```
+
+An uncommitted journal restores the installation that existed before the
+operation, including its rollback copy. Once committed, the new installation
+remains active. Recovery is repeatable and also removes abandoned staging and
+retired backups. If recovery fails, keep the state directory and address the
+reported filesystem error before retrying. Do not delete the journal manually.
+
+State lives beside the base in `.<base>.orbis-install/`, with the lock, journal,
+staging tree, and previous update. Move this directory together with the base
+and its `-UPDATE` sibling. A successful rollback consumes the one rollback slot.
+Process interruption is tested on each platform in CI; storage-device failure
+and power-loss durability are not guaranteed, particularly on Windows where
+directory syncing is not available through this implementation.
+
+The library exposes the same operations through `orbis_pkg_util::install`:
+`update_metadata`, `plan`, `install`, `rollback`, and `recover`, with cancellable
+planning and rollback variants. Progress reporters receive non-fatal commit
+warnings through `ExtractProgress::warning`; use `recover_with_progress` to receive
+them during recovery. The package passed to planning/installation must already
+have any required entry and filesystem keys loaded.

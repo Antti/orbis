@@ -305,6 +305,8 @@ pub const fn content_type_name(content_type: u32) -> &'static str {
         0x06 => "Remaster",
         0x1A => "GD (Game Data)",
         0x1B => "AC (Additional Content)",
+        0x1C => "AL (App License)",
+        0x1E => "DP (Delta Patch)",
         _ => "Unknown",
     }
 }

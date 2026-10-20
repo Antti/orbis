@@ -1,9 +1,7 @@
 use super::*;
 use crate::SilentProgress;
+use crate::test_support::*;
 use orbis_pfs::pfsc::PfscImage;
-#[path = "../../tests/common/mod.rs"]
-mod common;
-use common::*;
 
 #[test]
 fn extracts_complete_package_and_honors_overwrite() {

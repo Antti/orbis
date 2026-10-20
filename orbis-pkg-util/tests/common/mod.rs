@@ -131,3 +131,70 @@ pub fn pfsc(block_size: u32, original_block_size: u64, len: u64, offsets: &[u64]
     b[80..].fill(0x41);
     Bytes(b)
 }
+
+/// Independently encoded SFO, using aligned value slots as real SFO writers do.
+#[allow(dead_code)]
+pub fn sfo(title: &str, category: &str, version: &str) -> Vec<u8> {
+    let content = format!("UP0000-{title}_00-0000000000000000");
+    let fields = [
+        ("TITLE_ID", title),
+        ("CONTENT_ID", content.as_str()),
+        ("CATEGORY", category),
+        ("APP_VER", version),
+    ];
+    let mut keys = Vec::new();
+    let mut values = Vec::new();
+    let mut entries = Vec::new();
+    for (key, value) in fields {
+        let key_offset = keys.len() as u16;
+        keys.extend(key.bytes().chain([0]));
+        let value_offset = values.len() as u32;
+        let len = value.len() as u32 + 1;
+        let capacity = len.div_ceil(4) * 4;
+        values.extend(value.bytes().chain([0]));
+        values.resize(value_offset as usize + capacity as usize, 0);
+        entries.extend(key_offset.to_le_bytes());
+        entries.extend(0x204u16.to_le_bytes());
+        entries.extend(len.to_le_bytes());
+        entries.extend(capacity.to_le_bytes());
+        entries.extend(value_offset.to_le_bytes());
+    }
+    let key_offset = 20 + entries.len();
+    let data_offset = (key_offset + keys.len()).div_ceil(4) * 4;
+    let mut bytes = vec![0; 20];
+    bytes[..4].copy_from_slice(b"\0PSF");
+    le32(&mut bytes, 4, 0x101);
+    le32(&mut bytes, 8, key_offset as u32);
+    le32(&mut bytes, 12, data_offset as u32);
+    le32(&mut bytes, 16, 4);
+    bytes.extend(entries);
+    bytes.extend(keys);
+    bytes.resize(data_offset, 0);
+    bytes.extend(values);
+    bytes
+}
+
+#[allow(dead_code)]
+pub fn update(version: &str, name: &str, contents: &[u8]) -> Vec<u8> {
+    let mut bytes = pkg(pfs(name, contents, false));
+    let metadata = sfo("CUSA00000", "gp", version);
+    assert!(metadata.len() <= 0x600);
+    bytes[0x1a00..0x1a00 + metadata.len()].copy_from_slice(&metadata);
+    be32(&mut bytes, 0x1054, metadata.len() as u32);
+    be32(&mut bytes, 0x74, 0x1a);
+    be32(&mut bytes, 0x78, 0x60000000);
+    bytes
+}
+
+#[allow(dead_code)]
+pub fn base_game(root: &std::path::Path) -> std::path::PathBuf {
+    let base = root.join("CUSA00000");
+    std::fs::create_dir_all(base.join("sce_sys")).unwrap();
+    std::fs::write(
+        base.join("sce_sys/param.sfo"),
+        sfo("CUSA00000", "gd", "01.00"),
+    )
+    .unwrap();
+    std::fs::write(base.join("base.txt"), b"BASE").unwrap();
+    base
+}

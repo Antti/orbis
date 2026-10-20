@@ -37,7 +37,9 @@ fn main() -> ExitCode {
                     source = error.source();
                 }
             }
-            if has_io_kind(error.as_ref(), io::ErrorKind::AlreadyExists) {
+            if matches!(cli.command, Command::Extract { .. })
+                && has_io_kind(error.as_ref(), io::ErrorKind::AlreadyExists)
+            {
                 diagnostic(
                     "hint: choose another --output directory, or use --force to replace existing files.",
                 );
@@ -47,10 +49,16 @@ fn main() -> ExitCode {
                     "Files completed before the failure remain; unfinished replacements were discarded.",
                 );
             }
-            if matches!(
-                error.downcast_ref::<ExtractError>(),
-                Some(ExtractError::Cancelled)
-            ) {
+            let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(error.as_ref());
+            let mut interrupted = false;
+            while let Some(error) = cause {
+                interrupted |= matches!(
+                    error.downcast_ref::<ExtractError>(),
+                    Some(ExtractError::Cancelled)
+                );
+                cause = error.source();
+            }
+            if interrupted {
                 ExitCode::from(130)
             } else {
                 ExitCode::FAILURE
