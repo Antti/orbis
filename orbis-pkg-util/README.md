@@ -96,6 +96,7 @@ orbis-pkg-util verify game.pkg
 orbis-pkg-util verify game.pkg --metadata-only
 orbis-pkg-util verify game.pkg --path textures
 orbis-pkg-util verify game.pkg --integrity
+orbis-pkg-util verify game.pkg --integrity --json > report.json
 orbis-pkg-util verify game.pkg --integrity --metadata-only
 ```
 
@@ -114,7 +115,9 @@ covers on-disk bytes, including ciphertext; HMACs cover decrypted PFS blocks.
 Integrity checks apply to the whole selected scope and cannot use `--path`.
 `--metadata-only` excludes PFS hashes/HMACs. Missing/all-zero hashes, unavailable
 signing keys, contiguous signed extents without individual signatures, and
-inode-table signature descriptors beyond 12 direct blocks return exit 3.
+inode-table signature trees deeper than double-indirect return exit 3.
+The inode-table descriptor supports S64 direct, single-indirect and
+double-indirect pointers, independently of S32 data inode addressing.
 A nonzero digest/MAC mismatch returns exit 1. These distinctions also apply with
 `--quiet`. Ctrl-C interrupts both hashing and readability checks with exit 130.
 Expect additional I/O: whole-image hashing and block verification read data
@@ -122,6 +125,40 @@ beyond the ordinary file checks. No extracted files are written.
 
 Neither mode verifies publisher RSA signatures, licenses, executable behavior,
 or publisher authenticity. Matching stored hashes does not establish trust.
+
+## Integrity reports for scripts
+
+`verify --integrity --json` streams one JSON document to stdout with
+`schema_version: 1`, `package`, `metadata_only`, `checks`, `summary`, `status`,
+`readability`, and `error`. It keeps the same exit codes: 0 complete, 1 failed,
+3 incomplete, 130 interrupted. `--json` requires `--integrity`.
+
+Each check contains:
+
+| Field | Values / meaning |
+| --- | --- |
+| `layer` | `pkg`, `outer_pfs`, or `inner_pfs` |
+| `scope` | Header, entry ID, inode or block location; descriptive text |
+| `algorithm` | `sha256` or `hmac_sha256` |
+| `status` | `passed`, `unavailable`, `failed`, or `not_applicable` |
+| `reason` | `null`, `missing_digest`, `missing_key`, `unsigned_image`, `contiguous_extent`, `unsupported_layout`, or `digest_mismatch` |
+| `count` | Checks represented; unavailable groups may exceed one; unsigned images use zero |
+
+`summary` counts passed `digests`/`macs`, `unavailable` checks and `failed`
+comparisons. A missing signing key is one unavailable image-level check, not an
+estimate of its block count. The top-level `status` is `complete`, `incomplete`,
+`failed`, or `interrupted`. `readability` contains `status`, `files`, `bytes`, and
+`skipped` entries (`path` and `reason`) when that pass finishes; otherwise it is
+`null`. `error` describes input, structural, I/O, mismatch or cancellation errors.
+An error can therefore produce `status: "failed"` with zero failed comparisons.
+
+Verification stops at the first mismatch or error; the report includes only
+checks reached before stopping. It closes the JSON document on handled failures
+and Ctrl-C, including input-open failures. A broken output stream or forced
+termination cannot produce a complete document. Warnings can still go to stderr.
+Check records are streamed so retaining the report does not use memory
+proportional to the number of filesystem blocks. Missing checks are also grouped
+by layer and reason in ordinary text output.
 
 ## Output for scripts
 

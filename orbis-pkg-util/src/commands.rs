@@ -11,6 +11,8 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, atomic::AtomicBool};
 
+mod verify;
+
 type Result<T> = std::result::Result<T, Box<dyn StdError>>;
 type Package = orbis_pkg::Pkg<memmap2::Mmap>;
 
@@ -130,14 +132,26 @@ pub(crate) fn run(cli: &Cli, out: &mut impl Write, cancelled: Arc<AtomicBool>) -
             Some((output.as_deref(), *force)),
             selection,
             cli,
-            false,
             cancelled,
         ),
         Command::Verify {
             pkg_path,
             selection,
             integrity,
-        } => process(pkg_path, None, selection, cli, *integrity, cancelled),
+            json,
+        } => {
+            if *integrity {
+                verify::run(
+                    pkg_path,
+                    selection,
+                    cli,
+                    (*json).then_some(out as &mut dyn Write),
+                    cancelled,
+                )
+            } else {
+                process(pkg_path, None, selection, cli, cancelled)
+            }
+        }
         Command::Completions { shell } => {
             // Generators assume infallible writes; buffer first so a closed pipe
             // is handled by our fallible stdout path instead of panicking.
@@ -186,7 +200,6 @@ fn process(
     extraction: Option<(Option<&Path>, bool)>,
     selection: &cli::Selection,
     cli: &Cli,
-    integrity: bool,
     cancelled: Arc<AtomicBool>,
 ) -> Result<u8> {
     let mut pkg = open(path, cli.passcode_file.as_deref())?;
@@ -201,21 +214,6 @@ fn process(
     if !selection.metadata_only {
         prepare_filesystem(&mut pkg)?;
     }
-    if integrity && !selection.metadata_only {
-        let _ = pkg.load_pfs_key();
-    }
-    let integrity_report = if integrity {
-        Some(
-            PkgExtractor::new(
-                &pkg,
-                ConsoleProgress::with_options(quiet, cancelled.clone()),
-                false,
-            )
-            .verify_integrity(selection.metadata_only)?,
-        )
-    } else {
-        None
-    };
     let progress = ConsoleProgress::with_options(quiet, cancelled);
     let start = std::time::Instant::now();
     let report = if let Some((output, force)) = extraction {
@@ -246,20 +244,6 @@ fn process(
     } else {
         "Checked"
     };
-    if let Some(checks) = &integrity_report {
-        if checks.missing > 0 {
-            diagnostic(&format!(
-                "warning: incomplete integrity verification: {} digests/MACs checked; {} checks unavailable (absent hashes, keys, or unsupported signature layouts).",
-                checks.digests + checks.macs,
-                checks.missing
-            ));
-        } else if !quiet {
-            diagnostic(&format!(
-                "Stored integrity passed: {} SHA-256 digests and {} PFS HMACs.",
-                checks.digests, checks.macs
-            ));
-        }
-    }
     if !report.skipped.is_empty() {
         diagnostic(&format!(
             "Incomplete: {} files {}; {} entries skipped.",
@@ -284,11 +268,7 @@ fn process(
             diagnostic("Readability and decompression passed; authenticity was not checked.");
         }
     }
-    Ok(if integrity_report.is_some_and(|r| r.missing > 0) {
-        3
-    } else {
-        0
-    })
+    Ok(0)
 }
 
 fn info(
