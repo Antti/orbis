@@ -42,6 +42,12 @@ use std::path::Path;
 /// Errors that can occur when opening a PKG file from disk.
 #[derive(Debug, Snafu)]
 pub enum OpenPkgError {
+    #[snafu(display("expected a regular PKG file, but the input is a directory or special file"))]
+    NotFile,
+
+    #[snafu(display("cannot inspect input file"))]
+    Metadata { source: std::io::Error },
+
     #[snafu(display("failed to open file"))]
     OpenFile { source: std::io::Error },
 
@@ -64,7 +70,24 @@ pub enum OpenPkgError {
 /// must ensure the file is not modified or truncated while the returned `Pkg`
 /// is in use.
 pub unsafe fn open_pkg(path: &Path) -> Result<orbis_pkg::Pkg<memmap2::Mmap>, OpenPkgError> {
+    let mut pkg = unsafe { inspect_pkg(path)? };
+    pkg.load_entry_keys().context(ParsePkgSnafu)?;
+    pkg.load_pfs_key().context(ParsePkgSnafu)?;
+    Ok(pkg)
+}
+
+/// Opens a PKG for inspection without loading decryption keys.
+///
+/// # Safety
+///
+/// The input file must not be modified or truncated while the returned package
+/// is in use, as with [`open_pkg`].
+pub unsafe fn inspect_pkg(path: &Path) -> Result<orbis_pkg::Pkg<memmap2::Mmap>, OpenPkgError> {
     let file = std::fs::File::open(path).context(OpenFileSnafu)?;
+    snafu::ensure!(
+        file.metadata().context(MetadataSnafu)?.is_file(),
+        NotFileSnafu
+    );
     let raw = unsafe { memmap2::Mmap::map(&file).context(MmapFileSnafu)? };
-    orbis_pkg::Pkg::new(raw).context(ParsePkgSnafu)
+    orbis_pkg::Pkg::parse(raw).context(ParsePkgSnafu)
 }

@@ -108,3 +108,15 @@ fn encrypted_entries_reject_missing_keys_and_truncated_padding() {
         Err(EntryDataError::InvalidDataOffset)
     ));
 }
+
+#[test]
+fn metadata_remains_readable_without_decryption_keys() {
+    let mut pkg = Pkg::parse(raw_pkg()).unwrap();
+    assert_eq!(pkg.header().entry_count(), 1);
+    let (entry, _) = pkg.find_entry(EntryId::ParamSfo).unwrap();
+    assert_eq!(pkg.entry_data(&entry).unwrap(), b"data");
+    assert!(pkg.load_entry_keys().is_err());
+    assert!(pkg.load_pfs_key().is_err());
+    assert_eq!(pkg.entry_data(&entry).unwrap(), b"data");
+    assert!(Pkg::new(raw_pkg()).is_err());
+}
