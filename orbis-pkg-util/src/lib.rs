@@ -28,7 +28,12 @@
 //! updates during extraction.
 
 pub mod extract;
+pub mod install;
 pub mod progress;
+
+#[cfg(test)]
+#[path = "../tests/common/mod.rs"]
+mod test_support;
 
 pub use self::extract::{
     ExtractError, ExtractOptions, ExtractionReport, ListedItem, PkgExtractor, SkippedEntry,

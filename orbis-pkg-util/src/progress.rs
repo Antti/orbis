@@ -44,6 +44,45 @@ pub trait ExtractProgress: Send + Sync {
     fn pfs_completed(&self) {}
 }
 
+impl<P: ExtractProgress + ?Sized> ExtractProgress for &P {
+    fn phase(&self, name: &str) {
+        (**self).phase(name);
+    }
+    fn bytes_total(&self, bytes: u64) {
+        (**self).bytes_total(bytes);
+    }
+    fn bytes_processed(&self, bytes: u64) {
+        (**self).bytes_processed(bytes);
+    }
+    fn is_cancelled(&self) -> bool {
+        (**self).is_cancelled()
+    }
+    fn entry_start(&self, path: &Path, current: usize, total: usize) {
+        (**self).entry_start(path, current, total);
+    }
+    fn entry_skipped(&self, path: &Path, reason: &str) {
+        (**self).entry_skipped(path, reason);
+    }
+    fn entries_completed(&self, extracted: usize, skipped: usize) {
+        (**self).entries_completed(extracted, skipped);
+    }
+    fn pfs_start(&self, total: usize) {
+        (**self).pfs_start(total);
+    }
+    fn pfs_directory(&self, path: &Path) {
+        (**self).pfs_directory(path);
+    }
+    fn pfs_file(&self, path: &Path, size: u64) {
+        (**self).pfs_file(path, size);
+    }
+    fn pfs_file_completed(&self, written: u64) {
+        (**self).pfs_file_completed(written);
+    }
+    fn pfs_completed(&self) {
+        (**self).pfs_completed();
+    }
+}
+
 /// A no-op progress implementation that discards all updates.
 pub struct SilentProgress;
 
@@ -97,6 +136,9 @@ impl Default for ConsoleProgress {
 impl ExtractProgress for ConsoleProgress {
     fn phase(&self, name: &str) {
         if !self.quiet {
+            if self.bar.is_finished() {
+                self.bar.reset();
+            }
             self.bar.set_message(name.to_owned());
             if self.bar.is_hidden() {
                 let _ = std::io::Write::write_fmt(
@@ -107,6 +149,8 @@ impl ExtractProgress for ConsoleProgress {
         }
     }
     fn bytes_total(&self, bytes: u64) {
+        self.bar.set_position(0);
+        self.bar.reset_elapsed();
         self.bar.set_length(bytes);
     }
     fn bytes_processed(&self, bytes: u64) {
