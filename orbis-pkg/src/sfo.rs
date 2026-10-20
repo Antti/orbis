@@ -23,6 +23,15 @@ pub enum Value<'a> {
 pub struct Sfo<'a>(BTreeMap<&'a str, Value<'a>>);
 
 impl<'a> Sfo<'a> {
+    /// All fields in deterministic key order, retaining strings, integers and blobs.
+    pub fn entries(&self) -> impl Iterator<Item = (&'a str, &Value<'a>)> {
+        self.0.iter().map(|(key, value)| (*key, value))
+    }
+
+    pub fn get(&self, key: &str) -> Option<&Value<'a>> {
+        self.0.get(key)
+    }
+
     pub fn parse(data: &'a [u8]) -> Result<Self, SfoError> {
         let bad = || SfoError("invalid header, entry, or offset".into());
         let u32_at = |at: usize| -> Result<u32, SfoError> {
