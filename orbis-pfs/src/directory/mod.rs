@@ -70,6 +70,12 @@ impl<'a> std::fmt::Debug for Directory<'a> {
 }
 
 impl<'a> Directory<'a> {
+    /// Returns this directory's inode number, unique within its PFS image.
+    #[must_use]
+    pub fn inode_number(&self) -> usize {
+        self.inode
+    }
+
     pub(super) fn new(pfs: Arc<Pfs<'a>>, inode: usize) -> Self {
         Self { pfs, inode }
     }

@@ -50,6 +50,13 @@ pub struct InodeRaw {
 #[derive(Debug, Snafu)]
 #[non_exhaustive]
 pub enum LoadBlocksError {
+    #[snafu(display("invalid block count for inode #{inode}"))]
+    InvalidBlockCount { inode: usize },
+
+    #[snafu(display("cannot allocate block map"))]
+    Allocate {
+        source: std::collections::TryReserveError,
+    },
     #[snafu(display("cannot read block #{block}"))]
     Read { block: u32, source: std::io::Error },
 
@@ -190,8 +197,26 @@ impl Inode {
         image: &dyn Image,
         block_size: u32,
     ) -> Result<Vec<u32>, LoadBlocksError> {
+        ensure!(block_size > 0, InvalidBlockCountSnafu { inode: self.index });
         let block_count = self.blocks() as usize;
-        let mut blocks: Vec<u32> = Vec::with_capacity(block_count);
+        let available = image.len() / u64::from(block_size);
+        ensure!(
+            block_count as u64 <= available,
+            InvalidBlockCountSnafu { inode: self.index }
+        );
+        let stored_size = if self.flags().is_compressed() {
+            self.compressed_len()
+        } else {
+            self.size()
+        };
+        ensure!(
+            stored_size.div_ceil(u64::from(block_size)) <= block_count as u64,
+            InvalidBlockCountSnafu { inode: self.index }
+        );
+        let mut blocks = Vec::new();
+        blocks
+            .try_reserve_exact(block_count)
+            .context(AllocateSnafu)?;
 
         if block_count == 0 {
             return Ok(blocks);
@@ -200,7 +225,11 @@ impl Inode {
         // Check if inode uses contiguous blocks.
         if self.direct_blocks[1] == 0xffffffff {
             let start = self.direct_blocks[0];
-            for block in start..(start + self.blocks()) {
+            let end = start
+                .checked_add(self.blocks())
+                .ok_or(LoadBlocksError::InvalidBlockCount { inode: self.index })?;
+            ensure!(u64::from(end) <= available, NotExistsSnafu { block: start });
+            for block in start..end {
                 blocks.push(block);
             }
             return Ok(blocks);
@@ -208,6 +237,12 @@ impl Inode {
 
         // Load direct pointers.
         for i in 0..12 {
+            ensure!(
+                u64::from(self.direct_blocks[i]) < available,
+                NotExistsSnafu {
+                    block: self.direct_blocks[i]
+                }
+            );
             blocks.push(self.direct_blocks[i]);
             if blocks.len() == block_count {
                 return Ok(blocks);
@@ -229,6 +264,7 @@ impl Inode {
         let mut data = block0.as_slice();
 
         while let Some(i) = self.read_indirect(&mut data) {
+            ensure!(u64::from(i) < available, NotExistsSnafu { block: i });
             blocks.push(i);
             if blocks.len() == block_count {
                 return Ok(blocks);
@@ -256,6 +292,7 @@ impl Inode {
             let mut data1 = block1.as_slice();
 
             while let Some(j) = self.read_indirect(&mut data1) {
+                ensure!(u64::from(j) < available, NotExistsSnafu { block: j });
                 blocks.push(j);
                 if blocks.len() == block_count {
                     return Ok(blocks);

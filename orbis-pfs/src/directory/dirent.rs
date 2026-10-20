@@ -15,6 +15,9 @@ pub enum ReadError {
 
     #[snafu(display("end of entry"))]
     EndOfEntry,
+
+    #[snafu(display("invalid directory entry length"))]
+    InvalidLength,
 }
 
 impl From<std::io::Error> for ReadError {
@@ -50,7 +53,7 @@ impl Dirent {
     pub const SELF: u32 = 4;
     pub const PARENT: u32 = 5;
 
-    pub fn read<F: Read>(from: &mut F) -> Result<Self, ReadError> {
+    pub fn read(from: &mut &[u8]) -> Result<Self, ReadError> {
         // Read fixed header.
         let mut header_buf = [0u8; size_of::<DirentRaw>()];
         from.read_exact(&mut header_buf)?;
@@ -61,7 +64,15 @@ impl Dirent {
         ensure!(raw.entsize.get() != 0, EndOfEntrySnafu);
 
         // Read name.
-        let mut name = vec![0u8; raw.namelen.get() as usize];
+        let name_len = raw.namelen.get() as usize;
+        let entry_len = raw.entsize.get() as usize;
+        ensure!(
+            entry_len >= size_of::<DirentRaw>()
+                && name_len <= entry_len - size_of::<DirentRaw>()
+                && entry_len - size_of::<DirentRaw>() <= from.len(),
+            InvalidLengthSnafu
+        );
+        let mut name = vec![0u8; name_len];
         from.read_exact(&mut name)?;
 
         Ok(Self { raw, name })
