@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Orbis PKG Utility
+Comment=Inspect and extract PlayStation 4 PKG files
+Exec=orbis-pkg-util
+Icon=io.github.Antti.Orbis
+Terminal=true
+Categories=Utility;Archiving;
