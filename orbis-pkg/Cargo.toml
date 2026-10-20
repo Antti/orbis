@@ -13,6 +13,7 @@ keywords = ["ps4", "playstation", "pkg", "package", "orbis"]
 categories = ["parser-implementations", "cryptography"]
 
 [dependencies]
+orbis-integrity.workspace = true
 aes.workspace = true
 bitflags = "2.10.0"
 byteorder = "1.4.3"

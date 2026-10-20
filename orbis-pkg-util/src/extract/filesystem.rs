@@ -17,14 +17,23 @@ pub(super) fn open_filesystems<R: AsRef<[u8]>>(
     ),
     ExtractError,
 > {
-    // Get PFS image and encryption key.
+    let outer = open_outer_filesystem(pkg)?;
+    let inner = open_inner_filesystem(&outer)?;
+    Ok((outer, inner))
+}
+
+pub(super) fn open_outer_filesystem<R: AsRef<[u8]>>(
+    pkg: &Pkg<R>,
+) -> Result<std::sync::Arc<orbis_pfs::Pfs<'_>>, ExtractError> {
     let pfs_image = pkg.get_pfs_image().ok_or(ExtractError::NoPfsImage)?;
-
-    // Open outer PFS (encrypted, slice-backed).
     let key = (!pfs_image.ekpfs.is_empty()).then_some(pfs_image.ekpfs);
-    let outer_pfs = orbis_pfs::open_slice(pfs_image.data, key)
-        .map_err(|e| ExtractError::OpenOuterPfsFailed { source: e })?;
+    orbis_pfs::open_slice(pfs_image.data, key)
+        .map_err(|source| ExtractError::OpenOuterPfsFailed { source })
+}
 
+pub(super) fn open_inner_filesystem<'a>(
+    outer_pfs: &std::sync::Arc<orbis_pfs::Pfs<'a>>,
+) -> Result<std::sync::Arc<orbis_pfs::Pfs<'a>>, ExtractError> {
     let mut outer_root = outer_pfs
         .root()
         .open()
@@ -57,7 +66,7 @@ pub(super) fn open_filesystems<R: AsRef<[u8]>>(
             .map_err(|e| ExtractError::OpenInnerPfsFailed { source: e })?
     };
 
-    Ok((outer_pfs, inner_pfs))
+    Ok(inner_pfs)
 }
 
 pub(super) fn read_filesystem<R: AsRef<[u8]>>(

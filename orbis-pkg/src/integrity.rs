@@ -5,15 +5,9 @@ use crate::{
     Pkg,
     entry::{EntryId, PkgEntry},
 };
+pub use orbis_integrity::{Check, IntegrityReport, Reason, Status};
 use sha2::{Digest, Sha256};
 use std::{collections::HashSet, io};
-
-#[derive(Debug, Default)]
-pub struct IntegrityReport {
-    pub checked: usize,
-    /// Absent or all-zero digests cannot establish integrity.
-    pub missing: usize,
-}
 
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
@@ -29,6 +23,20 @@ impl<R: AsRef<[u8]>> Pkg<R> {
         include_pfs: bool,
         cancelled: impl Fn() -> bool,
     ) -> io::Result<IntegrityReport> {
+        self.verify_integrity_with(include_pfs, cancelled, |_| Ok(()))
+    }
+
+    /// Streams each check, including the first mismatch, before returning.
+    /// Malformed structures and I/O errors remain errors, not missing checks.
+    pub fn verify_integrity_with(
+        &self,
+        include_pfs: bool,
+        cancelled: impl Fn() -> bool,
+        mut observer: impl FnMut(Check<'_>) -> io::Result<()>,
+    ) -> io::Result<IntegrityReport> {
+        if cancelled() {
+            return Err(io::Error::from(io::ErrorKind::Interrupted));
+        }
         let raw = self.raw.as_ref();
         let header = self.header.raw_header();
         // Validate before collecting an ExactSizeIterator: a corrupt count
@@ -54,8 +62,13 @@ impl<R: AsRef<[u8]>> Pkg<R> {
                 return Err(io::Error::from(io::ErrorKind::Interrupted));
             }
             if expected.iter().all(|b| *b == 0) {
-                report.missing += 1;
-                return Ok(());
+                return report.record(
+                    name,
+                    Status::Unavailable,
+                    Some(Reason::MissingDigest),
+                    1,
+                    &mut observer,
+                );
             }
             let mut hash = Sha256::new();
             for part in parts {
@@ -67,10 +80,16 @@ impl<R: AsRef<[u8]>> Pkg<R> {
                 }
             }
             if hash.finalize().as_slice() != expected {
+                report.record(
+                    name,
+                    Status::Failed,
+                    Some(Reason::DigestMismatch),
+                    1,
+                    &mut observer,
+                )?;
                 return Err(invalid(format!("SHA-256 mismatch: {name}")));
             }
-            report.checked += 1;
-            Ok(())
+            report.record(name, Status::Passed, None, 1, &mut observer)
         };
         check("PKG header", &header.pkg_digest, &[&raw[..0xfe0]])?;
         check(
@@ -104,8 +123,8 @@ impl<R: AsRef<[u8]>> Pkg<R> {
         } else {
             // One missing table hash plus the unavailable per-entry checks.
             check("digest table absent", &[0; 32], &[])?;
-            for _ in &entries {
-                check("entry digest absent", &[0; 32], &[])?;
+            for entry in &entries {
+                check(&format!("entry 0x{:08X}", entry.id()), &[0; 32], &[])?;
             }
         }
         for (second, expected) in [

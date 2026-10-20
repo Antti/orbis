@@ -13,6 +13,7 @@ keywords = ["ps4", "playstation", "pfs", "filesystem", "orbis"]
 categories = ["filesystem", "parser-implementations"]
 
 [dependencies]
+orbis-integrity.workspace = true
 aes.workspace = true
 flate2 = "1.1.9"
 hmac = "0.12.1"
