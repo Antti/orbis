@@ -1,0 +1,149 @@
+name: Release packages
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Keep every version bump, even when multiple pushes arrive during a build.
+concurrency:
+  group: release-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  plan:
+    name: Validate release automation
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      build: ${{ steps.version.outputs.build }}
+      publish: ${{ steps.version.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python3 -m unittest discover -s scripts/release -p 'test_*.py' -v
+      - run: shellcheck scripts/release/*.sh packaging/AppRun
+      - name: Decide whether this commit needs a release
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+          BEFORE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: >-
+          python3 scripts/release/version.py
+          --event "$EVENT_NAME" --ref "$EVENT_REF" --before "$BEFORE_SHA"
+
+  linux:
+    name: Linux AppImage and Flatpak
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-linux-musl
+      - name: Install packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools flatpak dbus-x11
+      - run: cargo test --workspace --all-features --release --locked --target x86_64-unknown-linux-musl
+      - run: cargo build -p orbis-pkg-util --release --locked --target x86_64-unknown-linux-musl
+      - name: Build and smoke-test both packages
+        env:
+          RELEASE_VERSION: ${{ needs.plan.outputs.version }}
+        run: >-
+          bash scripts/release/package-linux.sh "$RELEASE_VERSION"
+          target/x86_64-unknown-linux-musl/release/orbis-pkg-util dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-x86_64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  macos:
+    name: macOS (${{ matrix.target }})
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - run: cargo test --workspace --all-features --release --locked --target ${{ matrix.target }}
+      - run: cargo build -p orbis-pkg-util --release --locked --target ${{ matrix.target }}
+      - name: Archive and smoke-test the native binary
+        env:
+          RELEASE_VERSION: ${{ needs.plan.outputs.version }}
+          RELEASE_TARGET: ${{ matrix.target }}
+        run: >-
+          bash scripts/release/package-macos.sh "$RELEASE_VERSION" "$RELEASE_TARGET"
+          "target/$RELEASE_TARGET/release/orbis-pkg-util" dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish versioned release
+    needs: [plan, linux, macos]
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/master' &&
+      needs.plan.outputs.publish == 'true'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - name: Check assets, tag the tested commit, and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.plan.outputs.version }}
+        run: python3 scripts/release/publish.py "$RELEASE_VERSION" dist

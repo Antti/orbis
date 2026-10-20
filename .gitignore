@@ -4,3 +4,7 @@
 
 # Build
 target/
+dist/
+
+# Release automation
+__pycache__/
