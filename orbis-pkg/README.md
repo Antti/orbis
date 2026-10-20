@@ -10,11 +10,12 @@ Rust library for parsing and extracting PlayStation 4 PKG files.
 
 ## Usage
 
-```rust
+```no_run
 use orbis_pkg::Pkg;
 
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
 // Open a PKG file
-let pkg = Pkg::open("game.pkg")?;
+let pkg = Pkg::new(std::fs::read("game.pkg")?)?;
 
 // Access header information
 let header = pkg.header();
@@ -29,8 +30,10 @@ for result in pkg.entries() {
 }
 
 // Access PFS image for game content
-if let Some(pfs_image) = pkg.pfs_image() {
-    let pfs = orbis_pfs::open_slice(pfs_image.data, Some(pfs_image.ekpfs))?;
-    // Extract PFS contents
+if let Some(pfs_image) = pkg.get_pfs_image() {
+    println!("PFS image: {} bytes", pfs_image.data.len());
+    // Pass data and ekpfs to orbis_pfs::open_slice to access the filesystem.
 }
+# Ok(())
+# }
 ```

@@ -2,7 +2,7 @@ use flate2::FlushDecompress;
 use std::cmp::min;
 use std::io::{self, ErrorKind};
 use zerocopy::{
-    FromBytes, Immutable, IntoBytes, KnownLayout,
+    FromBytes, Immutable, KnownLayout,
     little_endian::{U32, U64},
 };
 
@@ -37,6 +37,16 @@ const PFSC_MAGIC: &[u8; 4] = b"PFSC";
 #[derive(Debug, Snafu)]
 #[non_exhaustive]
 pub enum OpenError {
+    #[snafu(display("invalid or unsupported PFSC block size"))]
+    InvalidBlockSize,
+
+    #[snafu(display("invalid PFSC block mapping"))]
+    InvalidBlockMapping,
+
+    #[snafu(display("cannot allocate PFSC block mapping"))]
+    Allocate {
+        source: std::collections::TryReserveError,
+    },
     #[snafu(display("i/o failed"))]
     IoFailed { source: std::io::Error },
 
@@ -115,16 +125,53 @@ impl<I: Image> PfscImage<I> {
         let block_offsets_offset = header.block_offsets.get();
         let original_size = header.data_length.get();
 
+        ensure!(
+            block_size != 0
+                && block_size.is_power_of_two()
+                && block_size <= 32 * 1024 * 1024
+                && original_block_size == u64::from(block_size),
+            InvalidBlockSizeSnafu
+        );
         // Read block offsets.
-        let original_block_count = original_size / original_block_size + 1;
-        let mut compressed_blocks: Vec<u64> = vec![0; original_block_count as usize];
-
-        source
-            .read_exact_at(
-                block_offsets_offset,
-                compressed_blocks.as_mut_slice().as_mut_bytes(),
-            )
-            .map_err(|e| OpenError::ReadBlockMappingFailed { source: e })?;
+        let count = original_size
+            .div_ceil(original_block_size)
+            .checked_add(1)
+            .ok_or(OpenError::InvalidBlockMapping)?;
+        let table_end = count
+            .checked_mul(8)
+            .and_then(|size| block_offsets_offset.checked_add(size))
+            .ok_or(OpenError::InvalidBlockMapping)?;
+        ensure!(
+            block_offsets_offset >= size_of::<PfscHeader>() as u64 && table_end <= source.len(),
+            InvalidBlockMappingSnafu
+        );
+        let count = usize::try_from(count).map_err(|_| OpenError::InvalidBlockMapping)?;
+        let mut compressed_blocks = Vec::new();
+        compressed_blocks
+            .try_reserve_exact(count)
+            .map_err(|source| OpenError::Allocate { source })?;
+        // Decode explicitly so the table is portable to big-endian hosts too.
+        let mut table_buf = [0; 8192];
+        for i in (0..count).step_by(table_buf.len() / 8) {
+            let bytes = min(count - i, table_buf.len() / 8) * 8;
+            source
+                .read_exact_at(block_offsets_offset + i as u64 * 8, &mut table_buf[..bytes])
+                .map_err(|source| OpenError::ReadBlockMappingFailed { source })?;
+            for value in table_buf[..bytes].as_chunks::<8>().0 {
+                compressed_blocks.push(u64::from_le_bytes(*value));
+            }
+        }
+        for offsets in compressed_blocks.windows(2) {
+            let size = offsets[1]
+                .checked_sub(offsets[0])
+                .ok_or(OpenError::InvalidBlockMapping)?;
+            // Larger ranges encode sparse blocks; no source bytes are read for them.
+            ensure!(
+                size > original_block_size
+                    || (offsets[0] >= table_end && offsets[1] <= source.len()),
+                InvalidBlockMappingSnafu
+            );
+        }
 
         Ok(Self {
             source,
@@ -171,8 +218,11 @@ impl<I: Image> PfscImage<I> {
                     Err(e) => return Err(io::Error::other(e)),
                 };
 
-                if status != flate2::Status::StreamEnd || deflate.total_out() as usize != out.len()
-                {
+                let valid = min(
+                    self.original_block_size,
+                    self.original_size - num * self.original_block_size,
+                );
+                if status != flate2::Status::StreamEnd || deflate.total_out() < valid {
                     return Err(io::Error::other(format!(
                         "invalid data on PFSC block #{}",
                         num
@@ -215,12 +265,8 @@ impl<I: Image> Image for PfscImage<I> {
             self.decompress_block(block_index, &mut block_buf)?;
 
             // Trim the last block if it extends past the original size.
-            let block_end = (block_index + 1) * block_size;
-            let valid_in_block = if block_end > self.original_size {
-                (self.original_size - block_index * block_size) as usize
-            } else {
-                self.block_size as usize
-            };
+            let valid_in_block =
+                min(block_size, self.original_size - block_index * block_size) as usize;
 
             // Copy the relevant portion to the output buffer.
             let available = valid_in_block - offset_in_block;

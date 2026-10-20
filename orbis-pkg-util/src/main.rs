@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 /// Top-level application errors for orbis-pkg-util.
 #[derive(Debug, Snafu)]
 enum Error {
+    #[snafu(display("invalid title ID; specify an output directory with --output"))]
+    InvalidTitleId,
     #[snafu(display("failed to open PKG file '{}'", path.display()))]
     OpenPkg {
         path: PathBuf,
@@ -53,6 +55,7 @@ fn cmd_extract(path: &Path, output: Option<&Path>, force: bool, quiet: bool) -> 
         Some(path) => path.to_path_buf(),
         None => {
             let title_id = pkg.header().content_id().title_id();
+            validate_title_id(title_id)?;
             std::env::current_dir()
                 .context(GetCurrentDirSnafu)?
                 .join(title_id)
@@ -84,6 +87,14 @@ fn cmd_extract(path: &Path, output: Option<&Path>, force: bool, quiet: bool) -> 
         println!("Done in {:.2}s.", elapsed.as_secs_f64());
     }
 
+    Ok(())
+}
+
+fn validate_title_id(title_id: &str) -> Result<()> {
+    snafu::ensure!(
+        title_id.len() == 9 && title_id.bytes().all(|b| b.is_ascii_alphanumeric()),
+        InvalidTitleIdSnafu
+    );
     Ok(())
 }
 
@@ -148,4 +159,24 @@ fn cmd_list(path: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_title_id;
+
+    #[test]
+    fn default_output_requires_a_valid_title_id() {
+        assert!(validate_title_id("CUSA03173").is_ok());
+        for title in [
+            "",
+            "..",
+            "../escape",
+            "/tmp/evil",
+            "C:\\escape",
+            "CUSA\0evil",
+        ] {
+            assert!(validate_title_id(title).is_err(), "accepted {title:?}");
+        }
+    }
 }

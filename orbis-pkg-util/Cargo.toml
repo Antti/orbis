@@ -16,6 +16,7 @@ default = ["cli"]
 cli = ["dep:clap", "dep:indicatif"]
 
 [dependencies]
+cap-std = "4.0.3"
 memmap2 = "0.9"
 rayon = "1.10"
 orbis-pkg.workspace = true
@@ -34,3 +35,9 @@ optional = true
 [[bin]]
 name = "orbis-pkg-util"
 required-features = ["cli"]
+
+[dev-dependencies]
+rsa = "0.9"
+rand = "0.8"
+flate2 = "1.1.9"
+tempfile = "3"

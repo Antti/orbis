@@ -20,12 +20,12 @@ orbis-pkg-util extract game.pkg --output ./extracted
 orbis-pkg-util extract game.pkg -q  # quiet mode
 ```
 
-### metadata
+### info
 
 Display PKG metadata including content ID, type, and flags.
 
 ```bash
-orbis-pkg-util metadata game.pkg
+orbis-pkg-util info game.pkg
 ```
 
 Output:
@@ -43,14 +43,6 @@ DRM Type:      0x0F (PS4)
 ...
 ```
 
-### info
-
-Display PKG header information.
-
-```bash
-orbis-pkg-util info game.pkg
-```
-
 ### list
 
 List all entries in a PKG file.
@@ -58,3 +50,7 @@ List all entries in a PKG file.
 ```bash
 orbis-pkg-util list game.pkg
 ```
+
+Existing output files are preserved unless `--force` is supplied. Archive paths
+are confined to the selected output directory, and compressed files are
+decompressed during extraction.

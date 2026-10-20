@@ -22,6 +22,9 @@ pub enum ReadError {
 
     #[snafu(display("source buffer is too short to read the key seed"))]
     ReadKeySeedFailed,
+
+    #[snafu(display("inode count or index cannot be represented on this platform"))]
+    InvalidInodeCount,
 }
 
 use zerocopy::byteorder::little_endian::{U16, U32, U64};
@@ -85,6 +88,11 @@ impl PfsHeader {
         ensure!(
             raw_header.ndinodeblock.get() <= (u32::MAX as u64),
             TooManyInodeBlocksSnafu
+        );
+        ensure!(
+            usize::try_from(raw_header.ndinode.get()).is_ok()
+                && usize::try_from(raw_header.superroot_ino.get()).is_ok(),
+            InvalidInodeCountSnafu
         );
 
         // Read key seed from the rest of the header.

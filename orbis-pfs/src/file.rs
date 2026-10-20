@@ -175,6 +175,9 @@ impl<'a> File<'a> {
     /// This is the primary read method. It takes `&self` (not `&mut self`)
     /// and requires no synchronization, making it safe to call from multiple
     /// threads concurrently.
+    ///
+    /// Compressed files expose their stored PFSC bytes, up to [`Self::compressed_len`].
+    /// Use [`crate::pfsc::PfscImage`] to read their decompressed contents.
     pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
         pfs_read_at(&self.pfs, self.inode, offset, buf)
     }
@@ -264,22 +267,19 @@ impl Read for FileReader<'_> {
 
 impl Seek for FileReader<'_> {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        let file_len = self.file.len();
+        let file_len = stored_size(self.file.inode_ref());
 
         let new_pos = match pos {
-            SeekFrom::Start(offset) => offset as i64,
-            SeekFrom::End(offset) => file_len as i64 + offset,
-            SeekFrom::Current(offset) => self.pos as i64 + offset,
+            SeekFrom::Start(offset) => i128::from(offset),
+            SeekFrom::End(offset) => i128::from(file_len) + i128::from(offset),
+            SeekFrom::Current(offset) => i128::from(self.pos) + i128::from(offset),
         };
 
-        if new_pos < 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "seek to a negative position",
-            ));
-        }
+        let new_pos = u64::try_from(new_pos).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "seek position is out of range")
+        })?;
 
-        self.pos = new_pos as u64;
+        self.pos = new_pos;
         Ok(self.pos)
     }
 }
@@ -313,12 +313,20 @@ impl Image for PfsFileImage<'_> {
     }
 
     fn len(&self) -> u64 {
-        self.pfs.inode(self.inode).size()
+        stored_size(self.pfs.inode(self.inode))
+    }
+}
+
+fn stored_size(inode: &Inode) -> u64 {
+    if inode.flags().is_compressed() {
+        inode.compressed_len()
+    } else {
+        inode.size()
     }
 }
 
 fn pfs_read_at(pfs: &Pfs<'_>, inode: usize, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
-    let file_size = pfs.inode(inode).size();
+    let file_size = stored_size(pfs.inode(inode));
 
     if buf.is_empty() || offset >= file_size {
         return Ok(0);

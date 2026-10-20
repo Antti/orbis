@@ -45,6 +45,13 @@ pub mod image;
 pub mod inode;
 pub mod pfsc;
 
+#[cfg(test)]
+mod tests;
+
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+mod readme {}
+
 /// Shared errors for PFS open operations.
 ///
 /// These errors can occur in both [`open_slice()`] and [`open_image()`] during
@@ -55,6 +62,17 @@ pub mod pfsc;
 pub enum OpenError {
     #[snafu(display("invalid block size"))]
     InvalidBlockSize,
+
+    #[snafu(display("unsupported mode: {mode}"))]
+    UnsupportedMode { mode: Mode },
+
+    #[snafu(display("invalid inode table size"))]
+    InvalidInodeTable,
+
+    #[snafu(display("cannot allocate inode table"))]
+    AllocateInodes {
+        source: std::collections::TryReserveError,
+    },
 
     #[snafu(display("cannot parse inode"))]
     ParseInodeFailed { source: inode::FromRawError },
@@ -126,14 +144,6 @@ pub struct Pfs<'a> {
     /// Enables zero-copy file access via [`file::File::as_slice()`].
     data: Option<&'a [u8]>,
 }
-
-// SAFETY: All fields are Send + Sync:
-// - Box<dyn Image + 'a>: Image requires Send + Sync
-// - Vec<Inode>: Inode contains only Copy/primitive types
-// - Vec<Vec<u32>>, usize, u32: trivially Send + Sync
-// - Option<&'a [u8]>: &[u8] is Send + Sync
-unsafe impl Send for Pfs<'_> {}
-unsafe impl Sync for Pfs<'_> {}
 
 impl<'a> std::fmt::Debug for Pfs<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -334,13 +344,27 @@ fn open_inner<'a>(
     let inode_block_count = header.inode_block_count();
     let super_root = header.super_root_inode();
 
+    ensure!(!mode.is_64bits(), UnsupportedModeSnafu { mode });
     ensure!(
-        block_size > 0 && block_size.is_power_of_two(),
+        (4096..=32 * 1024 * 1024).contains(&block_size)
+            && block_size.is_power_of_two()
+            && u64::from(block_size) <= image.len(),
         InvalidBlockSizeSnafu
     );
 
+    let inode_size = if mode.is_signed() { 712 } else { 168 };
+    let table_capacity = u64::from(inode_block_count) * u64::from(block_size / inode_size);
+    ensure!(
+        u64::from(inode_block_count) < image.len() / u64::from(block_size)
+            && inode_count as u64 <= table_capacity,
+        InvalidInodeTableSnafu
+    );
+
     // Read and parse all inodes.
-    let mut inodes: Vec<Inode> = Vec::with_capacity(inode_count);
+    let mut inodes: Vec<Inode> = Vec::new();
+    inodes
+        .try_reserve_exact(inode_count)
+        .context(AllocateInodesSnafu)?;
     let mut block_buf = vec![0; block_size as usize];
 
     for block_num in 0..inode_block_count {
@@ -355,6 +379,7 @@ fn open_inner<'a>(
         }
     }
 
+    ensure!(inodes.len() == inode_count, InvalidInodeTableSnafu);
     ensure!(super_root < inodes.len(), InvalidSuperRootSnafu);
 
     // Precompute block maps for all inodes.

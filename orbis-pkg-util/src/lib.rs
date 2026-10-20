@@ -11,12 +11,15 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use orbis_pkg_util::{open_pkg, PkgExtractor, SilentProgress};
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let pkg = unsafe { open_pkg("game.pkg".as_ref()) }.expect("failed to open PKG");
 //! let extractor = PkgExtractor::new(&pkg, SilentProgress, false);
 //! extractor.extract("output/").expect("extraction failed");
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Custom progress reporting
