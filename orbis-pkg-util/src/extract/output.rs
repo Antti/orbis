@@ -73,7 +73,37 @@ fn publish_new(parent: &Dir, temporary: &str, destination: &Path) -> io::Result<
         )?;
         Ok(())
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+        // cap-std's Windows directory handles deny FILE_SHARE_DELETE, keeping
+        // the directory stable during path-based operations (as in its rename).
+        // Only single filenames, never archive-controlled parents, are joined.
+        let directory = parent.try_clone()?.into_std_file();
+        let root = winx::file::get_file_path(&directory)?;
+        let from: Vec<_> = root
+            .join(temporary)
+            .as_os_str()
+            .encode_wide()
+            .chain([0])
+            .collect();
+        let to: Vec<_> = root
+            .join(destination)
+            .as_os_str()
+            .encode_wide()
+            .chain([0])
+            .collect();
+        // No REPLACE_EXISTING or COPY_ALLOWED: fail if the destination appears,
+        // and rename within this directory without requiring hard-link support.
+        let result = unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) };
+        if result == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         parent.hard_link(temporary, parent, destination)
     }
@@ -123,21 +153,6 @@ impl Output {
                 path: self.path.join(path),
                 source,
             })
-    }
-
-    pub fn child(&self, name: &str) -> Result<Self, ExtractError> {
-        self.create_dir(Path::new(name))?;
-        let dir =
-            self.dir
-                .open_dir(name)
-                .map_err(|source| ExtractError::CreateDirectoryFailed {
-                    path: self.path.join(name),
-                    source,
-                })?;
-        Ok(Self {
-            dir,
-            path: self.path.join(name),
-        })
     }
 
     pub fn check_file(&self, path: &Path, overwrite: bool) -> Result<(), ExtractError> {

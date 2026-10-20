@@ -30,7 +30,9 @@
 pub mod extract;
 pub mod progress;
 
-pub use self::extract::{ExtractError, PkgExtractor};
+pub use self::extract::{
+    ExtractError, ExtractOptions, ExtractionReport, ListedItem, PkgExtractor, SkippedEntry,
+};
 pub use self::progress::{ExtractProgress, SilentProgress};
 
 #[cfg(feature = "cli")]
@@ -83,6 +85,12 @@ pub unsafe fn open_pkg(path: &Path) -> Result<orbis_pkg::Pkg<memmap2::Mmap>, Ope
 /// The input file must not be modified or truncated while the returned package
 /// is in use, as with [`open_pkg`].
 pub unsafe fn inspect_pkg(path: &Path) -> Result<orbis_pkg::Pkg<memmap2::Mmap>, OpenPkgError> {
+    // Check before opening: opening a directory fails on Windows, and opening
+    // a FIFO can block on Unix. Recheck the actual handle below as well.
+    snafu::ensure!(
+        std::fs::metadata(path).context(MetadataSnafu)?.is_file(),
+        NotFileSnafu
+    );
     let file = std::fs::File::open(path).context(OpenFileSnafu)?;
     snafu::ensure!(
         file.metadata().context(MetadataSnafu)?.is_file(),

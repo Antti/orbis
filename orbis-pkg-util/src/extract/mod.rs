@@ -1,33 +1,77 @@
 mod error;
+mod filesystem;
 mod output;
 
 #[cfg(test)]
 mod tests;
 
 pub use self::error::ExtractError;
-
+use self::filesystem::{FileWork, Filesystem, read_filesystem};
 use self::output::{Output, valid_name};
 use crate::progress::ExtractProgress;
-use orbis_pfs::directory::DirEntry;
 use orbis_pfs::image::Image;
-use orbis_pkg::Pkg;
+use orbis_pkg::{Pkg, entry::PkgEntry};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::collections::HashSet;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-/// Extracts a PKG file to the specified output directory.
+/// Selects extraction-relative paths. A directory selects its descendants.
+/// Empty `paths` selects everything in the requested scope; globs are not used.
+#[derive(Debug, Default, Clone)]
+pub struct ExtractOptions {
+    pub metadata_only: bool,
+    pub paths: Vec<String>,
+}
+
+/// A path that could not be extracted or checked.
+#[derive(Debug, Clone)]
+pub struct SkippedEntry {
+    pub path: String,
+    pub reason: String,
+}
+
+/// Completed files and omissions. Callers must check `skipped` before reporting
+/// full success. Counts include both metadata entries and filesystem files.
+#[derive(Debug, Default)]
+pub struct ExtractionReport {
+    pub files: usize,
+    pub bytes: u64,
+    pub skipped: Vec<SkippedEntry>,
+}
+
+/// A metadata entry or filesystem item. Paths use `/` on every platform and
+/// match full extraction destinations. Unknown metadata IDs have no path.
+#[derive(Debug, Clone)]
+pub struct ListedItem {
+    pub path: Option<String>,
+    pub is_directory: bool,
+    pub size: u64,
+    pub entry_id: Option<u32>,
+    pub encrypted: bool,
+    pub key_index: Option<usize>,
+}
+
+/// Extracts and inspects a PKG using an optional progress reporter.
 pub struct PkgExtractor<'a, R: AsRef<[u8]> + Sync, P: ExtractProgress> {
     pkg: &'a Pkg<R>,
     progress: P,
     overwrite: bool,
 }
 
+struct EntryWork {
+    index: usize,
+    entry: PkgEntry,
+    path: Option<PathBuf>,
+}
+
+struct Plan<'a> {
+    entries: Vec<EntryWork>,
+    filesystem: Filesystem<'a>,
+}
+
 impl<'a, R: AsRef<[u8]> + Sync, P: ExtractProgress> PkgExtractor<'a, R, P> {
-    /// Creates a new extractor for the given PKG.
-    ///
-    /// If `overwrite` is `true`, existing files will be replaced during extraction.
-    /// Otherwise, extraction will fail if an output file already exists.
+    /// If `overwrite` is true, replace each file only after successfully writing it.
     pub fn new(pkg: &'a Pkg<R>, progress: P, overwrite: bool) -> Self {
         Self {
             pkg,
@@ -36,253 +80,355 @@ impl<'a, R: AsRef<[u8]> + Sync, P: ExtractProgress> PkgExtractor<'a, R, P> {
         }
     }
 
-    /// Extracts the entire PKG to the specified directory.
-    ///
-    /// This extracts:
-    /// - PKG entries to `{output}/sce_sys/`
-    /// - PFS contents to `{output}/`
-    ///
-    /// PFS file extraction is parallelised with rayon.
+    /// Extracts metadata to `sce_sys/` and filesystem contents to the output root.
+    /// Returns an error when any entries are skipped; completed files remain.
     pub fn extract(&self, output: impl AsRef<Path>) -> Result<(), ExtractError> {
-        let output = Output::new(output.as_ref())?;
-
-        // Extract PKG entries to sce_sys subdirectory.
-        self.extract_entries_into(&output.child("sce_sys")?)?;
-
-        // Extract PFS contents.
-        self.extract_pfs_into(&output)?;
-
-        Ok(())
+        complete(self.extract_with_options(output, &ExtractOptions::default())?)
     }
 
-    /// Extracts only the PKG entries (metadata files) to the specified directory.
+    /// Extracts only metadata, directly into the supplied directory.
     pub fn extract_entries(&self, output: impl AsRef<Path>) -> Result<(), ExtractError> {
-        self.extract_entries_into(&Output::new(output.as_ref())?)
+        let plan = self.plan(
+            &ExtractOptions {
+                metadata_only: true,
+                paths: vec![],
+            },
+            false,
+        )?;
+        complete(self.run(plan, Some(output.as_ref()))?)
     }
 
-    fn extract_entries_into(&self, output: &Output) -> Result<(), ExtractError> {
-        let total = self.pkg.entry_count();
-        let mut extracted = 0usize;
-        let mut skipped = 0usize;
-
-        for result in self.pkg.entries() {
-            let (num, entry) =
-                result.map_err(|e| ExtractError::ReadEntryFailed { num: 0, source: e })?;
-
-            // Get file path for this entry (skip entries without known paths).
-            let path = match entry.to_path("") {
-                Some(p) => p,
-                None => continue,
-            };
-
-            // Report progress.
-            self.progress
-                .entry_start(&output.path.join(&path), num, total);
-
-            // Get decrypted entry data, skipping entries that can't be decrypted.
-            let data = match self.pkg.entry_data(&entry) {
-                Ok(data) => data,
-                Err(orbis_pkg::EntryDataError::NoDecryptionKey { key_index }) => {
-                    self.progress.entry_skipped(
-                        &output.path.join(&path),
-                        &format!("no key for index {}", key_index),
-                    );
-                    skipped += 1;
-                    continue;
-                }
-                Err(e) => return Err(ExtractError::GetEntryDataFailed { num, source: e }),
-            };
-
-            // Create parent directory.
-            if let Some(parent) = path.parent()
-                && !parent.as_os_str().is_empty()
-            {
-                output.create_dir(parent)?;
-            }
-
-            // Write file.
-            let mut file = output.create_file(&path, self.overwrite)?;
-
-            file.write_all(&data)
-                .map_err(|e| ExtractError::WriteFailed {
-                    path: output.path.join(&path),
-                    source: e,
-                })?;
-            file.commit()?;
-
-            extracted += 1;
-        }
-
-        if total > 0 {
-            self.progress.entries_completed(extracted, skipped);
-        }
-
-        Ok(())
-    }
-
-    /// Extracts the PFS contents to the specified directory.
-    ///
-    /// Directories are created sequentially, then all files are extracted
-    /// in parallel using rayon.
+    /// Extracts only filesystem contents.
     pub fn extract_pfs(&self, output: impl AsRef<Path>) -> Result<(), ExtractError> {
-        self.extract_pfs_into(&Output::new(output.as_ref())?)
+        let plan = Plan {
+            entries: vec![],
+            filesystem: read_filesystem(self.pkg)?,
+        };
+        complete(self.run(plan, Some(output.as_ref()))?)
     }
 
-    fn extract_pfs_into(&self, output: &Output) -> Result<(), ExtractError> {
-        // Get PFS image and encryption key.
-        let pfs_image = self.pkg.get_pfs_image().ok_or(ExtractError::NoPfsImage)?;
+    /// Extracts selected paths, returning an explicit report of any omissions.
+    pub fn extract_with_options(
+        &self,
+        output: impl AsRef<Path>,
+        options: &ExtractOptions,
+    ) -> Result<ExtractionReport, ExtractError> {
+        let plan = self.plan(options, true)?;
+        self.run(plan, Some(output.as_ref()))
+    }
 
-        // Open outer PFS (encrypted, slice-backed).
-        let outer_pfs = orbis_pfs::open_slice(pfs_image.data, Some(pfs_image.ekpfs))
-            .map_err(|e| ExtractError::OpenOuterPfsFailed { source: e })?;
+    /// Reads and decompresses selected data without writing output files.
+    /// This does not validate signatures, MACs, licenses, or authenticity.
+    pub fn verify(&self, options: &ExtractOptions) -> Result<ExtractionReport, ExtractError> {
+        let plan = self.plan(options, true)?;
+        self.run(plan, None)
+    }
 
-        let mut outer_root = outer_pfs
-            .root()
-            .open()
-            .map_err(|e| ExtractError::OpenOuterSuperRootFailed { source: e })?;
+    /// Lists the PKG entry table without loading encryption keys.
+    pub fn list_entries(&self) -> Result<Vec<ListedItem>, ExtractError> {
+        self.entries(true)?
+            .into_iter()
+            .map(|work| {
+                Ok(ListedItem {
+                    path: work.path.as_deref().map(portable_path),
+                    is_directory: false,
+                    size: work.entry.data_size() as u64,
+                    entry_id: Some(work.entry.id()),
+                    encrypted: work.entry.is_encrypted(),
+                    key_index: work.entry.is_encrypted().then(|| work.entry.key_index()),
+                })
+            })
+            .collect()
+    }
 
-        // Open outer uroot directory.
-        let mut outer_uroot = match outer_root.remove(b"uroot") {
-            Some(DirEntry::Directory(d)) => d
-                .open()
-                .map_err(|e| ExtractError::OpenOuterUrootFailed { source: e })?,
-            _ => return Err(ExtractError::NoOuterUroot),
-        };
+    /// Lists filesystem paths without extracting their contents.
+    pub fn list_files(&self) -> Result<Vec<ListedItem>, ExtractError> {
+        let filesystem = read_filesystem(self.pkg)?;
+        let mut items: Vec<_> = filesystem
+            .dirs
+            .iter()
+            .map(|path| ListedItem {
+                path: Some(portable_path(path)),
+                is_directory: true,
+                size: 0,
+                entry_id: None,
+                encrypted: false,
+                key_index: None,
+            })
+            .collect();
+        items.extend(filesystem.files.iter().map(|work| ListedItem {
+            path: Some(portable_path(&work.output_path)),
+            is_directory: false,
+            size: work.file.len(),
+            entry_id: None,
+            encrypted: false,
+            key_index: None,
+        }));
+        items.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(items)
+    }
 
-        // Get inner PFS image (pfs_image.dat).
-        let inner_file = match outer_uroot.remove(b"pfs_image.dat") {
-            Some(DirEntry::File(f)) => f,
-            _ => return Err(ExtractError::NoInnerImage),
-        };
+    fn entries(&self, prefix: bool) -> Result<Vec<EntryWork>, ExtractError> {
+        self.pkg
+            .entries()
+            .enumerate()
+            .map(|(index, result)| {
+                let (_, entry) = result
+                    .map_err(|source| ExtractError::ReadEntryFailed { num: index, source })?;
+                Ok(EntryWork {
+                    index,
+                    path: entry.to_path(if prefix { "sce_sys" } else { "" }),
+                    entry,
+                })
+            })
+            .collect()
+    }
 
-        // Convert the file handle to an Image adapter, then open the inner PFS.
-        let is_compressed = inner_file.is_compressed();
-        let file_image = inner_file.into_image();
-
-        let inner_pfs = if is_compressed {
-            let pfsc = orbis_pfs::pfsc::PfscImage::open(file_image)
-                .map_err(|e| ExtractError::CreateDecompressorFailed { source: e })?;
-            orbis_pfs::open_image(pfsc)
-                .map_err(|e| ExtractError::OpenInnerPfsFailed { source: e })?
+    fn plan(&self, options: &ExtractOptions, prefix: bool) -> Result<Plan<'a>, ExtractError> {
+        self.check_cancelled()?;
+        let selection = Selection::new(&options.paths)?;
+        self.progress.phase("Reading package entries");
+        let mut entries = self.entries(prefix)?;
+        if !options.metadata_only {
+            self.progress.phase("Reading filesystem");
+        }
+        let mut filesystem = if options.metadata_only {
+            Filesystem {
+                dirs: vec![],
+                files: vec![],
+            }
         } else {
-            orbis_pfs::open_image(file_image)
-                .map_err(|e| ExtractError::OpenInnerPfsFailed { source: e })?
+            read_filesystem(self.pkg)?
         };
-
-        let mut inner_root = inner_pfs
-            .root()
-            .open()
-            .map_err(|e| ExtractError::OpenInnerSuperRootFailed { source: e })?;
-
-        // Get inner uroot.
-        let inner_uroot = match inner_root.remove(b"uroot") {
-            Some(DirEntry::Directory(d)) => d,
-            _ => return Err(ExtractError::NoInnerUroot),
-        };
-
-        // Phase 1: Walk the directory tree and collect all work items.
-        let mut dirs: Vec<PathBuf> = Vec::new();
-        let mut files: Vec<FileWork<'_>> = Vec::new();
-
-        collect_pfs_items(inner_uroot, &mut dirs, &mut files)?;
-
-        if dirs.is_empty() && files.is_empty() {
-            return Ok(());
-        }
-
-        self.progress.pfs_start(files.len());
-
-        // Phase 2: Create all directories (sequential — fast, must precede file writes).
-        for dir in &dirs {
-            self.progress.pfs_directory(&output.path.join(dir));
-            output.create_dir(dir)?;
-        }
-
-        // Phase 3: Extract all files in parallel.
-        let overwrite = self.overwrite;
-
-        files.par_iter().try_for_each(|work| {
-            self.progress
-                .pfs_file(&output.path.join(&work.output_path), work.file.len());
-            extract_single_file(work, output, &self.progress, overwrite)
-        })?;
-
-        self.progress.pfs_completed();
-
-        Ok(())
-    }
-}
-
-/// A file to be extracted, collected during the directory walk.
-struct FileWork<'a> {
-    file: orbis_pfs::file::File<'a>,
-    output_path: PathBuf,
-    pfs_path: String,
-}
-
-/// Walks a PFS directory tree and collects all directories
-/// and files into flat lists for later parallel extraction.
-fn collect_pfs_items<'a>(
-    dir: orbis_pfs::directory::Directory<'a>,
-    dirs: &mut Vec<PathBuf>,
-    files: &mut Vec<FileWork<'a>>,
-) -> Result<(), ExtractError> {
-    let mut pending = vec![(dir, PathBuf::new(), String::from("/"))];
-    let mut visited = HashSet::new();
-    while let Some((dir, output, pfs_path)) = pending.pop() {
-        if !visited.insert(dir.inode_number()) {
-            return Err(ExtractError::RepeatedDirectory { path: pfs_path });
-        }
-        let items = dir
-            .open()
-            .map_err(|e| ExtractError::OpenPfsDirectoryFailed {
-                path: pfs_path.to_string(),
-                source: e,
-            })?;
-
-        for (name, item) in items {
-            let name_str =
-                std::str::from_utf8(&name).map_err(|_| ExtractError::UnsupportedFileName {
-                    path: format!("{}{}", pfs_path, String::from_utf8_lossy(&name)),
-                })?;
-            if !valid_name(name_str) {
-                return Err(ExtractError::UnsupportedFileName {
-                    path: format!("{}{}", pfs_path, name_str),
+        let known: Vec<_> = entries
+            .iter()
+            .filter_map(|e| e.path.as_ref())
+            .chain(filesystem.dirs.iter())
+            .chain(filesystem.files.iter().map(|f| &f.output_path))
+            .collect();
+        for selected in &selection.paths {
+            if !known.iter().any(|path| path.starts_with(selected)) {
+                return Err(ExtractError::PathNotFound {
+                    path: portable_path(selected),
                 });
             }
-
-            let item_output = output.join(name_str);
-            let item_pfs_path = format!("{}{}/", pfs_path, name_str);
-
-            match item {
-                DirEntry::Directory(subdir) => {
-                    dirs.push(item_output.clone());
-                    pending.push((subdir, item_output, item_pfs_path));
-                }
-                DirEntry::File(file) => {
-                    files.push(FileWork {
-                        file,
-                        output_path: item_output,
-                        pfs_path: item_pfs_path,
-                    });
-                }
-                _ => unreachable!(),
+        }
+        entries.retain(|entry| {
+            entry
+                .path
+                .as_ref()
+                .map(|p| selection.includes(p))
+                .unwrap_or(selection.paths.is_empty())
+        });
+        filesystem
+            .files
+            .retain(|file| selection.includes(&file.output_path));
+        filesystem.dirs.retain(|dir| {
+            selection.includes(dir)
+                || filesystem
+                    .files
+                    .iter()
+                    .any(|file| file.output_path.starts_with(dir))
+        });
+        let mut destinations = HashSet::new();
+        for path in entries
+            .iter()
+            .filter_map(|entry| entry.path.as_ref())
+            .chain(filesystem.files.iter().map(|file| &file.output_path))
+        {
+            if !destinations.insert(path.clone()) {
+                return Err(ExtractError::DuplicatePath {
+                    path: portable_path(path),
+                });
             }
+        }
+        Ok(Plan {
+            entries,
+            filesystem,
+        })
+    }
+
+    fn check_cancelled(&self) -> Result<(), ExtractError> {
+        if self.progress.is_cancelled() {
+            Err(ExtractError::Cancelled)
+        } else {
+            Ok(())
         }
     }
 
-    Ok(())
+    fn run(
+        &self,
+        plan: Plan<'_>,
+        output_path: Option<&Path>,
+    ) -> Result<ExtractionReport, ExtractError> {
+        self.check_cancelled()?;
+        let output = output_path.map(Output::new).transpose()?;
+        // Detect known conflicts before writing any files; publication also checks
+        // atomically to catch destinations created after this preflight.
+        if let Some(output) = &output {
+            for path in plan
+                .entries
+                .iter()
+                .filter_map(|entry| entry.path.as_ref())
+                .chain(plan.filesystem.files.iter().map(|work| &work.output_path))
+            {
+                output.check_file(path, self.overwrite)?;
+            }
+            for dir in &plan.filesystem.dirs {
+                output.create_dir(dir)?;
+            }
+        }
+        let mut report = ExtractionReport::default();
+        let total_bytes = plan
+            .entries
+            .iter()
+            .map(|entry| entry.entry.data_size() as u64)
+            .chain(plan.filesystem.files.iter().map(|work| work.file.len()))
+            .try_fold(0u64, u64::checked_add)
+            .ok_or(ExtractError::SizeOverflow)?;
+        self.progress.bytes_total(total_bytes);
+        self.progress.phase(if output.is_some() {
+            "Extracting metadata"
+        } else {
+            "Checking metadata"
+        });
+        let mut extracted_entries = 0;
+        for work in &plan.entries {
+            self.check_cancelled()?;
+            let path_label = work
+                .path
+                .as_deref()
+                .map(portable_path)
+                .unwrap_or_else(|| format!("entry 0x{:08X}", work.entry.id()));
+            if work.path.is_none() && output.is_some() {
+                self.skip(
+                    &mut report,
+                    path_label,
+                    "unknown entry ID; no output path".into(),
+                );
+                continue;
+            }
+            let data = match self.pkg.entry_data(&work.entry) {
+                Ok(data) => data,
+                Err(orbis_pkg::EntryDataError::NoDecryptionKey { key_index }) => {
+                    self.skip(
+                        &mut report,
+                        path_label,
+                        format!("no decryption key for slot {key_index}"),
+                    );
+                    continue;
+                }
+                Err(source) => {
+                    return Err(ExtractError::GetEntryDataFailed {
+                        num: work.index,
+                        source,
+                    });
+                }
+            };
+            if let Some(output) = &output {
+                let path = work.path.as_ref().unwrap();
+                self.progress
+                    .entry_start(path, work.index, plan.entries.len());
+                if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                    output.create_dir(parent)?;
+                }
+                let mut file = output.create_file(path, self.overwrite)?;
+                for chunk in data.chunks(1024 * 1024) {
+                    self.check_cancelled()?;
+                    file.write_all(chunk)
+                        .map_err(|source| ExtractError::WriteFailed {
+                            path: output.path.join(path),
+                            source,
+                        })?;
+                    self.progress.bytes_processed(chunk.len() as u64);
+                }
+                self.check_cancelled()?;
+                file.commit()?;
+            } else {
+                self.progress.bytes_processed(data.len() as u64);
+            }
+            extracted_entries += 1;
+            report.files += 1;
+            report.bytes += data.len() as u64;
+        }
+        self.progress
+            .entries_completed(extracted_entries, report.skipped.len());
+        self.progress.phase(if output.is_some() {
+            "Extracting filesystem"
+        } else {
+            "Checking filesystem"
+        });
+        self.progress.pfs_start(plan.filesystem.files.len());
+        let results: Result<Vec<u64>, ExtractError> = plan
+            .filesystem
+            .files
+            .par_iter()
+            .map(|work| {
+                self.check_cancelled()?;
+                self.progress.pfs_file(&work.output_path, work.file.len());
+                process_file(work, output.as_ref(), &self.progress, self.overwrite)
+            })
+            .collect();
+        for bytes in results? {
+            report.files += 1;
+            report.bytes += bytes;
+        }
+        self.progress.pfs_completed();
+        Ok(report)
+    }
+
+    fn skip(&self, report: &mut ExtractionReport, path: String, reason: String) {
+        self.progress.entry_skipped(Path::new(&path), &reason);
+        report.skipped.push(SkippedEntry { path, reason });
+    }
 }
 
-/// Extracts a single file from the PFS to disk.
-///
-/// Called from rayon worker threads in parallel.
-fn extract_single_file<P: ExtractProgress>(
+fn complete(report: ExtractionReport) -> Result<(), ExtractError> {
+    if report.skipped.is_empty() {
+        Ok(())
+    } else {
+        Err(ExtractError::Incomplete {
+            skipped: report.skipped.len(),
+        })
+    }
+}
+
+fn portable_path(path: &Path) -> String {
+    path.components()
+        .map(|part| part.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+struct Selection {
+    paths: Vec<PathBuf>,
+}
+impl Selection {
+    fn new(paths: &[String]) -> Result<Self, ExtractError> {
+        let mut normalized = Vec::new();
+        for path in paths {
+            let path = path.trim_end_matches('/');
+            if path.is_empty() || !path.split('/').all(valid_name) {
+                return Err(ExtractError::InvalidSelection {
+                    path: path.to_owned(),
+                });
+            }
+            normalized.push(path.split('/').collect());
+        }
+        Ok(Self { paths: normalized })
+    }
+
+    fn includes(&self, path: &Path) -> bool {
+        self.paths.is_empty() || self.paths.iter().any(|selected| path.starts_with(selected))
+    }
+}
+
+fn process_file<P: ExtractProgress>(
     work: &FileWork<'_>,
-    output: &Output,
+    output: Option<&Output>,
     progress: &P,
     overwrite: bool,
-) -> Result<(), ExtractError> {
+) -> Result<u64, ExtractError> {
     let source: Box<dyn Image + '_> = if work.file.is_compressed() {
         Box::new(
             orbis_pfs::pfsc::PfscImage::open(work.file.clone().into_image()).map_err(|source| {
@@ -295,35 +441,56 @@ fn extract_single_file<P: ExtractProgress>(
     } else {
         Box::new(work.file.clone().into_image())
     };
-    let mut dest = output.create_file(&work.output_path, overwrite)?;
-
-    let mut buffer = vec![0u8; 8 * 1024 * 1024]; // 8MB buffer
-    let mut offset = 0u64;
-
+    if source.len() != work.file.len() {
+        return Err(ExtractError::FileSizeMismatch {
+            path: work.pfs_path.clone(),
+            expected: work.file.len(),
+            actual: source.len(),
+        });
+    }
+    let mut dest = output
+        .map(|out| out.create_file(&work.output_path, overwrite))
+        .transpose()?;
+    let mut buffer = vec![0u8; 8 * 1024 * 1024];
+    let mut offset = 0;
     loop {
+        if progress.is_cancelled() {
+            return Err(ExtractError::Cancelled);
+        }
         let read = match source.read_at(offset, &mut buffer) {
             Ok(0) => break,
-            Ok(n) => n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => {
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(source) => {
                 return Err(ExtractError::ReadPfsFileFailed {
                     path: work.pfs_path.clone(),
-                    source: e,
+                    source,
                 });
             }
         };
-
-        dest.write_all(&buffer[..read])
-            .map_err(|e| ExtractError::WriteFailed {
-                path: output.path.join(&work.output_path),
-                source: e,
-            })?;
-
+        if let Some(dest) = &mut dest {
+            dest.write_all(&buffer[..read])
+                .map_err(|source| ExtractError::WriteFailed {
+                    path: output.unwrap().path.join(&work.output_path),
+                    source,
+                })?;
+        }
         offset += read as u64;
+        progress.bytes_processed(read as u64);
     }
-
-    dest.commit()?;
+    if offset != source.len() {
+        return Err(ExtractError::FileSizeMismatch {
+            path: work.pfs_path.clone(),
+            expected: source.len(),
+            actual: offset,
+        });
+    }
+    if progress.is_cancelled() {
+        return Err(ExtractError::Cancelled);
+    }
+    if let Some(dest) = dest {
+        dest.commit()?;
+    }
     progress.pfs_file_completed(offset);
-
-    Ok(())
+    Ok(offset)
 }
