@@ -63,7 +63,7 @@ fn inspection_and_json_work_without_keys_or_a_readable_filesystem() {
     bytes[0x2000..0x2008].fill(0);
     std::fs::write(dir.path().join("game.pkg"), bytes).unwrap();
     for args in [
-        vec!["info", "game.pkg", "--json"],
+        vec!["info", "game.pkg", "--header-only", "--json"],
         vec!["list", "game.pkg", "--entries", "--json"],
     ] {
         let output = run(dir.path(), &args);
@@ -188,8 +188,11 @@ fn unknown_entries_are_visible_and_not_silently_lost() {
     be32(&mut bytes, 0x1040, 0xdeadbeef);
     std::fs::write(dir.path().join("game.pkg"), bytes).unwrap();
     let output = run(dir.path(), &["extract", "game.pkg", "-o", "out", "-q"]);
-    assert_eq!(output.status.code(), Some(3));
-    assert!(text(&output.stderr).contains("unknown entry ID"));
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    assert_eq!(
+        std::fs::read(dir.path().join("out/sce_sys/entry_DEADBEEF.bin")).unwrap(),
+        b"NEW"
+    );
     let output = run(dir.path(), &["list", "game.pkg", "--entries", "--json"]);
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(
@@ -197,7 +200,8 @@ fn unknown_entries_are_visible_and_not_silently_lost() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|item| item["entry_id"] == 0xdeadbeefu32 && item["path"].is_null())
+            .any(|item| item["entry_id"] == 0xdeadbeefu32
+                && item["path"] == "sce_sys/entry_DEADBEEF.bin")
     );
     // An unknown filename does not prevent checking the raw entry payload.
     assert!(
@@ -424,7 +428,7 @@ fn encrypted_metadata_and_filesystem_work_with_deferred_key_loading() {
     bytes[0x1900..0x1a00].fill(0);
     std::fs::write(dir.path().join("bad-key.pkg"), &bytes).unwrap();
     for args in [
-        vec!["info", "bad-key.pkg", "--json"],
+        vec!["info", "bad-key.pkg", "--header-only", "--json"],
         vec!["list", "bad-key.pkg", "--entries"],
         vec![
             "extract",

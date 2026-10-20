@@ -14,6 +14,9 @@ pub struct Cli {
     /// Include the full error chain in diagnostics
     #[arg(short, long, global = true)]
     pub verbose: bool,
+    /// Read a known 32-character package passcode from a file (- reads stdin)
+    #[arg(long, global = true, value_name = "FILE")]
+    pub passcode_file: Option<PathBuf>,
     #[command(subcommand)]
     pub command: Command,
 }
@@ -79,11 +82,17 @@ pub enum Command {
         #[command(flatten)]
         selection: Selection,
     },
-    /// Display package metadata without requiring decryption keys
+    /// Display header and PARAM.SFO metadata
     #[command(
-        after_help = "Examples:\n  orbis-pkg-util info game.pkg\n  orbis-pkg-util info game.pkg --json"
+        after_help = "Examples:\n  orbis-pkg-util info game.pkg\n  orbis-pkg-util info game.pkg --json\n  orbis-pkg-util info game.pkg --sfo\n  orbis-pkg-util info game.pkg --header-only\n\nUnreadable or malformed PARAM.SFO leaves header output available and returns exit 3."
     )]
     Info {
+        /// Read only the header, without opening PARAM.SFO or loading keys
+        #[arg(long, conflicts_with = "sfo")]
+        header_only: bool,
+        /// Show every typed PARAM.SFO field (JSON always includes all fields)
+        #[arg(long)]
+        sfo: bool,
         #[arg(value_name = "PKG_FILE")]
         pkg_path: PathBuf,
         /// Emit schema-versioned JSON; byte counts remain numeric
@@ -109,9 +118,12 @@ pub enum Command {
     },
     /// Check readability and decompression without extracting files
     #[command(
-        after_help = "Examples:\n  orbis-pkg-util verify game.pkg\n  orbis-pkg-util verify game.pkg --metadata-only\n  orbis-pkg-util verify game.pkg --path textures\n\nChecks selected entry payloads, filesystem structure, file lengths, and\ndecompression. Does not verify signatures, MACs, licenses, or authenticity.\nNo extracted files are written. Exit 3 means some selected data could not be checked."
+        after_help = "Examples:\n  orbis-pkg-util verify game.pkg\n  orbis-pkg-util verify game.pkg --metadata-only\n  orbis-pkg-util verify game.pkg --path textures\n\nChecks selected entry payloads, filesystem structure, lengths, and decompression.\nAdd --integrity to verify stored PKG SHA-256 digests and signed PFS block HMACs.\nIt cannot be combined with --path; --metadata-only limits checks to PKG metadata.\nAbsent hashes or unavailable MACs return exit 3, even when readability passes.\nPublisher signatures, licenses, and authenticity are not verified. No files are written."
     )]
     Verify {
+        /// Also check stored PKG digests and signed PFS block HMACs
+        #[arg(long, conflicts_with = "paths")]
+        integrity: bool,
         #[arg(value_name = "PKG_FILE")]
         pkg_path: PathBuf,
         #[command(flatten)]

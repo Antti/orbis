@@ -41,7 +41,7 @@ pub struct ExtractionReport {
 }
 
 /// A metadata entry or filesystem item. Paths use `/` on every platform and
-/// match full extraction destinations. Unknown metadata IDs have no path.
+/// match full extraction destinations, including unknown metadata IDs.
 #[derive(Debug, Clone)]
 pub struct ListedItem {
     pub path: Option<String>,
@@ -124,6 +124,36 @@ impl<'a, R: AsRef<[u8]> + Sync, P: ExtractProgress> PkgExtractor<'a, R, P> {
         self.run(plan, None)
     }
 
+    /// Checks stored PKG digests and (unless metadata-only) outer/inner PFS HMACs.
+    /// Missing signatures are counted separately and never reported as verified.
+    pub fn verify_integrity(&self, metadata_only: bool) -> Result<IntegrityReport, ExtractError> {
+        self.check_cancelled()?;
+        self.progress.phase("Checking stored PKG digests");
+        let digests = self
+            .pkg
+            .verify_integrity(!metadata_only, || self.progress.is_cancelled())
+            .map_err(integrity_error)?;
+        let mut result = IntegrityReport {
+            digests: digests.checked,
+            macs: 0,
+            missing: digests.missing,
+        };
+        if !metadata_only {
+            self.progress.phase("Checking PFS block HMACs");
+            let (outer, inner) = filesystem::open_filesystems(self.pkg)?;
+            let image = self.pkg.get_pfs_image().ok_or(ExtractError::NoPfsImage)?;
+            let key = (!image.ekpfs.is_empty()).then_some(image.ekpfs);
+            for pfs in [outer, inner] {
+                let report = pfs
+                    .verify_integrity(key, || self.progress.is_cancelled())
+                    .map_err(integrity_error)?;
+                result.macs += report.checked;
+                result.missing += report.missing;
+            }
+        }
+        Ok(result)
+    }
+
     /// Lists the PKG entry table without loading encryption keys.
     pub fn list_entries(&self) -> Result<Vec<ListedItem>, ExtractError> {
         self.entries(true)?
@@ -177,7 +207,13 @@ impl<'a, R: AsRef<[u8]> + Sync, P: ExtractProgress> PkgExtractor<'a, R, P> {
                     .map_err(|source| ExtractError::ReadEntryFailed { num: index, source })?;
                 Ok(EntryWork {
                     index,
-                    path: entry.to_path(if prefix { "sce_sys" } else { "" }),
+                    path: Some(
+                        Path::new(if prefix { "sce_sys" } else { "" }).join(
+                            self.pkg
+                                .entry_path(&entry)
+                                .map_err(|source| ExtractError::EntryName { source })?,
+                        ),
+                    ),
                     entry,
                 })
             })
@@ -236,7 +272,7 @@ impl<'a, R: AsRef<[u8]> + Sync, P: ExtractProgress> PkgExtractor<'a, R, P> {
             .filter_map(|entry| entry.path.as_ref())
             .chain(filesystem.files.iter().map(|file| &file.output_path))
         {
-            if !destinations.insert(path.clone()) {
+            if !destinations.insert(portable_path(path).to_lowercase()) {
                 return Err(ExtractError::DuplicatePath {
                     path: portable_path(path),
                 });
@@ -493,4 +529,20 @@ fn process_file<P: ExtractProgress>(
     }
     progress.pfs_file_completed(offset);
     Ok(offset)
+}
+
+/// Stored integrity checks, separate from readability/decompression checks.
+#[derive(Debug, Default)]
+pub struct IntegrityReport {
+    pub digests: usize,
+    pub macs: usize,
+    pub missing: usize,
+}
+
+fn integrity_error(source: io::Error) -> ExtractError {
+    if source.kind() == io::ErrorKind::Interrupted {
+        ExtractError::Cancelled
+    } else {
+        ExtractError::Integrity { source }
+    }
 }

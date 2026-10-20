@@ -7,7 +7,7 @@ use orbis_pkg_util::{
 use serde_json::{Value, json};
 use snafu::{ResultExt, Snafu};
 use std::error::Error as StdError;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, atomic::AtomicBool};
 
@@ -33,7 +33,7 @@ pub(crate) fn run(cli: &Cli, out: &mut impl Write, cancelled: Arc<AtomicBool>) -
             dry_run,
             json,
         } => {
-            let mut pkg = open(pkg_path)?;
+            let mut pkg = open(pkg_path, cli.passcode_file.as_deref())?;
             let _ = pkg.load_entry_keys();
             orbis_pkg_util::install::update_metadata(&pkg)?;
             prepare_filesystem(&mut pkg)?;
@@ -108,13 +108,18 @@ pub(crate) fn run(cli: &Cli, out: &mut impl Write, cancelled: Arc<AtomicBool>) -
             }
             Ok(0)
         }
-        Command::Info { pkg_path, json } => info(pkg_path, *json, out),
+        Command::Info {
+            pkg_path,
+            json,
+            header_only,
+            sfo,
+        } => info(pkg_path, *json, *header_only, *sfo, cli, out),
         Command::List {
             pkg_path,
             entries,
             files,
             json,
-        } => list(pkg_path, *entries, *files, *json, out),
+        } => list(pkg_path, *entries, *files, *json, cli, out),
         Command::Extract {
             pkg_path,
             output,
@@ -124,13 +129,15 @@ pub(crate) fn run(cli: &Cli, out: &mut impl Write, cancelled: Arc<AtomicBool>) -
             pkg_path,
             Some((output.as_deref(), *force)),
             selection,
-            cli.quiet,
+            cli,
+            false,
             cancelled,
         ),
         Command::Verify {
             pkg_path,
             selection,
-        } => process(pkg_path, None, selection, cli.quiet, cancelled),
+            integrity,
+        } => process(pkg_path, None, selection, cli, *integrity, cancelled),
         Command::Completions { shell } => {
             // Generators assume infallible writes; buffer first so a closed pipe
             // is handled by our fallible stdout path instead of panicking.
@@ -142,9 +149,26 @@ pub(crate) fn run(cli: &Cli, out: &mut impl Write, cancelled: Arc<AtomicBool>) -
     }
 }
 
-fn open(path: &Path) -> Result<Package> {
+fn open(path: &Path, passcode_file: Option<&Path>) -> Result<Package> {
     // As with the previous extractor, the input must remain unchanged while mapped.
-    Ok(unsafe { orbis_pkg_util::inspect_pkg(path).context(OpenPkgSnafu { path })? })
+    let mut pkg = unsafe { orbis_pkg_util::inspect_pkg(path).context(OpenPkgSnafu { path })? };
+    if let Some(path) = passcode_file {
+        let reader: Box<dyn Read> = if path == Path::new("-") {
+            Box::new(std::io::stdin())
+        } else {
+            Box::new(std::fs::File::open(path)?)
+        };
+        let mut bytes = Vec::new();
+        reader.take(35).read_to_end(&mut bytes)?;
+        let passcode = bytes
+            .strip_suffix(b"\r\n")
+            .or_else(|| bytes.strip_suffix(b"\n"))
+            .unwrap_or(&bytes);
+        let result = pkg.load_passcode(passcode);
+        bytes.fill(0);
+        result?;
+    }
+    Ok(pkg)
 }
 
 fn prepare_filesystem(pkg: &mut Package) -> Result<()> {
@@ -161,10 +185,12 @@ fn process(
     path: &Path,
     extraction: Option<(Option<&Path>, bool)>,
     selection: &cli::Selection,
-    quiet: bool,
+    cli: &Cli,
+    integrity: bool,
     cancelled: Arc<AtomicBool>,
 ) -> Result<u8> {
-    let mut pkg = open(path)?;
+    let mut pkg = open(path, cli.passcode_file.as_deref())?;
+    let quiet = cli.quiet;
     let options = ExtractOptions {
         metadata_only: selection.metadata_only,
         paths: selection.paths.clone(),
@@ -175,6 +201,21 @@ fn process(
     if !selection.metadata_only {
         prepare_filesystem(&mut pkg)?;
     }
+    if integrity && !selection.metadata_only {
+        let _ = pkg.load_pfs_key();
+    }
+    let integrity_report = if integrity {
+        Some(
+            PkgExtractor::new(
+                &pkg,
+                ConsoleProgress::with_options(quiet, cancelled.clone()),
+                false,
+            )
+            .verify_integrity(selection.metadata_only)?,
+        )
+    } else {
+        None
+    };
     let progress = ConsoleProgress::with_options(quiet, cancelled);
     let start = std::time::Instant::now();
     let report = if let Some((output, force)) = extraction {
@@ -205,6 +246,20 @@ fn process(
     } else {
         "Checked"
     };
+    if let Some(checks) = &integrity_report {
+        if checks.missing > 0 {
+            diagnostic(&format!(
+                "warning: incomplete integrity verification: {} digests/MACs checked; {} checks unavailable (absent hashes, keys, or unsupported signature layouts).",
+                checks.digests + checks.macs,
+                checks.missing
+            ));
+        } else if !quiet {
+            diagnostic(&format!(
+                "Stored integrity passed: {} SHA-256 digests and {} PFS HMACs.",
+                checks.digests, checks.macs
+            ));
+        }
+    }
     if !report.skipped.is_empty() {
         diagnostic(&format!(
             "Incomplete: {} files {}; {} entries skipped.",
@@ -229,11 +284,35 @@ fn process(
             diagnostic("Readability and decompression passed; authenticity was not checked.");
         }
     }
-    Ok(0)
+    Ok(if integrity_report.is_some_and(|r| r.missing > 0) {
+        3
+    } else {
+        0
+    })
 }
 
-fn info(path: &Path, as_json: bool, out: &mut impl Write) -> Result<u8> {
-    let pkg = open(path)?;
+fn info(
+    path: &Path,
+    as_json: bool,
+    header_only: bool,
+    all_sfo: bool,
+    cli: &Cli,
+    out: &mut impl Write,
+) -> Result<u8> {
+    let mut pkg = open(
+        path,
+        if header_only {
+            None
+        } else {
+            cli.passcode_file.as_deref()
+        },
+    )?;
+    let (application, sfo, warnings) = if header_only {
+        (Value::Null, Value::Null, Vec::new())
+    } else {
+        let _ = pkg.load_entry_keys();
+        application_info(&pkg)
+    };
     let header = pkg.header();
     let id = header.content_id();
     if as_json {
@@ -241,7 +320,8 @@ fn info(path: &Path, as_json: bool, out: &mut impl Write) -> Result<u8> {
             out,
             &json!({
                 "schema_version": 1,
-            "package": path.to_string_lossy(),
+                "package": path.to_string_lossy(),
+                "application": application, "sfo": sfo, "warnings": warnings,
                 "metadata": {
                     "content_id": id.as_str(), "service_id": id.service_id(),
                     "publisher_code": id.publisher_code(), "title_id": id.title_id(),
@@ -298,7 +378,31 @@ fn info(path: &Path, as_json: bool, out: &mut impl Write) -> Result<u8> {
             header.pfs_size()
         )?;
     }
-    Ok(0)
+    if !as_json && !application.is_null() {
+        writeln!(out, "\nApplication:")?;
+        for (key, value) in application.as_object().unwrap() {
+            if !value.is_null() {
+                writeln!(
+                    out,
+                    "  {key}: {}",
+                    value
+                        .as_str()
+                        .map(|s| s.escape_debug().to_string())
+                        .unwrap_or_else(|| value.to_string())
+                )?;
+            }
+        }
+        if all_sfo {
+            writeln!(out, "\nPARAM.SFO:")?;
+            for (key, value) in sfo.as_object().unwrap() {
+                writeln!(out, "  {}: {}", key.escape_debug(), value)?;
+            }
+        }
+    }
+    for warning in &warnings {
+        diagnostic(&format!("warning: {warning}"));
+    }
+    Ok(if warnings.is_empty() { 0 } else { 3 })
 }
 
 fn list(
@@ -306,9 +410,10 @@ fn list(
     entries_only: bool,
     files_only: bool,
     as_json: bool,
+    cli: &Cli,
     out: &mut impl Write,
 ) -> Result<u8> {
-    let mut pkg = open(path)?;
+    let mut pkg = open(path, cli.passcode_file.as_deref())?;
     let mut items = if files_only {
         vec![]
     } else {
@@ -376,6 +481,81 @@ fn item_source(item: &ListedItem) -> &'static str {
         "metadata"
     } else {
         "filesystem"
+    }
+}
+
+fn application_info(pkg: &Package) -> (Value, Value, Vec<String>) {
+    use orbis_pkg::{
+        entry::EntryId,
+        sfo::{Sfo, Value as SfoValue},
+    };
+    let read = || -> Result<(Value, Value)> {
+        let mut found = None;
+        for result in pkg.entries() {
+            let (_, entry) = result?;
+            if entry.entry_id() == EntryId::ParamSfo {
+                if found.is_some() || entry.data_size() > 1024 * 1024 {
+                    return Err("duplicate or oversized PARAM.SFO entry".into());
+                }
+                found = Some(entry);
+            }
+        }
+        let Some(entry) = found else {
+            return Ok((Value::Null, Value::Null));
+        };
+        let data = pkg.entry_data(&entry)?;
+        let sfo = Sfo::parse(&data)?;
+        let fields: serde_json::Map<String, Value> = sfo.entries().map(|(key, value)| {
+            let value = match value {
+                SfoValue::String(s) => json!({"type": "string", "value": s}),
+                SfoValue::Integer(n) => json!({"type": "integer", "value": n}),
+                SfoValue::Binary(b) => json!({"type": "binary", "hex": b.iter().map(|v| format!("{v:02x}")).collect::<String>()}),
+            };
+            (key.to_owned(), value)
+        }).collect();
+        let firmware = match sfo.get("SYSTEM_VER") {
+            Some(SfoValue::Integer(n)) => Some(format!("{:x}.{:02x}", n >> 24, (n >> 16) & 0xff)),
+            _ => None,
+        };
+        let build: serde_json::Map<String, Value> = sfo
+            .string("PUBTOOLINFO")
+            .unwrap_or("")
+            .split(',')
+            .filter_map(|field| field.split_once('='))
+            .map(|(key, value)| (key.trim().to_owned(), json!(value.trim())))
+            .collect();
+        let region = match pkg.header().content_id().service_id() {
+            "UP" => Some("North America"),
+            "EP" => Some("Europe"),
+            "JP" => Some("Japan"),
+            "HP" => Some("Asia"),
+            _ => None,
+        };
+        Ok((
+            json!({
+                "title": sfo.string("TITLE").ok(),
+                "title_id": sfo.string("TITLE_ID").ok(),
+                "content_id": sfo.string("CONTENT_ID").ok(),
+                "app_version": sfo.string("APP_VER").ok(),
+                "package_version": sfo.string("VERSION").ok(),
+                "category": sfo.string("CATEGORY").ok(),
+                "required_system_version": firmware,
+                "region_from_content_id": region,
+                "build": build,
+            }),
+            Value::Object(fields),
+        ))
+    };
+    match read() {
+        Ok((application, sfo)) => (application, sfo, vec![]),
+        Err(error) => (
+            Value::Null,
+            Value::Null,
+            vec![format!(
+                "PARAM.SFO unavailable: {}; showing header metadata",
+                error_message(error.as_ref())
+            )],
+        ),
     }
 }
 
