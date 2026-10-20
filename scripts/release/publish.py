@@ -82,17 +82,25 @@ def publish(repo: str, sha: str, version: str, directory: Path) -> None:
         if unexpected:
             raise ValueError(f"Draft release contains unexpected assets: {sorted(unexpected)}")
     if release is None:
-        gh(
-            "release", "create", tag, "--repo", repo, "--verify-tag", "--draft",
-            "--title", f"Orbis {version}", "--generate-notes", "--notes",
+        notes = (
             f"Built from `{sha}`. Includes Linux x86_64 AppImage/Flatpak bundles "
             "and unsigned macOS Intel/Apple Silicon CLI archives. "
-            "Verify downloads with SHA256SUMS. See RELEASE.md for installation.",
+            "Verify downloads with SHA256SUMS. See RELEASE.md for installation."
+        )
+        release = json.loads(
+            gh(
+                "api", "--method", "POST", f"repos/{repo}/releases",
+                "-f", f"tag_name={tag}", "-f", f"target_commitish={sha}",
+                "-f", f"name=Orbis {version}",
+                "-F", "draft=true", "-F", "generate_release_notes=true",
+                "-f", f"body={notes}",
+            )
         )
     # Only draft assets may be replaced when retrying an interrupted upload.
     assets = [str(directory / name) for name in expected_assets(version) + ["SHA256SUMS"]]
     gh("release", "upload", tag, "--repo", repo, "--clobber", *assets)
-    uploaded = json.loads(gh("api", f"repos/{repo}/releases/tags/{tag}"))
+    # The tag endpoint only finds published releases; drafts need their numeric ID.
+    uploaded = json.loads(gh("api", f"repos/{repo}/releases/{release['id']}"))
     sizes = {asset["name"]: asset["size"] for asset in uploaded["assets"]}
     expected_sizes = {Path(asset).name: Path(asset).stat().st_size for asset in assets}
     if not uploaded["draft"] or sizes != expected_sizes:
