@@ -4,6 +4,14 @@ use std::path::PathBuf;
 /// Errors that can occur during PKG extraction.
 #[derive(Debug, Snafu)]
 pub enum ExtractError {
+    #[snafu(display("directory inode appears more than once at {path}"))]
+    RepeatedDirectory { path: String },
+
+    #[snafu(display("cannot decompress {path}"))]
+    DecompressFileFailed {
+        path: String,
+        source: orbis_pfs::pfsc::OpenError,
+    },
     // Entry extraction errors
     #[snafu(display("failed to read entry #{num}: {source}"))]
     ReadEntryFailed {

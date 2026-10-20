@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
-#[command(name = "orbis-pkg-util")]
+#[command(name = "orbis-pkg-util", version)]
 #[command(about = "PS4 PKG file utility", long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
