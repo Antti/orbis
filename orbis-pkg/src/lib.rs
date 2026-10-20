@@ -55,6 +55,13 @@ pub mod entry;
 pub mod header;
 pub mod keys;
 
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+mod readme {}
+
+#[cfg(test)]
+mod tests;
+
 /// A parsed PS4 PKG file.
 ///
 /// This struct provides read-only access to the PKG contents including
@@ -220,9 +227,10 @@ impl<R: AsRef<[u8]>> Pkg<R> {
     /// Returns `None` if the PFS offset/size is invalid.
     #[must_use]
     pub fn get_pfs_image(&self) -> Option<PfsImage<'_>> {
-        let offset = self.header.pfs_offset();
-        let size = self.header.pfs_size();
-        let data = self.raw.as_ref().get(offset..(offset + size))?;
+        let raw = self.header.raw_header();
+        let offset = usize::try_from(raw.pfs_image_offset.get()).ok()?;
+        let size = usize::try_from(raw.pfs_image_size.get()).ok()?;
+        let data = self.raw.as_ref().get(offset..offset.checked_add(size)?)?;
         Some(PfsImage {
             data,
             ekpfs: &self.ekpfs,
