@@ -1,0 +1,47 @@
+[package]
+name = "orbis-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+orbis-pkg = { path = "../orbis-pkg" }
+orbis-pfs = { path = "../orbis-pfs" }
+
+[workspace]
+members = ["."]
+
+[profile.release]
+overflow-checks = true
+
+[[bin]]
+name = "pkg"
+path = "fuzz_targets/pkg.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sfo"
+path = "fuzz_targets/sfo.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pfs"
+path = "fuzz_targets/pfs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pfsc"
+path = "fuzz_targets/pfsc.rs"
+test = false
+doc = false
+bench = false
