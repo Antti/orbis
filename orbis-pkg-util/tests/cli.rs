@@ -462,7 +462,7 @@ fn json_handles_non_utf8_input_paths_without_panicking() {
     let name = std::ffi::OsString::from_vec(b"game-\xff.pkg".to_vec());
     std::fs::write(
         dir.path().join(&name),
-        pkg(pfs("hello.txt", b"hello", false)),
+        update("01.12", "hello.txt", b"hello"),
     )
     .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_orbis-pkg-util"))
@@ -473,5 +473,7 @@ fn json_handles_non_utf8_input_paths_without_panicking() {
         .output()
         .unwrap();
     assert!(output.status.success(), "{}", text(&output.stderr));
-    assert!(serde_json::from_slice::<serde_json::Value>(&output.stdout).is_ok());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["package"], name.to_string_lossy().as_ref());
+    assert_eq!(value["application"]["app_version"], "01.12");
 }
