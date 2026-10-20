@@ -17,11 +17,15 @@ cli = ["dep:clap", "dep:indicatif"]
 
 [dependencies]
 cap-std = "4.0.3"
+fastrand = "2"
 memmap2 = "0.9"
 rayon = "1.10"
 orbis-pkg.workspace = true
 orbis-pfs.workspace = true
 snafu.workspace = true
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+rustix = { version = "1", features = ["fs"] }
 
 [dependencies.clap]
 version = "4.5"

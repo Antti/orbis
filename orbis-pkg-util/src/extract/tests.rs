@@ -276,6 +276,53 @@ fn decompresses_leaf_files_including_zlib_blocks() {
 }
 
 #[test]
+fn failed_decompression_preserves_existing_files_and_removes_staging_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut container = pfsc(BS as u32, BS as u64, BS as u64, &[80, 83]).0;
+    container.truncate(83);
+    container[80..].copy_from_slice(b"bad");
+    let package = Pkg::new(pkg(pfs("hello.txt", &container, true))).unwrap();
+
+    for overwrite in [false, true] {
+        let out = dir.path().join(if overwrite { "replace" } else { "new" });
+        std::fs::create_dir(&out).unwrap();
+        if overwrite {
+            std::fs::write(out.join("hello.txt"), b"KEEP").unwrap();
+        }
+        assert!(
+            PkgExtractor::new(&package, SilentProgress, overwrite)
+                .extract_pfs(&out)
+                .is_err()
+        );
+        let names: Vec<_> = std::fs::read_dir(&out)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        if overwrite {
+            assert_eq!(std::fs::read(out.join("hello.txt")).unwrap(), b"KEEP");
+            assert_eq!(names, ["hello.txt"]);
+        } else {
+            assert!(names.is_empty());
+        }
+    }
+}
+
+#[test]
+fn destination_created_during_staging_is_not_overwritten() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = output::Output::new(dir.path()).unwrap();
+    let mut staged = output.create_file(Path::new("hello.txt"), false).unwrap();
+    staged.write_all(b"NEW").unwrap();
+    std::fs::write(dir.path().join("hello.txt"), b"KEEP").unwrap();
+    assert!(staged.commit().is_err());
+    assert_eq!(
+        std::fs::read(dir.path().join("hello.txt")).unwrap(),
+        b"KEEP"
+    );
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[test]
 fn empty_filesystem_still_creates_output() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("empty");

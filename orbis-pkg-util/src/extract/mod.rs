@@ -108,6 +108,7 @@ impl<'a, R: AsRef<[u8]> + Sync, P: ExtractProgress> PkgExtractor<'a, R, P> {
                     path: output.path.join(&path),
                     source: e,
                 })?;
+            file.commit()?;
 
             extracted += 1;
         }
@@ -321,6 +322,7 @@ fn extract_single_file<P: ExtractProgress>(
         offset += read as u64;
     }
 
+    dest.commit()?;
     progress.pfs_file_completed(offset);
 
     Ok(())

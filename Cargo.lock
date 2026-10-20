@@ -631,6 +631,7 @@ version = "0.1.1"
 dependencies = [
  "cap-std",
  "clap",
+ "fastrand",
  "flate2",
  "indicatif",
  "memmap2",
@@ -639,6 +640,7 @@ dependencies = [
  "rand",
  "rayon",
  "rsa",
+ "rustix",
  "snafu",
  "tempfile",
 ]
