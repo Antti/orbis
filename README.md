@@ -11,6 +11,9 @@ A Rust library and toolset for working with PlayStation 4 PKG and PFS file forma
 cargo install orbis-pkg-util
 ```
 
+See [release packages](RELEASE.md) for AppImage, Flatpak, and native macOS
+installation instructions and the version-bump release process.
+
 ## Building manually
 
 Requires [Rust](https://www.rust-lang.org/tools/install). Compiles on Windows, Linux, and macOS.
