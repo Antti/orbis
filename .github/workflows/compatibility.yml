@@ -25,6 +25,8 @@ jobs:
           - os: ubuntu-24.04
             filesystem: exfat
           - os: ubuntu-24.04
+            filesystem: exfat-fuse
+          - os: ubuntu-24.04
             filesystem: ext4
     steps:
       - uses: actions/checkout@v4
@@ -33,7 +35,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install --yes exfatprogs
+        run: sudo apt-get update && sudo apt-get install --yes exfatprogs exfat-fuse
       - run: bash scripts/validation/filesystems.sh '${{ matrix.filesystem }}'
   homebrew:
     name: Public PKG (${{ matrix.os }})

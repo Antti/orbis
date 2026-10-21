@@ -86,6 +86,13 @@ pub(crate) fn unsupported_publication(error: &io::Error) -> bool {
     if error.raw_os_error() == Some(rustix::io::Errno::NOTSUP.raw_os_error()) {
         return true;
     }
+    // Linux filesystems (including older FUSE drivers) may reject the
+    // RENAME_NOREPLACE flag with EINVAL. All callers use validated relative
+    // paths and this one flag; exclusive-create fallback still refuses conflicts.
+    #[cfg(target_os = "linux")]
+    if error.raw_os_error() == Some(rustix::io::Errno::INVAL.raw_os_error()) {
+        return true;
+    }
     error.kind() == io::ErrorKind::Unsupported
 }
 
@@ -507,6 +514,40 @@ mod tests {
         assert_eq!(dir.read("final").unwrap(), b"COMPLETE");
         dir.write("final", b"EDITED").unwrap();
         assert_eq!(dir.read("staged").unwrap(), b"COMPLETE");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unsupported_rename_flags_use_exclusive_copy() {
+        let (_temp, dir) = setup();
+        publish_file_with(
+            &dir,
+            "staged",
+            Path::new("final"),
+            || Ok(()),
+            |_, _, _| {
+                Err(io::Error::from_raw_os_error(
+                    rustix::io::Errno::INVAL.raw_os_error(),
+                ))
+            },
+        )
+        .unwrap();
+        assert_eq!(dir.read("final").unwrap(), b"COMPLETE");
+        assert!(
+            publish_file_with(
+                &dir,
+                "staged",
+                Path::new("final"),
+                || Ok(()),
+                |_, _, _| {
+                    Err(io::Error::from_raw_os_error(
+                        rustix::io::Errno::INVAL.raw_os_error(),
+                    ))
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(dir.read("final").unwrap(), b"COMPLETE");
     }
 
     #[test]

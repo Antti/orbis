@@ -1,7 +1,10 @@
 # Package and filesystem validation
 
 `compatibility.yml` runs actual disposable exFAT images on macOS and Linux,
-APFS on macOS, and ext4 on Linux. Existing Windows tests run on the runner's NTFS
+APFS on macOS, and ext4 on Linux. When a Linux runner lacks the exFAT kernel
+module, the job uses `exfat-fuse` on the same image and reports the selected driver
+in its log; filesystem inspection then conservatively reports `unknown`. A
+separate explicit FUSE job always exercises that fallback driver. Existing Windows tests run on the runner's NTFS
 volume. The tests cover extraction, merged export, no-overwrite behavior,
 manifest verification, and file-level resume. Images are detached and removed on
 exit. For a local macOS run (requires disk-image permissions):

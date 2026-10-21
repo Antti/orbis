@@ -2,6 +2,7 @@
 # Exercise real disposable filesystem images; never format an existing device.
 set -euo pipefail
 filesystem=${1:-exfat}
+expected_filesystem=$filesystem
 work_dir=$(mktemp -d "${TMPDIR:-/tmp}/orbis-filesystem.XXXXXX")
 mount_dir="$work_dir/mount"
 mkdir "$mount_dir"
@@ -31,9 +32,16 @@ if [[ $(uname -s) == Darwin ]]; then
 else
   truncate -s 256M "$work_dir/volume.img"
   case "$filesystem" in
-    exfat)
+    exfat|exfat-fuse)
       mkfs.exfat "$work_dir/volume.img"
-      sudo mount -o "loop,uid=$(id -u),gid=$(id -g)" "$work_dir/volume.img" "$mount_dir"
+      if [[ $filesystem == exfat ]] && sudo modprobe exfat && sudo mount -t exfat -o "loop,uid=$(id -u),gid=$(id -g)" "$work_dir/volume.img" "$mount_dir"; then
+        echo 'Testing kernel exFAT'
+      else
+        echo 'Testing the real exFAT image through FUSE'
+        sudo mount.exfat-fuse -o "allow_other,uid=$(id -u),gid=$(id -g)" "$work_dir/volume.img" "$mount_dir"
+        # statfs identifies the generic FUSE driver rather than its exFAT subtype.
+        expected_filesystem=unknown
+      fi
       ;;
     ext4)
       mkfs.ext4 -F "$work_dir/volume.img"
@@ -46,5 +54,5 @@ fi
 mounted=true
 touch "$mount_dir/.metadata_never_index"
 export ORBIS_TEST_EXTRACT_ROOT="$mount_dir" ORBIS_TEST_EXPORT_ROOT="$mount_dir"
-export ORBIS_TEST_FILESYSTEM="$filesystem"
+export ORBIS_TEST_FILESYSTEM="$expected_filesystem"
 cargo test -p orbis-pkg-util --lib --locked configured_external_filesystem -- --nocapture
