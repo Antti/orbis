@@ -224,6 +224,37 @@ pub(crate) fn run(cli: &Cli, out: &mut impl Write, cancelled: Arc<AtomicBool>) -
                 process(pkg_path, None, selection, cli, cancelled)
             }
         }
+        Command::VerifyDir { directory, json } => {
+            let report = orbis_pkg_util::install::verify_directory(
+                directory,
+                ConsoleProgress::with_options(cli.quiet, cancelled),
+            )?;
+            if *json {
+                write_json(out, &serde_json::to_value(&report)?)?;
+            } else {
+                writeln!(
+                    out,
+                    "Checked {} files; {} issues; export {}",
+                    report.checked_files,
+                    report.issues.len(),
+                    if report.complete {
+                        "completed"
+                    } else {
+                        "incomplete"
+                    }
+                )?;
+                for issue in &report.issues {
+                    writeln!(out, "{}: {}", issue.kind, issue.path.escape_debug())?;
+                }
+            }
+            Ok(if !report.issues.is_empty() {
+                1
+            } else if !report.complete {
+                3
+            } else {
+                0
+            })
+        }
         Command::Completions { shell } => {
             // Generators assume infallible writes; buffer first so a closed pipe
             // is handled by our fallible stdout path instead of panicking.

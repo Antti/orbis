@@ -150,6 +150,13 @@ pub enum Command {
         #[command(flatten)]
         selection: Selection,
     },
+    /// Check an exported directory against its SHA-256 manifest (no writes)
+    VerifyDir {
+        #[arg(value_name = "DIR")]
+        directory: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
     /// Generate a shell completion script on stdout
     #[command(
         after_help = "Examples:\n  orbis-pkg-util completions bash > ~/.local/share/bash-completion/completions/orbis-pkg-util\n  orbis-pkg-util completions zsh > ~/.zfunc/_orbis-pkg-util\n  orbis-pkg-util completions fish > ~/.config/fish/completions/orbis-pkg-util.fish\n\nCreate the destination directory first. For zsh, add ~/.zfunc to fpath before compinit."

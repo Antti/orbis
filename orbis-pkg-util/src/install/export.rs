@@ -136,7 +136,7 @@ pub fn export_merged<P: ExtractProgress>(
         scan(dir, Layer::Update, &mut entries, &progress)?;
     }
     let mut report = ExportReport {
-        title_id: metadata.title_id,
+        title_id: metadata.title_id.clone(),
         app_version: manifest
             .as_ref()
             .map_or_else(|| metadata.version.to_string(), |m| m.app_version.clone()),
@@ -170,6 +170,7 @@ pub fn export_merged<P: ExtractProgress>(
     progress.phase("Exporting merged game");
     progress.bytes_total(report.bytes);
     let mut buffer = vec![0; 1024 * 1024];
+    let mut records = Vec::new();
     for entry in entries.values() {
         check_cancelled(&progress)?;
         if entry.directory {
@@ -189,15 +190,43 @@ pub fn export_merged<P: ExtractProgress>(
         } else {
             None
         };
-        copy_file(
+        records.push(copy_file(
             source,
             stage.dir.as_ref().unwrap(),
             entry,
             record,
             &mut buffer,
             &progress,
-        )?;
+        )?);
     }
+    let export_manifest = super::directory::ExportManifest {
+        schema_version: 1,
+        title_id: metadata.title_id,
+        content_id: metadata.content_id,
+        base_version: metadata.version.to_string(),
+        update_version: manifest.as_ref().map(|m| m.app_version.clone()),
+        complete: true,
+        directories: entries
+            .values()
+            .filter(|e| e.directory)
+            .map(|e| e.path.clone())
+            .collect(),
+        files: records,
+    };
+    storage::write_json(
+        stage.dir.as_ref().unwrap(),
+        super::directory::MANIFEST,
+        &export_manifest,
+    )?;
+    entries.insert(
+        super::directory::MANIFEST.into(),
+        Entry {
+            path: super::directory::MANIFEST.into(),
+            layer: Layer::Base,
+            directory: false,
+            bytes: 0,
+        },
+    );
     // Persist all newly created directories before publishing their common root.
     for entry in entries.values().rev().filter(|entry| entry.directory) {
         check_cancelled(&progress)?;
@@ -315,7 +344,10 @@ fn scan(
                 .into_string()
                 .map_err(|_| invalid("non-UTF8 export filename"))?;
             let path = format!("{prefix}{name}");
-            if path == storage::MANIFEST {
+            if path == storage::MANIFEST
+                || path == super::directory::MANIFEST
+                || super::directory::apple_double(&dir, &name)?
+            {
                 continue;
             }
             storage::validate_path(&path)?;
@@ -358,7 +390,7 @@ fn copy_file(
     expected: Option<&storage::FileRecord>,
     buffer: &mut [u8],
     progress: &impl ExtractProgress,
-) -> Result<()> {
+) -> Result<storage::FileRecord> {
     if !source.symlink_metadata(&entry.path)?.is_file() {
         return Err(invalid(format!(
             "source is no longer a regular file: {}",
@@ -391,9 +423,7 @@ fn copy_file(
             )));
         }
         output.write_all(&buffer[..n])?;
-        if expected.is_some() {
-            hash.update(&buffer[..n]);
-        }
+        hash.update(&buffer[..n]);
         progress.bytes_processed(n as u64);
     }
     let after = input.metadata()?;
@@ -403,8 +433,9 @@ fn copy_file(
             entry.path
         )));
     }
+    let sha256 = format!("{:x}", hash.finalize());
     if let Some(record) = expected
-        && (bytes != record.bytes || format!("{:x}", hash.finalize()) != record.sha256)
+        && (bytes != record.bytes || sha256 != record.sha256)
     {
         return Err(invalid(format!(
             "update changed during export: {}",
@@ -412,7 +443,11 @@ fn copy_file(
         )));
     }
     output.sync_all()?;
-    Ok(())
+    Ok(storage::FileRecord {
+        path: entry.path.clone(),
+        bytes,
+        sha256,
+    })
 }
 
 struct Stage {

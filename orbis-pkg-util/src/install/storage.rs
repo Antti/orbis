@@ -309,7 +309,10 @@ pub(super) fn app_metadata(dir: &Dir) -> Result<AppMetadata> {
     Ok(AppMetadata::parse(&bytes)?)
 }
 pub(super) fn validate_path(path: &str) -> Result<()> {
-    if path.is_empty() || path.eq_ignore_ascii_case(MANIFEST) {
+    if path.is_empty()
+        || (path.eq_ignore_ascii_case(MANIFEST)
+            || path.eq_ignore_ascii_case(super::directory::MANIFEST))
+    {
         return Err(invalid("package uses a reserved installation path"));
     }
     for part in path.split('/') {

@@ -132,3 +132,64 @@ fn dry_run_reports_overlay_and_space_without_creating_state_or_output() {
     assert!(!temp.path().join("merged").exists());
     assert!(!temp.path().join(".CUSA00000.orbis-install").exists());
 }
+
+#[test]
+fn verifies_export_and_reports_changed_missing_and_unexpected_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    base_game(root);
+    success(&run(
+        root,
+        &["export", "--base", "CUSA00000", "-o", "merged", "-q"],
+    ));
+    let checked = run(root, &["verify-dir", "merged", "--json"]);
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
+    assert_eq!(report["base_version"], "01.00");
+    assert_eq!(report["complete"], true);
+    assert_eq!(report["issues"], serde_json::json!([]));
+    fs::write(root.join("merged/base.txt"), b"EDIT").unwrap();
+    fs::remove_file(root.join("merged/sce_sys/param.sfo")).unwrap();
+    fs::write(root.join("merged/extra"), b"EXTRA").unwrap();
+    let checked = run(root, &["verify-dir", "merged", "--json"]);
+    assert_eq!(checked.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
+    assert_eq!(
+        report["issues"],
+        serde_json::json!([
+            {"path":"base.txt","kind":"changed"}, {"path":"extra","kind":"unexpected"},
+            {"path":"sce_sys/param.sfo","kind":"missing"}
+        ])
+    );
+}
+
+#[test]
+fn refuses_unsafe_or_ambiguous_manifest_paths() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    base_game(root);
+    success(&run(
+        root,
+        &["export", "--base", "CUSA00000", "-o", "merged", "-q"],
+    ));
+    let path = root.join("merged/.orbis-export.json");
+    let original: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for unsafe_path in [
+        "../outside",
+        "/absolute",
+        "sce_sys/../escape",
+        ".orbis-export.json",
+        "BASE.TXT",
+    ] {
+        let mut manifest = original.clone();
+        let mut extra = manifest["files"][0].clone();
+        extra["path"] = unsafe_path.into();
+        manifest["files"].as_array_mut().unwrap().push(extra);
+        fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert_eq!(run(root, &["verify-dir", "merged"]).status.code(), Some(1));
+    }
+}

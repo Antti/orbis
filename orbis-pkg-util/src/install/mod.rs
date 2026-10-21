@@ -3,7 +3,9 @@
 //!
 //! The base is never modified. Activation uses a recoverable sequence of directory
 //! renames, not a cross-platform atomic directory exchange. Stop the emulator first.
+mod directory;
 mod export;
+pub use directory::{DirectoryIssue, DirectoryReport, verify_directory};
 mod preflight;
 mod storage;
 mod transaction;
