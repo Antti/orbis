@@ -377,8 +377,8 @@ operations, not external file editors. Unmanaged or modified updates, pending
 recovery, symlinks, special files, case collisions, and file/directory conflicts
 are refused. The output must be outside the base, update, and installation state.
 
-Allow space for the full merged game. Overridden base files are not copied. A
-temporary sibling `.orbis-export-*.tmp` directory holds the export until every file
+Without `--resume`, allow space for the full merged game. Overridden base files
+are not copied. A temporary sibling `.orbis-export-*.tmp` directory holds the export until every file
 has been copied; publication refuses even an empty destination created meanwhile.
 When exclusive directory rename is unsupported, including macOS exFAT, export
 creates the destination exclusively and copies the completed staging tree into it.
@@ -388,7 +388,7 @@ makes the destination visible while copying. A separate publication progress pha
 tracks that copy. Only planned game paths are copied; filesystem-generated metadata
 sidecars in staging are not treated as additional game files.
 
-Normal failures and Ctrl-C discard staging and attempt to remove partial output.
+Without `--resume`, normal failures and Ctrl-C discard staging and attempt to remove partial output.
 Cleanup preserves files or directories added or replaced by another process, so
 these can leave a destination behind. Do not use or modify the export until the
 command succeeds. Forced termination or power loss can leave staging and a partial

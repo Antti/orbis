@@ -76,7 +76,10 @@ Export a single merged game directory for software that expects the update files
 in the base tree:
 
 ```sh
-orbis-pkg-util export --base ./games/CUSA12345 -o ./merged-game
+orbis-pkg-util export --base ./games/CUSA12345 -o ./merged-game --dry-run
+orbis-pkg-util export --base ./games/CUSA12345 -o ./merged-game --resume
+orbis-pkg-util verify-dir ./merged-game
+orbis-pkg-util status --base ./games/CUSA12345
 ```
 
 The installed update takes precedence over matching base files. The new directory
