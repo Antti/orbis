@@ -9,7 +9,14 @@ mounted=false
 cleanup() {
   if [[ $mounted == true ]]; then
     if [[ $(uname -s) == Darwin ]]; then
-      hdiutil detach "$mount_dir" || return
+      # Spotlight/volume services can briefly keep a newly mounted APFS image
+      # busy after the tests exit. Retry, then force only our disposable image.
+      detached=false
+      for attempt in 1 2 3; do
+        if hdiutil detach "$mount_dir"; then detached=true; break; fi
+        sleep "$attempt"
+      done
+      if [[ $detached == false ]]; then hdiutil detach -force "$mount_dir" || return; fi
     else
       sudo umount "$mount_dir" || return
     fi
@@ -37,6 +44,7 @@ else
   esac
 fi
 mounted=true
+touch "$mount_dir/.metadata_never_index"
 export ORBIS_TEST_EXTRACT_ROOT="$mount_dir" ORBIS_TEST_EXPORT_ROOT="$mount_dir"
 export ORBIS_TEST_FILESYSTEM="$filesystem"
 cargo test -p orbis-pkg-util --lib --locked configured_external_filesystem -- --nocapture
