@@ -598,3 +598,21 @@ fn cancelled_resumable_export_keeps_manifest_and_can_continue() {
     let report = install::verify_directory(&out, SilentProgress).unwrap();
     assert!(report.complete && report.issues.is_empty());
 }
+
+#[test]
+fn resume_rejects_case_alias_of_an_export_used_as_its_base() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = base_game(temp.path());
+    let source = temp.path().join("source-export");
+    export_merged(&base, &source, SilentProgress).unwrap();
+    let alias = temp.path().join("SOURCE-EXPORT");
+    if !alias.is_dir() {
+        return;
+    } // The alias only exists on case-insensitive filesystems.
+    let manifest = source.join(super::super::directory::MANIFEST);
+    let before = fs::metadata(&manifest).unwrap().modified().unwrap();
+    let error = resume_export(&source, &alias, SilentProgress).unwrap_err();
+    assert!(error.to_string().contains("outside"));
+    assert_eq!(fs::metadata(&manifest).unwrap().modified().unwrap(), before);
+    assert!(!temp.path().join(".source-export.orbis-install").exists());
+}

@@ -316,6 +316,17 @@ fn destination_inner(
                 sources.push(directory_id(&location.parent.open_dir(source)?)?);
             }
         }
+        // Resume can accept an existing directory. Compare that root too:
+        // a case alias must not turn a source export into its own destination.
+        if allow_existing
+            && storage::exists(&dir, name)?
+            && dir.symlink_metadata(name)?.is_dir()
+            && sources.contains(&directory_id(&dir.open_dir(name)?)?)
+        {
+            return Err(invalid(
+                "export output must be outside the base, update, and installation state",
+            ));
+        }
         for ancestor in parent.ancestors() {
             let ancestor = Dir::open_ambient_dir(ancestor, ambient_authority())?;
             if sources.contains(&directory_id(&ancestor)?) {
