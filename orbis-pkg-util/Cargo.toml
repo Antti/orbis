@@ -1,6 +1,6 @@
 [package]
 name = "orbis-pkg-util"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 description = "Library and CLI for working with PlayStation 4 PKG files"
 readme = "README.md"
