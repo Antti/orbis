@@ -28,6 +28,7 @@
 //! updates during extraction.
 
 pub mod extract;
+mod fs_output;
 pub mod install;
 pub mod progress;
 
