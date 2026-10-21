@@ -7,6 +7,7 @@ work_dir=$(mktemp -d "${TMPDIR:-/tmp}/orbis-filesystem.XXXXXX")
 mount_dir="$work_dir/mount"
 mkdir "$mount_dir"
 mounted=false
+loop_device=''
 cleanup() {
   if [[ $mounted == true ]]; then
     if [[ $(uname -s) == Darwin ]]; then
@@ -22,6 +23,7 @@ cleanup() {
       sudo umount "$mount_dir" || return
     fi
   fi
+  if [[ -n $loop_device ]]; then sudo losetup --detach "$loop_device" || return; fi
   rm -rf "$work_dir"
 }
 trap cleanup EXIT
@@ -38,7 +40,9 @@ else
         echo 'Testing kernel exFAT'
       else
         echo 'Testing the real exFAT image through FUSE'
-        sudo mount.exfat-fuse -o "allow_other,uid=$(id -u),gid=$(id -g)" "$work_dir/volume.img" "$mount_dir"
+        # libfuse3 mounts exFAT as fuseblk and requires a block device.
+        loop_device=$(sudo losetup --find --show "$work_dir/volume.img")
+        sudo mount.exfat-fuse -o "allow_other,uid=$(id -u),gid=$(id -g)" "$loop_device" "$mount_dir"
         # statfs identifies the generic FUSE driver rather than its exFAT subtype.
         expected_filesystem=unknown
       fi
