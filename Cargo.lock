@@ -695,12 +695,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
+name = "orbis-integrity"
+version = "0.1.0"
+
+[[package]]
 name = "orbis-pfs"
 version = "0.1.0"
 dependencies = [
  "aes",
  "flate2",
  "hmac",
+ "orbis-integrity",
  "sha2",
  "snafu",
  "xts-mode",
@@ -715,6 +720,7 @@ dependencies = [
  "bitflags",
  "byteorder",
  "cbc",
+ "orbis-integrity",
  "rsa",
  "sha2",
  "snafu",
@@ -737,6 +743,7 @@ dependencies = [
  "hmac",
  "indicatif",
  "memmap2",
+ "orbis-integrity",
  "orbis-pfs",
  "orbis-pkg",
  "rand",

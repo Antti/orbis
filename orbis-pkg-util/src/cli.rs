@@ -118,12 +118,15 @@ pub enum Command {
     },
     /// Check readability and decompression without extracting files
     #[command(
-        after_help = "Examples:\n  orbis-pkg-util verify game.pkg\n  orbis-pkg-util verify game.pkg --metadata-only\n  orbis-pkg-util verify game.pkg --path textures\n\nChecks selected entry payloads, filesystem structure, lengths, and decompression.\nAdd --integrity to verify stored PKG SHA-256 digests and signed PFS block HMACs.\nIt cannot be combined with --path; --metadata-only limits checks to PKG metadata.\nAbsent hashes or unavailable MACs return exit 3, even when readability passes.\nPublisher signatures, licenses, and authenticity are not verified. No files are written."
+        after_help = "Examples:\n  orbis-pkg-util verify game.pkg\n  orbis-pkg-util verify game.pkg --metadata-only\n  orbis-pkg-util verify game.pkg --path textures\n  orbis-pkg-util verify game.pkg --integrity --json\n\nChecks selected entry payloads, filesystem structure, lengths, and decompression.\nAdd --integrity to verify stored PKG SHA-256 digests and signed PFS block HMACs.\nIt cannot be combined with --path; --metadata-only limits checks to PKG metadata.\nAbsent hashes or unavailable MACs return exit 3, even when readability passes.\nPublisher signatures, licenses, and authenticity are not verified. No files are written."
     )]
     Verify {
         /// Also check stored PKG digests and signed PFS block HMACs
         #[arg(long, conflicts_with = "paths")]
         integrity: bool,
+        /// Emit a streamed JSON integrity report, including failures and omissions
+        #[arg(long, requires = "integrity")]
+        json: bool,
         #[arg(value_name = "PKG_FILE")]
         pkg_path: PathBuf,
         #[command(flatten)]

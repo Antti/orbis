@@ -78,6 +78,7 @@ checks; missing checks return exit 3. Neither mode verifies publisher authentici
 
 | Crate | Description |
 |-------|-------------|
+| [orbis-integrity](orbis-integrity/) | Shared streaming integrity check types, with no runtime dependencies |
 | [orbis-pfs](orbis-pfs/) | Library for reading PFS (PlayStation File System) images |
 | [orbis-pkg](orbis-pkg/) | Library for parsing and extracting PS4 PKG files |
 | [orbis-pkg-util](orbis-pkg-util/) | Command-line utility for PKG operations |

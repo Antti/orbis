@@ -45,3 +45,9 @@ cancellation callback for long-running checks. Unsigned images have no HMACs;
 missing keys or zero signatures never count as verified. This does not verify
 publisher authenticity. See the [CLI integrity documentation](../orbis-pkg-util/README.md#check-data-without-extracting-it)
 for supported layouts and incomplete-result handling.
+
+For per-check results, use `verify_integrity_with` and a fallible observer. Events
+use the shared `orbis-integrity` types and include a location, status, unavailable
+reason, and count. Verification streams events and stops on the first mismatch,
+observer error or cancellation; the original `verify_integrity` API remains
+available for totals only.

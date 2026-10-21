@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["orbis-pfs", "orbis-pkg", "orbis-pkg-util"]
+members = ["orbis-integrity", "orbis-pfs", "orbis-pkg", "orbis-pkg-util"]
+exclude = ["fuzz"]
 
 [workspace.package]
 authors = ["videobitva"]
@@ -10,6 +11,7 @@ repository = "https://github.com/videobitva/orbis"
 homepage = "https://github.com/videobitva/orbis"
 
 [workspace.dependencies]
+orbis-integrity = { version = "0.1.0", path = "orbis-integrity" }
 aes = { version = "0.8.4" }
 sha2 = { version = "0.10.9" }
 snafu = { version = "0.8.9" }

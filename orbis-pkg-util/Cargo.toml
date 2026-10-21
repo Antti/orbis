@@ -16,6 +16,7 @@ default = ["cli"]
 cli = ["dep:clap", "dep:clap_complete", "dep:ctrlc", "dep:indicatif"]
 
 [dependencies]
+orbis-integrity.workspace = true
 cap-std = "4.0.3"
 fastrand = "2"
 memmap2 = "0.9"

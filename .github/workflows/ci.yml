@@ -53,3 +53,4 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --check
+      - run: cargo fmt --manifest-path fuzz/Cargo.toml --check

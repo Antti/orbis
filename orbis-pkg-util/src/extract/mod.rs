@@ -127,11 +127,25 @@ impl<'a, R: AsRef<[u8]> + Sync, P: ExtractProgress> PkgExtractor<'a, R, P> {
     /// Checks stored PKG digests and (unless metadata-only) outer/inner PFS HMACs.
     /// Missing signatures are counted separately and never reported as verified.
     pub fn verify_integrity(&self, metadata_only: bool) -> Result<IntegrityReport, ExtractError> {
+        self.verify_integrity_with(metadata_only, |_, _| Ok(()))
+    }
+
+    /// Streams checks with a layer (`pkg`, `outer_pfs`, `inner_pfs`).
+    /// The observer can write results without retaining millions of block records.
+    pub fn verify_integrity_with(
+        &self,
+        metadata_only: bool,
+        mut observer: impl FnMut(&str, orbis_integrity::Check<'_>) -> io::Result<()>,
+    ) -> Result<IntegrityReport, ExtractError> {
         self.check_cancelled()?;
         self.progress.phase("Checking stored PKG digests");
         let digests = self
             .pkg
-            .verify_integrity(!metadata_only, || self.progress.is_cancelled())
+            .verify_integrity_with(
+                !metadata_only,
+                || self.progress.is_cancelled(),
+                |check| observer("pkg", check),
+            )
             .map_err(integrity_error)?;
         let mut result = IntegrityReport {
             digests: digests.checked,
@@ -140,16 +154,42 @@ impl<'a, R: AsRef<[u8]> + Sync, P: ExtractProgress> PkgExtractor<'a, R, P> {
         };
         if !metadata_only {
             self.progress.phase("Checking PFS block HMACs");
-            let (outer, inner) = filesystem::open_filesystems(self.pkg)?;
             let image = self.pkg.get_pfs_image().ok_or(ExtractError::NoPfsImage)?;
             let key = (!image.ekpfs.is_empty()).then_some(image.ekpfs);
-            for pfs in [outer, inner] {
-                let report = pfs
-                    .verify_integrity(key, || self.progress.is_cancelled())
-                    .map_err(integrity_error)?;
-                result.macs += report.checked;
-                result.missing += report.missing;
+            if key.is_none()
+                && orbis_pfs::header::read_mode(image.data).is_ok_and(|m| m.is_encrypted())
+            {
+                observer(
+                    "outer_pfs",
+                    orbis_integrity::Check {
+                        scope: "encrypted PFS image",
+                        status: orbis_integrity::Status::Unavailable,
+                        reason: Some(orbis_integrity::Reason::MissingKey),
+                        count: 1,
+                    },
+                )
+                .map_err(integrity_error)?;
             }
+            let outer = filesystem::open_outer_filesystem(self.pkg)?;
+            let report = outer
+                .verify_integrity_with(
+                    key,
+                    || self.progress.is_cancelled(),
+                    |check| observer("outer_pfs", check),
+                )
+                .map_err(integrity_error)?;
+            result.macs += report.checked;
+            result.missing += report.missing;
+            let inner = filesystem::open_inner_filesystem(&outer)?;
+            let report = inner
+                .verify_integrity_with(
+                    key,
+                    || self.progress.is_cancelled(),
+                    |check| observer("inner_pfs", check),
+                )
+                .map_err(integrity_error)?;
+            result.macs += report.checked;
+            result.missing += report.missing;
         }
         Ok(result)
     }

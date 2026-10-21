@@ -54,3 +54,9 @@ if let Some(pfs_image) = pkg.get_pfs_image() {
 # Ok(())
 # }
 ```
+
+For per-check results, use `verify_integrity_with` and a fallible observer. Events
+use the shared `orbis-integrity` types and include a location, status, unavailable
+reason, and count. Verification streams events and stops on the first mismatch,
+observer error or cancellation; the original `verify_integrity` API remains
+available for totals only.

@@ -16,9 +16,9 @@ pub struct InodeRaw {
     pub nlink: U16,
     /// 0x04: Flags (compressed, readonly, etc.).
     pub flags: U32,
-    /// 0x08: Size in bytes.
+    /// 0x08: Stored size in bytes (including the PFSC container).
     pub size: U64,
-    /// 0x10: Compressed size (same as size for uncompressed).
+    /// 0x10: Logical size after decompression (same as size for plain files).
     pub size_compressed: U64,
     /// 0x18: Access time.
     pub atime: U64,
@@ -202,11 +202,7 @@ impl Inode {
             block_count as u64 <= available,
             InvalidBlockCountSnafu { inode: self.index }
         );
-        let stored_size = if self.flags().is_compressed() {
-            self.compressed_len()
-        } else {
-            self.size()
-        };
+        let stored_size = self.size();
         ensure!(
             stored_size.div_ceil(u64::from(block_size)) <= block_count as u64,
             InvalidBlockCountSnafu { inode: self.index }

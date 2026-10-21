@@ -199,6 +199,22 @@ fn cli_integrity_checks_signed_outer_pfs_even_when_pkg_digests_are_absent() {
     assert_eq!(report.macs, 9);
     assert!(report.missing > 0);
     let dir = tempfile::tempdir().unwrap();
+    let mut missing_key = b.clone();
+    be32(&mut missing_key, 0x1020, 0x21); // Remove IMAGE_KEY without changing signed PFS bytes.
+    std::fs::write(dir.path().join("missing-key.pkg"), missing_key).unwrap();
+    let output = run(
+        dir.path(),
+        &["verify", "missing-key.pkg", "--integrity", "--json"],
+    );
+    assert_code(&output, 3);
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        result["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["layer"] == "outer_pfs" && c["reason"] == "missing_key")
+    );
     // Corrupt padding in inner image content: reads still work, its outer MAC fails.
     *b.last_mut().unwrap() ^= 1;
     std::fs::write(dir.path().join("game.pkg"), b).unwrap();
@@ -545,4 +561,117 @@ fn passcodes_unlock_every_entry_slot_and_wrong_passcodes_never_fall_back() {
                 .contains(&String::from_utf8_lossy(secret).to_string())
         );
     }
+}
+
+#[test]
+fn integrity_json_reports_success_omissions_and_failures() {
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = signed_pkg();
+    std::fs::write(dir.path().join("good.pkg"), &bytes).unwrap();
+    let check = |name: &str, expected| {
+        let output = run(
+            dir.path(),
+            &["verify", name, "--integrity", "--json", "--quiet"],
+        );
+        assert_code(&output, expected);
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let result = check("good.pkg", 0);
+    assert_eq!(result["schema_version"], 1);
+    assert_eq!(result["status"], "complete");
+    assert_eq!(result["summary"]["digests"], 13);
+    assert_eq!(result["summary"]["failed"], 0);
+    assert_eq!(result["readability"]["status"], "passed");
+    let checks = result["checks"].as_array().unwrap();
+    assert_eq!(
+        checks
+            .iter()
+            .filter(|c| c["reason"] == "unsigned_image")
+            .count(),
+        2
+    );
+    assert!(
+        checks
+            .iter()
+            .filter(|c| c["layer"] == "pkg")
+            .all(|c| c["status"] == "passed")
+    );
+
+    let mut absent = bytes.clone();
+    absent[0xfe0..0x1000].fill(0);
+    std::fs::write(dir.path().join("absent.pkg"), &absent).unwrap();
+    let result = check("absent.pkg", 3);
+    assert_eq!(result["summary"]["unavailable"], 1);
+    assert_eq!(result["checks"][0]["reason"], "missing_digest");
+    assert_eq!(result["status"], "incomplete");
+
+    let mut bad = bytes;
+    bad[0x80] ^= 1;
+    std::fs::write(dir.path().join("bad.pkg"), &bad).unwrap();
+    let result = check("bad.pkg", 1);
+    assert_eq!(result["status"], "failed");
+    assert_eq!(result["summary"]["failed"], 1);
+    assert_eq!(result["checks"][0]["scope"], "PKG header");
+    assert_eq!(result["checks"][0]["reason"], "digest_mismatch");
+    assert!(result["readability"].is_null());
+    assert!(
+        result["error"]
+            .as_str()
+            .unwrap()
+            .contains("SHA-256 mismatch")
+    );
+
+    // Input and structural errors still produce complete machine-readable output.
+    for name in ["missing.pkg", "truncated.pkg", "invalid-range.pkg"] {
+        if name == "truncated.pkg" {
+            std::fs::write(dir.path().join(name), b"short").unwrap();
+        }
+        if name == "invalid-range.pkg" {
+            be64(&mut absent, 0x28, u64::MAX);
+            std::fs::write(dir.path().join(name), &absent).unwrap();
+        }
+        let result = check(name, 1);
+        assert_eq!(result["status"], "failed");
+        assert!(result["error"].is_string());
+    }
+    let output = run(
+        dir.path(),
+        &[
+            "verify",
+            "good.pkg",
+            "--integrity",
+            "--json",
+            "--metadata-only",
+        ],
+    );
+    assert_code(&output, 0);
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["metadata_only"], true);
+    assert!(
+        value["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["layer"] == "pkg")
+    );
+    assert_code(&run(dir.path(), &["verify", "good.pkg", "--json"]), 2);
+}
+
+#[test]
+fn pkg_integrity_observer_can_stop_without_finishing_the_scan() {
+    let bytes = signed_pkg();
+    let pkg = orbis_pkg::Pkg::parse(bytes).unwrap();
+    let mut calls = 0;
+    let error = pkg
+        .verify_integrity_with(
+            true,
+            || false,
+            |_| {
+                calls += 1;
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            },
+        )
+        .unwrap_err();
+    assert_eq!(calls, 1);
+    assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
 }

@@ -1,0 +1,8 @@
+[package]
+name = "orbis-integrity"
+version = "0.1.0"
+edition = "2024"
+description = "Streaming integrity check results shared by the Orbis parsers"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true

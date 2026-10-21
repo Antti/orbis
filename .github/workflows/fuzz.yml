@@ -1,0 +1,56 @@
+name: Parser fuzzing
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  schedule:
+    - cron: '23 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    name: Fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [pkg, sfo, pfs, pfsc]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+          shared-key: fuzz
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Fetch locked fuzz dependencies
+        run: cargo fetch --manifest-path fuzz/Cargo.toml --locked
+      - name: Generate synthetic seeds
+        run: python3 fuzz/generate_corpus.py
+      - name: Run bounded sanitizer fuzzing
+        env:
+          CARGO_NET_OFFLINE: 'true'
+          FUZZ_TARGET: ${{ matrix.target }}
+          FUZZ_SECONDS: ${{ github.event_name == 'schedule' && '900' || '60' }}
+        run: >-
+          cargo +nightly fuzz run "$FUZZ_TARGET" --
+          -max_total_time="$FUZZ_SECONDS" -max_len=1048576
+          -timeout=10 -rss_limit_mb=1024
+      - name: Preserve reproducing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-${{ matrix.target }}-${{ github.run_id }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore
+          retention-days: 14
