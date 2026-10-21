@@ -415,3 +415,15 @@ planning and rollback variants. Progress reporters receive non-fatal commit
 warnings through `ExtractProgress::warning`; use `recover_with_progress` to receive
 them during recovery. The package passed to planning/installation must already
 have any required entry and filesystem keys loaded.
+
+Preview a merged export without creating output or installation state:
+
+```sh
+orbis-pkg-util export --base ./CUSA12345 -o /Volumes/GAMES/game --dry-run
+orbis-pkg-util export --base ./CUSA12345 -o /Volumes/GAMES/game --dry-run --json
+```
+
+The plan reports versions, file counts, bytes, filesystem type, and available space.
+The reserve allows for two copies, allocation rounding, and metadata. It is conservative;
+quotas and concurrent writes can still exhaust space. FAT32 files over 4 GiB minus one
+byte are refused. Dry-run returns exit 3 when available space is below the reserve.

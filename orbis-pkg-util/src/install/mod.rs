@@ -4,10 +4,12 @@
 //! The base is never modified. Activation uses a recoverable sequence of directory
 //! renames, not a cross-platform atomic directory exchange. Stop the emulator first.
 mod export;
+mod preflight;
 mod storage;
 mod transaction;
 
-pub use export::{ExportReport, export_merged};
+pub use export::{ExportPlan, ExportReport, export_merged, plan_export};
+pub use preflight::FilesystemPlan;
 
 use crate::{ExtractError, ExtractOptions, ExtractProgress, PkgExtractor, SilentProgress};
 use cap_std::fs::Dir;

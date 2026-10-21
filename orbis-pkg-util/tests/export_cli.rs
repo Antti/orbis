@@ -98,3 +98,37 @@ fn export_usage_and_destination_errors_explain_the_required_action() {
     assert!(completion.status.success());
     assert!(String::from_utf8_lossy(&completion.stdout).contains("export"));
 }
+
+#[test]
+fn dry_run_reports_overlay_and_space_without_creating_state_or_output() {
+    let temp = tempfile::tempdir().unwrap();
+    base_game(temp.path());
+    let output = run(
+        temp.path(),
+        &[
+            "export",
+            "--base",
+            "CUSA00000",
+            "-o",
+            "merged",
+            "--dry-run",
+            "--json",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(plan["schema_version"], 1);
+    assert_eq!(plan["base_version"], "01.00");
+    assert!(plan["update_version"].is_null());
+    assert!(plan["files"].as_u64().unwrap() >= 2);
+    assert!(
+        plan["filesystem"]["required_free_bytes"].as_u64().unwrap()
+            >= 2 * plan["bytes"].as_u64().unwrap()
+    );
+    assert!(!temp.path().join("merged").exists());
+    assert!(!temp.path().join(".CUSA00000.orbis-install").exists());
+}

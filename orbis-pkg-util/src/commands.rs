@@ -29,7 +29,60 @@ enum Error {
 
 pub(crate) fn run(cli: &Cli, out: &mut impl Write, cancelled: Arc<AtomicBool>) -> Result<u8> {
     match &cli.command {
-        Command::Export { base, output } => {
+        Command::Export {
+            base,
+            output,
+            dry_run,
+            json,
+        } => {
+            if *dry_run {
+                let plan = orbis_pkg_util::install::plan_export(
+                    base,
+                    output,
+                    ConsoleProgress::with_options(cli.quiet, cancelled),
+                )?;
+                if *json {
+                    write_json(out, &serde_json::to_value(&plan)?)?;
+                } else {
+                    writeln!(
+                        out,
+                        "{}: base {}, update {}",
+                        plan.title_id,
+                        plan.base_version,
+                        plan.update_version.as_deref().unwrap_or("none")
+                    )?;
+                    writeln!(
+                        out,
+                        "{} files ({} from update), {}",
+                        plan.files,
+                        plan.update_files,
+                        human_size(plan.bytes)
+                    )?;
+                    writeln!(
+                        out,
+                        "Destination: {} ({})",
+                        escaped(&plan.destination),
+                        plan.filesystem.filesystem
+                    )?;
+                    writeln!(
+                        out,
+                        "Peak space reserve: {} ({} available)",
+                        human_size(plan.filesystem.required_free_bytes),
+                        human_size(plan.filesystem.available_bytes)
+                    )?;
+                    for warning in &plan.filesystem.warnings {
+                        writeln!(out, "{warning}")?;
+                    }
+                }
+                return Ok(
+                    if plan.filesystem.available_bytes >= plan.filesystem.required_free_bytes {
+                        0
+                    } else {
+                        3
+                    },
+                );
+            }
+
             let report = orbis_pkg_util::install::export_merged(
                 base,
                 output,

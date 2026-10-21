@@ -44,6 +44,12 @@ pub enum Command {
         /// New merged game directory (must not already exist)
         #[arg(short, long, value_name = "DIR")]
         output: PathBuf,
+        /// Inspect versions, file counts, filesystem limits, and peak space without writing
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit the dry-run plan as JSON
+        #[arg(long, requires = "dry_run")]
+        json: bool,
     },
     /// Install a full-file update into the base directory's sibling -UPDATE directory
     #[command(

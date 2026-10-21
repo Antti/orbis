@@ -14,7 +14,7 @@ use std::{
 };
 
 /// The exported version and the bytes actually copied (overridden base files are skipped).
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct ExportReport {
     pub title_id: String,
     pub app_version: String,
@@ -22,6 +22,62 @@ pub struct ExportReport {
     pub files: usize,
     pub bytes: u64,
     pub update_files: usize,
+}
+
+/// A read-only snapshot. Revalidated when export starts.
+#[derive(Debug, serde::Serialize)]
+pub struct ExportPlan {
+    pub schema_version: u32,
+    pub title_id: String,
+    pub base_version: String,
+    pub update_version: Option<String>,
+    pub destination: PathBuf,
+    pub files: usize,
+    pub update_files: usize,
+    pub bytes: u64,
+    pub filesystem: super::FilesystemPlan,
+}
+
+pub fn plan_export(
+    base: &Path,
+    output: &Path,
+    progress: impl ExtractProgress,
+) -> Result<ExportPlan> {
+    let location = storage::Layout::open(base, false)?;
+    let (_, parent, name) = destination(&location, output)?;
+    location.require_recovered()?;
+    let metadata = location.base_metadata()?;
+    let manifest = location.active_manifest(&location.state()?, &metadata, &progress)?;
+    let mut entries = BTreeMap::new();
+    scan(&location.base_dir()?, Layer::Base, &mut entries, &progress)?;
+    if manifest.is_some() {
+        scan(
+            &location.parent.open_dir(&location.active)?,
+            Layer::Update,
+            &mut entries,
+            &progress,
+        )?;
+    }
+    let files: Vec<_> = entries.values().filter(|e| !e.directory).collect();
+    let bytes = files
+        .iter()
+        .try_fold(0u64, |n, e| n.checked_add(e.bytes))
+        .ok_or_else(|| invalid("export size overflows"))?;
+    Ok(ExportPlan {
+        schema_version: 1,
+        title_id: metadata.title_id,
+        base_version: metadata.version.to_string(),
+        update_version: manifest.map(|m| m.app_version),
+        destination: parent.join(name),
+        files: files.len(),
+        update_files: files.iter().filter(|e| e.layer == Layer::Update).count(),
+        bytes,
+        filesystem: super::FilesystemPlan::inspect(
+            &parent,
+            files.iter().map(|e| e.bytes),
+            entries.len(),
+        )?,
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -104,6 +160,12 @@ pub fn export_merged<P: ExtractProgress>(
     if expected.len() != report.update_files {
         return Err(invalid("update changed during export"));
     }
+    super::FilesystemPlan::inspect(
+        &parent_path,
+        entries.values().filter(|e| !e.directory).map(|e| e.bytes),
+        entries.len(),
+    )?
+    .require_space()?;
     let stage = Stage::new(parent, destination)?;
     progress.phase("Exporting merged game");
     progress.bytes_total(report.bytes);
