@@ -1,5 +1,5 @@
 //! Materialize the installed base/update overlay as an independent directory.
-use super::{Result, invalid, storage};
+use super::{Result, invalid, inventory::FileRecord, storage};
 use crate::{
     ExtractError, ExtractProgress,
     fs_output::{copy_new_directory, directory_identity, publish_new, unsupported_publication},
@@ -412,10 +412,10 @@ fn copy_file(
     source: &Dir,
     destination: &Dir,
     entry: &Entry,
-    expected: Option<&storage::FileRecord>,
+    expected: Option<&FileRecord>,
     target_path: &str,
     progress: &impl ExtractProgress,
-) -> Result<storage::FileRecord> {
+) -> Result<FileRecord> {
     if !source.symlink_metadata(&entry.path)?.is_file() {
         return Err(invalid(format!(
             "source is no longer a regular file: {}",
@@ -469,7 +469,7 @@ fn copy_file(
         )));
     }
     output.sync_all()?;
-    Ok(storage::FileRecord {
+    Ok(FileRecord {
         path: entry.path.clone(),
         bytes,
         sha256,

@@ -6,10 +6,7 @@ use super::{
 use crate::ExtractProgress;
 use fs2::FileExt;
 use serde::Serialize;
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize)]
 pub struct InstallationStatus {
@@ -129,36 +126,20 @@ pub fn status(base: &Path, progress: impl ExtractProgress) -> Result<Installatio
             let dir = layout.parent.open_dir(&layout.active)?;
             let manifest: Manifest = storage::read_json(&dir, storage::MANIFEST)?;
             report.active_version = Some(manifest.app_version.clone());
-            let actual = storage::inventory(&dir, &progress)?;
-            let expected: BTreeMap<_, _> = manifest
-                .files
-                .iter()
-                .map(|f| (f.path.as_str(), f))
-                .collect();
-            let actual: BTreeMap<_, _> = actual.iter().map(|f| (f.path.as_str(), f)).collect();
-            for path in expected.keys().chain(actual.keys()) {
-                if expected.get(path) != actual.get(path) {
-                    report.modified_files.push((*path).to_owned());
-                }
-            }
-            report.modified_files.sort();
-            report.modified_files.dedup();
-            if !report.modified_files.is_empty() {
+            let differences = storage::compare_inventory(&dir, &manifest, &progress)?;
+            report.modified_files = differences.modified_files;
+            if !differences.matches {
                 report
                     .issues
                     .push("managed update inventory differs from its manifest".into());
             }
-            let app = storage::app_metadata(&dir)?;
-            if manifest.schema_version != 1
-                || manifest.content_id != metadata.content_id
-                || manifest.title_id != metadata.title_id
-                || app.content_id != metadata.content_id
-                || app.category != "gp"
-                || app.version.to_string() != manifest.app_version
-            {
-                report
-                    .issues
-                    .push("managed update metadata is inconsistent".into());
+            if let Err(error) = storage::validate_manifest_metadata(&dir, &manifest, &metadata) {
+                match error {
+                    super::InstallError::Invalid { .. } => report
+                        .issues
+                        .push("managed update metadata is inconsistent".into()),
+                    other => return Err(other),
+                }
             }
             Ok(())
         })();
@@ -169,15 +150,11 @@ pub fn status(base: &Path, progress: impl ExtractProgress) -> Result<Installatio
             report.issues.push(error.to_string());
         }
     }
-    if let Err(error) = layout.verify_previous(&state, &metadata, &progress) {
-        if progress.is_cancelled() {
-            return Err(error);
-        }
-        report.issues.push(format!("rollback: {error}"));
-    } else if state.rollback == RollbackTarget::Update {
-        let previous = layout.manager()?.open_dir("previous")?;
-        let manifest: Manifest = storage::read_json(&previous, storage::MANIFEST)?;
-        report.rollback_version = Some(manifest.app_version);
+    match layout.verify_previous(&state, &metadata, &progress) {
+        Ok(Some(manifest)) => report.rollback_version = Some(manifest.app_version),
+        Ok(None) => {}
+        Err(error) if progress.is_cancelled() => return Err(error),
+        Err(error) => report.issues.push(format!("rollback: {error}")),
     }
     Ok(report)
 }

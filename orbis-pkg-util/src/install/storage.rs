@@ -1,8 +1,8 @@
+use super::inventory::{FileRecord, hash_file};
 use super::*;
 use cap_std::{ambient_authority, fs::OpenOptions};
 use fs2::FileExt;
 use serde::de::DeserializeOwned;
-use sha2::{Digest, Sha256};
 use std::{
     ffi::OsString,
     io::{Read, Write},
@@ -12,13 +12,6 @@ use std::{
 pub(super) const MANIFEST: &str = ".orbis-install.json";
 const MAX_JSON: u64 = 64 * 1024 * 1024;
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub(super) struct FileRecord {
-    pub path: String,
-    pub bytes: u64,
-    pub sha256: String,
-}
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Manifest {
@@ -216,7 +209,7 @@ impl Layout {
         state: &State,
         base: &AppMetadata,
         progress: &P,
-    ) -> Result<()> {
+    ) -> Result<Option<Manifest>> {
         let present = match &self.root {
             Some(root) => exists(root, "previous")?,
             None => false,
@@ -231,8 +224,9 @@ impl Layout {
             let manifest: Manifest = read_json(&dir, MANIFEST)?;
             progress.phase("Checking rollback copy");
             verify_manifest(&dir, &manifest, base, progress)?;
+            return Ok(Some(manifest));
         }
-        Ok(())
+        Ok(None)
     }
     pub fn clean_uncommitted(&self) -> Result<()> {
         self.require_recovered()?;
@@ -379,26 +373,7 @@ pub(super) fn inventory<P: ExtractProgress>(root: &Dir, progress: &P) -> Result<
             if kind.is_dir() {
                 pending.push(format!("{path}/"));
             } else if kind.is_file() {
-                let mut file = dir.open(&name)?;
-                let mut hash = Sha256::new();
-                let mut bytes = 0;
-                loop {
-                    if progress.is_cancelled() {
-                        return Err(ExtractError::Cancelled.into());
-                    }
-                    let n = file.read(&mut buffer)?;
-                    if n == 0 {
-                        break;
-                    }
-                    hash.update(&buffer[..n]);
-                    bytes += n as u64;
-                    progress.bytes_processed(n as u64);
-                }
-                records.push(FileRecord {
-                    path,
-                    bytes,
-                    sha256: format!("{:x}", hash.finalize()),
-                });
+                records.push(hash_file(root, &path, &mut buffer, progress)?);
             } else {
                 return Err(invalid(
                     "symlinks and special files are not supported in managed updates",
@@ -415,6 +390,20 @@ pub(super) fn verify_manifest<P: ExtractProgress>(
     base: &AppMetadata,
     progress: &P,
 ) -> Result<()> {
+    validate_manifest_metadata(dir, manifest, base)?;
+    if !compare_inventory(dir, manifest, progress)?.matches {
+        return Err(invalid(
+            "managed update files have changed; refusing to discard local modifications",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn validate_manifest_metadata(
+    dir: &Dir,
+    manifest: &Manifest,
+    base: &AppMetadata,
+) -> Result<()> {
     if manifest.schema_version != 1
         || manifest.title_id != base.title_id
         || manifest.content_id != base.content_id
@@ -428,18 +417,52 @@ pub(super) fn verify_manifest<P: ExtractProgress>(
     {
         return Err(invalid("installed update metadata has changed"));
     }
+    Ok(())
+}
+
+pub(super) struct InventoryDiff {
+    pub matches: bool,
+    pub modified_files: Vec<String>,
+}
+
+/// Compare the complete record list as well as individual paths: duplicate or
+/// reordered manifest records must not silently pass diagnostics.
+pub(super) fn compare_inventory(
+    dir: &Dir,
+    manifest: &Manifest,
+    progress: &impl ExtractProgress,
+) -> Result<InventoryDiff> {
     let total = manifest
         .files
         .iter()
         .try_fold(0u64, |n, f| n.checked_add(f.bytes))
         .ok_or_else(|| invalid("manifest size overflows"))?;
     progress.bytes_total(total);
-    if inventory(dir, progress)? != manifest.files {
-        return Err(invalid(
-            "managed update files have changed; refusing to discard local modifications",
-        ));
+    let actual = inventory(dir, progress)?;
+    let matches = actual == manifest.files;
+    if matches {
+        return Ok(InventoryDiff {
+            matches,
+            modified_files: Vec::new(),
+        });
     }
-    Ok(())
+    let expected: std::collections::BTreeMap<_, _> = manifest
+        .files
+        .iter()
+        .map(|f| (f.path.as_str(), f))
+        .collect();
+    let actual: std::collections::BTreeMap<_, _> =
+        actual.iter().map(|f| (f.path.as_str(), f)).collect();
+    let paths: BTreeSet<_> = expected.keys().chain(actual.keys()).copied().collect();
+    let modified_files = paths
+        .into_iter()
+        .filter(|path| expected.get(path) != actual.get(path))
+        .map(str::to_owned)
+        .collect();
+    Ok(InventoryDiff {
+        matches,
+        modified_files,
+    })
 }
 
 #[cfg(test)]

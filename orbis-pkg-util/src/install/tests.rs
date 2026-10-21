@@ -467,3 +467,63 @@ fn retains_unknown_metadata_and_rejects_reserved_paths_and_insufficient_space() 
     assert!(check_space(100, 100).is_ok());
     assert!(!active(&base).exists());
 }
+
+#[test]
+fn diagnostics_and_installation_agree_on_invalid_managed_manifests() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = base_game(tmp.path());
+    install(&package("01.01", "base.txt"), &base, SilentProgress).unwrap();
+    let path = active(&base).join(storage::MANIFEST);
+    let original: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let next = package("01.02", "base.txt");
+    for defect in ["duplicate", "reordered", "identity"] {
+        let mut manifest = original.clone();
+        match defect {
+            "duplicate" => {
+                let files = manifest["files"].as_array_mut().unwrap();
+                files.push(files[0].clone());
+            }
+            "reordered" => manifest["files"].as_array_mut().unwrap().reverse(),
+            "identity" => manifest["title_id"] = "CUSA99999".into(),
+            _ => unreachable!(),
+        }
+        fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let report = status(&base, SilentProgress).unwrap();
+        assert!(!report.issues.is_empty(), "{defect}");
+        assert!(
+            report.modified_files.is_empty(),
+            "file contents did not change"
+        );
+        assert!(plan(&next, &base).is_err(), "{defect}");
+    }
+    fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+    fs::write(active(&base).join("base.txt"), b"EDITED").unwrap();
+    let report = status(&base, SilentProgress).unwrap();
+    assert_eq!(report.modified_files, ["base.txt"]);
+    assert!(plan(&next, &base).is_err());
+}
+
+#[test]
+fn inventory_rejects_a_file_truncated_during_hashing() {
+    struct Truncate(PathBuf);
+    impl ExtractProgress for Truncate {
+        fn bytes_processed(&self, _: u64) {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&self.0)
+                .unwrap()
+                .set_len(0)
+                .unwrap();
+        }
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("file");
+    fs::write(&path, vec![0; 2 * 1024 * 1024]).unwrap();
+    let dir = Dir::open_ambient_dir(tmp.path(), cap_std::ambient_authority()).unwrap();
+    let error = storage::inventory(&dir, &Truncate(path)).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("file changed during verification")
+    );
+}

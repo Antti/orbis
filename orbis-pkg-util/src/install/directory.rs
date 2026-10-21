@@ -1,12 +1,12 @@
 //! Portable export inventories. These hashes detect changes, not authenticity.
 use super::{
     Result, invalid,
-    storage::{self, FileRecord},
+    inventory::{FileRecord, hash_file},
+    storage,
 };
 use crate::{ExtractError, ExtractProgress};
 use cap_std::{ambient_authority, fs::Dir};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Read,
@@ -113,56 +113,6 @@ pub(super) fn read_manifest(dir: &Dir) -> Result<ExportManifest> {
     Ok(manifest)
 }
 
-pub(super) fn hash_file(
-    root: &Dir,
-    path: &str,
-    progress: &impl ExtractProgress,
-) -> Result<FileRecord> {
-    // Check every component so in-tree symlinks are rejected as well as escapes.
-    let mut prefix = std::path::PathBuf::new();
-    for part in Path::new(path).components() {
-        prefix.push(part);
-        let meta = root.symlink_metadata(&prefix)?;
-        if (prefix == Path::new(path) && !meta.is_file())
-            || (prefix != Path::new(path) && !meta.is_dir())
-        {
-            return Err(invalid(format!(
-                "expected regular file and directories: {path}"
-            )));
-        }
-    }
-    let mut file = root.open(path)?;
-    let before = file.metadata()?;
-    let mut hash = Sha256::new();
-    let mut bytes = 0u64;
-    let mut buffer = vec![0u8; 1024 * 1024];
-    loop {
-        if progress.is_cancelled() {
-            return Err(ExtractError::Cancelled.into());
-        }
-        let n = file.read(&mut buffer)?;
-        if n == 0 {
-            break;
-        }
-        bytes = bytes
-            .checked_add(n as u64)
-            .ok_or_else(|| invalid("file size overflows"))?;
-        if bytes > before.len() {
-            return Err(invalid(format!("file grew during verification: {path}")));
-        }
-        hash.update(&buffer[..n]);
-        progress.bytes_processed(n as u64);
-    }
-    if before.len() != bytes || before.modified()? != file.metadata()?.modified()? {
-        return Err(invalid(format!("file changed during verification: {path}")));
-    }
-    Ok(FileRecord {
-        path: path.into(),
-        bytes,
-        sha256: format!("{:x}", hash.finalize()),
-    })
-}
-
 // macOS creates AppleDouble metadata on exFAT. Ignore only regular sidecars with
 // an AppleDouble header and an existing regular file/directory counterpart.
 pub(super) fn apple_double(dir: &Dir, name: &str) -> Result<bool> {
@@ -205,6 +155,7 @@ pub fn verify_directory(path: &Path, progress: impl ExtractProgress) -> Result<D
     let directories: BTreeSet<_> = manifest.directories.iter().map(String::as_str).collect();
     let mut seen = BTreeSet::new();
     let mut pending = vec![String::new()];
+    let mut buffer = vec![0u8; 1024 * 1024];
     progress.phase("Verifying exported files");
     let total = manifest
         .files
@@ -235,7 +186,7 @@ pub fn verify_directory(path: &Path, progress: impl ExtractProgress) -> Result<D
                     Some(DirectoryIssueKind::WrongType)
                 } else {
                     report.checked_files += 1;
-                    if &hash_file(&dir, &path, &progress)? != *expected {
+                    if &hash_file(&dir, &path, &mut buffer, &progress)? != *expected {
                         Some(DirectoryIssueKind::Changed)
                     } else {
                         None

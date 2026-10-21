@@ -1,4 +1,5 @@
-use super::super::directory::{self, DirectoryIssueKind, ExportManifest, hash_file};
+use super::super::directory::{self, DirectoryIssueKind, ExportManifest};
+use super::super::inventory::hash_file;
 use super::*;
 use orbis_pkg::sfo::AppMetadata;
 
@@ -17,13 +18,14 @@ pub(super) fn run(
         .flat_map(|m| m.files.iter().map(|f| (f.path.as_str(), f)))
         .collect();
     let mut files = Vec::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
     for entry in entries.values().filter(|e| !e.directory) {
         let source = if entry.layer == Layer::Base {
             sources.0
         } else {
             sources.1.unwrap()
         };
-        let record = hash_file(source, &entry.path, progress)?;
+        let record = hash_file(source, &entry.path, &mut buffer, progress)?;
         if record.bytes != entry.bytes
             || (entry.layer == Layer::Update
                 && expected.get(entry.path.as_str()).copied() != Some(&record))

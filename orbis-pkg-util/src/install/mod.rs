@@ -5,6 +5,7 @@
 //! renames, not a cross-platform atomic directory exchange. Stop the emulator first.
 mod directory;
 mod export;
+mod inventory;
 pub use directory::{DirectoryIssue, DirectoryIssueKind, DirectoryReport, verify_directory};
 mod preflight;
 mod status;
