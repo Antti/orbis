@@ -70,7 +70,8 @@ pub(super) fn read_manifest(dir: &Dir) -> Result<ExportManifest> {
             let name = parent
                 .to_str()
                 .ok_or_else(|| invalid("invalid manifest path"))?;
-            if paths.get(&name.to_ascii_lowercase()) != Some(&(&name.to_owned(), true)) {
+            if !matches!(paths.get(&name.to_ascii_lowercase()), Some((stored, true)) if stored.as_str() == name)
+            {
                 return Err(invalid(
                     "manifest omits a parent directory or uses a file as a directory",
                 ));

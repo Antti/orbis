@@ -12,6 +12,10 @@ pub(super) fn run(
 ) -> Result<()> {
     progress.phase("Hashing export sources for safe resume");
     progress.bytes_total(report.bytes);
+    let expected: BTreeMap<_, _> = update
+        .iter()
+        .flat_map(|m| m.files.iter().map(|f| (f.path.as_str(), f)))
+        .collect();
     let mut files = Vec::new();
     for entry in entries.values().filter(|e| !e.directory) {
         let source = if entry.layer == Layer::Base {
@@ -21,7 +25,8 @@ pub(super) fn run(
         };
         let record = hash_file(source, &entry.path, progress)?;
         if record.bytes != entry.bytes
-            || (entry.layer == Layer::Update && !update.unwrap().files.contains(&record))
+            || (entry.layer == Layer::Update
+                && expected.get(entry.path.as_str()).copied() != Some(&record))
         {
             return Err(invalid(format!(
                 "source changed while planning resume: {}",
