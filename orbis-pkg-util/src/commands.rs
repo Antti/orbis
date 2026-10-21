@@ -11,6 +11,9 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, atomic::AtomicBool};
 
+mod directory;
+mod export;
+mod install;
 mod verify;
 
 type Result<T> = std::result::Result<T, Box<dyn StdError>>;
@@ -37,196 +40,20 @@ pub(crate) fn run(cli: &Cli, out: &mut impl Write, cancelled: Arc<AtomicBool>) -
             json,
         } => {
             if *dry_run {
-                let plan = orbis_pkg_util::install::plan_export(
-                    base,
-                    output,
-                    ConsoleProgress::with_options(cli.quiet, cancelled),
-                )?;
-                if *json {
-                    write_json(out, &serde_json::to_value(&plan)?)?;
-                } else {
-                    writeln!(
-                        out,
-                        "{}: base {}, update {}",
-                        plan.title_id,
-                        plan.base_version,
-                        plan.update_version.as_deref().unwrap_or("none")
-                    )?;
-                    writeln!(
-                        out,
-                        "{} files ({} from update), {}",
-                        plan.files,
-                        plan.update_files,
-                        human_size(plan.bytes)
-                    )?;
-                    writeln!(
-                        out,
-                        "Destination: {} ({})",
-                        escaped(&plan.destination),
-                        plan.filesystem.filesystem
-                    )?;
-                    writeln!(
-                        out,
-                        "Peak space reserve: {} ({} available)",
-                        human_size(plan.filesystem.required_free_bytes),
-                        human_size(plan.filesystem.available_bytes)
-                    )?;
-                    for warning in &plan.filesystem.warnings {
-                        writeln!(out, "{warning}")?;
-                    }
-                }
-                return Ok(
-                    if plan.filesystem.available_bytes >= plan.filesystem.required_free_bytes {
-                        0
-                    } else {
-                        3
-                    },
-                );
-            }
-
-            let progress = ConsoleProgress::with_options(cli.quiet, cancelled);
-            let report = if *resume {
-                orbis_pkg_util::install::resume_export(base, output, progress)?
+                export::preview(base, output, *json, cli, out, cancelled)
             } else {
-                orbis_pkg_util::install::export_merged(base, output, progress)?
-            };
-            if !cli.quiet {
-                diagnostic(&format!(
-                    "Exported {} version {}: {} files ({}, {} from the update) to {}.",
-                    report.title_id,
-                    report.app_version,
-                    report.files,
-                    human_size(report.bytes),
-                    report.update_files,
-                    escaped(&report.destination),
-                ));
+                export::run(base, output, *resume, cli, cancelled)
             }
-            Ok(0)
         }
         Command::Install {
             pkg_path,
             base,
             dry_run,
             json,
-        } => {
-            let mut pkg = open(pkg_path, cli.passcode_file.as_deref())?;
-            let _ = pkg.load_entry_keys();
-            orbis_pkg_util::install::update_metadata(&pkg)?;
-            prepare_filesystem(&mut pkg)?;
-            if *dry_run {
-                let plan = orbis_pkg_util::install::plan_with_progress(
-                    &pkg,
-                    base,
-                    ConsoleProgress::with_options(cli.quiet, cancelled),
-                )?;
-                if *json {
-                    write_json(out, &json!({ "schema_version": 1, "plan": plan }))?;
-                } else {
-                    writeln!(
-                        out,
-                        "{}: {} -> {}",
-                        plan.title_id, plan.current_version, plan.update_version
-                    )?;
-                    writeln!(out, "Destination: {}", escaped(&plan.destination))?;
-                    writeln!(
-                        out,
-                        "Temporary space: approximately {} ({} available)",
-                        human_size(plan.required_free_bytes),
-                        human_size(plan.available_bytes)
-                    )?;
-                    for file in plan.files {
-                        let action = match file.change {
-                            orbis_pkg_util::install::ChangeKind::Add => "add",
-                            orbis_pkg_util::install::ChangeKind::Replace => "replace",
-                            orbis_pkg_util::install::ChangeKind::RemoveFromUpdate => {
-                                "remove from update"
-                            }
-                        };
-                        writeln!(out, "{action}: {}", file.path.escape_debug())?;
-                    }
-                    writeln!(
-                        out,
-                        "The base stays unchanged; paths removed from the update fall back to the base."
-                    )?;
-                }
-            } else {
-                let progress = ConsoleProgress::with_options(cli.quiet, cancelled);
-                let plan = orbis_pkg_util::install::install(&pkg, base, progress)?;
-                if !cli.quiet {
-                    diagnostic(&format!(
-                        "Installed {} version {} to {}. Previous installation is available with rollback --base {}.",
-                        plan.title_id,
-                        plan.update_version,
-                        escaped(&plan.destination),
-                        escaped(base)
-                    ));
-                }
-            }
-            Ok(0)
-        }
-        Command::Status { base, json } => {
-            let report = orbis_pkg_util::install::status(
-                base,
-                ConsoleProgress::with_options(cli.quiet, cancelled),
-            )?;
-            if *json {
-                write_json(out, &serde_json::to_value(&report)?)?;
-            } else {
-                writeln!(
-                    out,
-                    "{}: base {}, active update {}",
-                    report.title_id,
-                    report.base_version,
-                    report.active_version.as_deref().unwrap_or("none")
-                )?;
-                writeln!(
-                    out,
-                    "Rollback: {} ({})",
-                    report.rollback,
-                    report.rollback_version.as_deref().unwrap_or("none")
-                )?;
-                writeln!(
-                    out,
-                    "Base file integrity is not tracked; managed update and rollback files are checked."
-                )?;
-                for path in &report.unmanaged_directories {
-                    writeln!(out, "Unmanaged: {}", escaped(path))?;
-                }
-                for path in &report.modified_files {
-                    writeln!(out, "Modified: {}", path.escape_debug())?;
-                }
-                for issue in &report.issues {
-                    writeln!(out, "{}", issue.escape_debug())?;
-                }
-            }
-            Ok(
-                if report.issues.is_empty() && report.unmanaged_directories.is_empty() {
-                    0
-                } else {
-                    3
-                },
-            )
-        }
-        Command::Rollback { base } => {
-            orbis_pkg_util::install::rollback_with_progress(
-                base,
-                ConsoleProgress::with_options(cli.quiet, cancelled),
-            )?;
-            if !cli.quiet {
-                diagnostic("Previous installation restored.");
-            }
-            Ok(0)
-        }
-        Command::Recover { base } => {
-            orbis_pkg_util::install::recover_with_progress(
-                base,
-                ConsoleProgress::with_options(cli.quiet, cancelled),
-            )?;
-            if !cli.quiet {
-                diagnostic("Recovery and staging cleanup completed.");
-            }
-            Ok(0)
-        }
+        } => install::run(pkg_path, base, *dry_run, *json, cli, out, cancelled),
+        Command::Status { base, json } => install::status(base, *json, cli, out, cancelled),
+        Command::Rollback { base } => install::rollback(base, cli, cancelled),
+        Command::Recover { base } => install::recover(base, cli, cancelled),
         Command::Info {
             pkg_path,
             json,
@@ -271,35 +98,7 @@ pub(crate) fn run(cli: &Cli, out: &mut impl Write, cancelled: Arc<AtomicBool>) -
             }
         }
         Command::VerifyDir { directory, json } => {
-            let report = orbis_pkg_util::install::verify_directory(
-                directory,
-                ConsoleProgress::with_options(cli.quiet, cancelled),
-            )?;
-            if *json {
-                write_json(out, &serde_json::to_value(&report)?)?;
-            } else {
-                writeln!(
-                    out,
-                    "Checked {} files; {} issues; export {}",
-                    report.checked_files,
-                    report.issues.len(),
-                    if report.complete {
-                        "completed"
-                    } else {
-                        "incomplete"
-                    }
-                )?;
-                for issue in &report.issues {
-                    writeln!(out, "{}: {}", issue.kind, issue.path.escape_debug())?;
-                }
-            }
-            Ok(if !report.issues.is_empty() {
-                1
-            } else if !report.complete {
-                3
-            } else {
-                0
-            })
+            directory::verify(directory, *json, cli, out, cancelled)
         }
         Command::Completions { shell } => {
             // Generators assume infallible writes; buffer first so a closed pipe
@@ -690,7 +489,7 @@ fn application_info(pkg: &Package) -> (Value, Value, Vec<String>) {
     }
 }
 
-fn write_json(out: &mut impl Write, value: &Value) -> Result<()> {
+fn write_json(out: &mut impl Write, value: &impl serde::Serialize) -> Result<()> {
     // Serialize before writing so serialization failures cannot leave half JSON.
     let bytes = serde_json::to_vec_pretty(value)?;
     out.write_all(&bytes)?;
@@ -709,6 +508,27 @@ fn validate_title_id(title_id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn json_serialization_failure_leaves_output_untouched() {
+        struct FailingReport;
+        impl serde::Serialize for FailingReport {
+            fn serialize<S: serde::Serializer>(
+                &self,
+                serializer: S,
+            ) -> std::result::Result<S::Ok, S::Error> {
+                use serde::ser::SerializeStruct;
+                let mut report = serializer.serialize_struct("Report", 2)?;
+                report.serialize_field("schema_version", &1)?;
+                Err(serde::ser::Error::custom(
+                    "cannot serialize remaining fields",
+                ))
+            }
+        }
+        let mut out = Vec::new();
+        assert!(write_json(&mut out, &FailingReport).is_err());
+        assert!(out.is_empty());
+    }
+
     #[test]
     fn default_output_requires_a_valid_title_id() {
         assert!(validate_title_id("CUSA03173").is_ok());
