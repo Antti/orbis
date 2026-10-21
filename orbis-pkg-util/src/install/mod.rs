@@ -7,8 +7,10 @@ mod directory;
 mod export;
 pub use directory::{DirectoryIssue, DirectoryReport, verify_directory};
 mod preflight;
+mod status;
 mod storage;
 mod transaction;
+pub use status::{InstallationStatus, status};
 
 pub use export::{ExportPlan, ExportReport, export_merged, plan_export, resume_export};
 pub use preflight::FilesystemPlan;

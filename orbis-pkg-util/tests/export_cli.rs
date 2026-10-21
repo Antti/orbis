@@ -266,3 +266,59 @@ fn resume_requires_matching_manifest_and_force_is_not_allowed() {
         Some(2)
     );
 }
+
+#[test]
+fn status_is_read_only_and_reports_versions_modifications_and_recovery() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    base_game(root);
+    let args = ["status", "--base", "CUSA00000", "--json"];
+    let output = run(root, &args);
+    assert!(output.status.success());
+    assert!(!root.join(".CUSA00000.orbis-install").exists());
+    fs::write(
+        root.join("update.pkg"),
+        update("01.09", "base.txt", b"UPDATED"),
+    )
+    .unwrap();
+    success(&run(
+        root,
+        &["install", "update.pkg", "--base", "CUSA00000", "-q"],
+    ));
+    let output = run(root, &args);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["active_version"], "01.09");
+    assert_eq!(report["rollback"], "base");
+    assert_eq!(report["base_integrity"], "not_tracked");
+    fs::write(root.join("CUSA00000-UPDATE/base.txt"), b"EDIT").unwrap();
+    fs::write(
+        root.join(".CUSA00000.orbis-install/journal.json"),
+        b"pending",
+    )
+    .unwrap();
+    fs::create_dir(root.join("CUSA00000-PATCH")).unwrap();
+    let output = run(root, &["doctor", "--base", "CUSA00000", "--json"]);
+    assert_eq!(output.status.code(), Some(3));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["modified_files"], serde_json::json!(["base.txt"]));
+    assert_eq!(report["pending_recovery"], true);
+    assert!(
+        !report["unmanaged_directories"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        fs::read(root.join("CUSA00000-UPDATE/base.txt")).unwrap(),
+        b"EDIT"
+    );
+    assert_eq!(
+        fs::read(root.join(".CUSA00000.orbis-install/journal.json")).unwrap(),
+        b"pending"
+    );
+}

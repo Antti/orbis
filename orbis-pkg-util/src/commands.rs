@@ -164,6 +164,49 @@ pub(crate) fn run(cli: &Cli, out: &mut impl Write, cancelled: Arc<AtomicBool>) -
             }
             Ok(0)
         }
+        Command::Status { base, json } => {
+            let report = orbis_pkg_util::install::status(
+                base,
+                ConsoleProgress::with_options(cli.quiet, cancelled),
+            )?;
+            if *json {
+                write_json(out, &serde_json::to_value(&report)?)?;
+            } else {
+                writeln!(
+                    out,
+                    "{}: base {}, active update {}",
+                    report.title_id,
+                    report.base_version,
+                    report.active_version.as_deref().unwrap_or("none")
+                )?;
+                writeln!(
+                    out,
+                    "Rollback: {} ({})",
+                    report.rollback,
+                    report.rollback_version.as_deref().unwrap_or("none")
+                )?;
+                writeln!(
+                    out,
+                    "Base file integrity is not tracked; managed update and rollback files are checked."
+                )?;
+                for path in &report.unmanaged_directories {
+                    writeln!(out, "Unmanaged: {}", escaped(path))?;
+                }
+                for path in &report.modified_files {
+                    writeln!(out, "Modified: {}", path.escape_debug())?;
+                }
+                for issue in &report.issues {
+                    writeln!(out, "{}", issue.escape_debug())?;
+                }
+            }
+            Ok(
+                if report.issues.is_empty() && report.unmanaged_directories.is_empty() {
+                    0
+                } else {
+                    3
+                },
+            )
+        }
         Command::Rollback { base } => {
             orbis_pkg_util::install::rollback_with_progress(
                 base,

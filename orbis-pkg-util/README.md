@@ -461,3 +461,16 @@ committed. Ctrl-C retains completed files and removes the current temporary file
 A forced kill can leave `.orbis-resume-*.tmp` files or a partial publication;
 inspect and remove those reported conflicts before retrying. Source files must
 remain unchanged, and changing the installed update requires a new export.
+
+Inspect an installation without starting an install or recovery:
+
+```sh
+orbis-pkg-util status --base ./CUSA12345
+orbis-pkg-util doctor --base ./CUSA12345 --json
+```
+
+`doctor` is an alias for `status`. Both show base/update versions, rollback,
+pending recovery, unmanaged patch directories, and changed managed files. They
+verify the managed update and rollback inventories; the original extracted base
+has no trusted inventory, so its file integrity is explicitly reported as untracked.
+Exit 3 means attention is needed. Diagnostics never repair or remove files.

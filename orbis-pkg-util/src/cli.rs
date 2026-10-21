@@ -71,6 +71,14 @@ pub enum Command {
         #[arg(long, requires = "dry_run")]
         json: bool,
     },
+    /// Inspect installed versions, rollback, local changes, and recovery needs (no writes)
+    #[command(alias = "doctor")]
+    Status {
+        #[arg(long, value_name = "DIR")]
+        base: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
     /// Restore the previous managed update, or return to the base game
     #[command(
         after_help = "Example:\n  orbis-pkg-util rollback --base ./games/CUSA12345\n\nStop the emulator first. One rollback is available after each successful install.\nLocally modified update files are preserved by refusing rollback."

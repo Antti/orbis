@@ -79,6 +79,12 @@ impl Drop for InstallLock {
 
 impl Layout {
     pub fn open(base: &Path, write: bool) -> Result<Self> {
+        Self::open_inner(base, write, false)
+    }
+    pub fn inspect(base: &Path) -> Result<Self> {
+        Self::open_inner(base, false, true)
+    }
+    fn open_inner(base: &Path, write: bool, allow_legacy: bool) -> Result<Self> {
         let base_path = std::fs::canonicalize(base)?;
         if !base_path.is_dir() {
             return Err(invalid("base must be an extracted game directory"));
@@ -92,7 +98,7 @@ impl Layout {
         active.push("-UPDATE");
         let mut legacy = name.to_os_string();
         legacy.push("-patch");
-        if exists(&parent, &legacy)? {
+        if !allow_legacy && exists(&parent, &legacy)? {
             return Err(invalid(
                 "a sibling -patch directory already exists; resolve that update before using install",
             ));
