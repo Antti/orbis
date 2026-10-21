@@ -13,6 +13,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[path = "export_plan.rs"]
+mod plan;
+use plan::PreparedExport;
+
 #[path = "export_resume.rs"]
 mod resume;
 
@@ -47,40 +51,8 @@ pub fn plan_export(
     progress: impl ExtractProgress,
 ) -> Result<ExportPlan> {
     let location = storage::Layout::open(base, false)?;
-    let (_, parent, name) = destination(&location, output)?;
-    location.require_recovered()?;
-    let metadata = location.base_metadata()?;
-    let manifest = location.active_manifest(&location.state()?, &metadata, &progress)?;
-    let mut entries = BTreeMap::new();
-    scan(&location.base_dir()?, Layer::Base, &mut entries, &progress)?;
-    if manifest.is_some() {
-        scan(
-            &location.parent.open_dir(&location.active)?,
-            Layer::Update,
-            &mut entries,
-            &progress,
-        )?;
-    }
-    let files: Vec<_> = entries.values().filter(|e| !e.directory).collect();
-    let bytes = files
-        .iter()
-        .try_fold(0u64, |n, e| n.checked_add(e.bytes))
-        .ok_or_else(|| invalid("export size overflows"))?;
-    Ok(ExportPlan {
-        schema_version: 1,
-        title_id: metadata.title_id,
-        base_version: metadata.version.to_string(),
-        update_version: manifest.map(|m| m.app_version),
-        destination: parent.join(name),
-        files: files.len(),
-        update_files: files.iter().filter(|e| e.layer == Layer::Update).count(),
-        bytes,
-        filesystem: super::FilesystemPlan::inspect(
-            &parent,
-            files.iter().map(|e| e.bytes),
-            entries.len(),
-        )?,
-    })
+    let destination = destination(&location, output, false)?;
+    PreparedExport::new(&location, destination.path(), &progress)?.preview(&destination.parent_path)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -137,91 +109,28 @@ fn export_impl<P: ExtractProgress>(
     check_cancelled(&progress)?;
     // Validate the destination before creating the state directory/lock.
     let preview = storage::Layout::open(base, false)?;
-    let (parent, parent_path, destination) = destination_inner(&preview, output, resume)?;
+    let destination = destination(&preview, output, resume)?;
     drop(preview);
     let location = storage::Layout::open(base, true)?;
-    location.require_recovered()?;
-    let metadata = location.base_metadata()?;
-    let state = location.state()?;
-    let manifest = location.active_manifest(&state, &metadata, &progress)?;
-    let base_dir = location.base_dir()?;
-    let update_dir = if manifest.is_some() {
-        Some(location.parent.open_dir(&location.active)?)
-    } else {
-        None
-    };
-
-    progress.phase("Planning merged export");
-    let mut entries = BTreeMap::new();
-    scan(&base_dir, Layer::Base, &mut entries, &progress)?;
-    if let Some(dir) = &update_dir {
-        scan(dir, Layer::Update, &mut entries, &progress)?;
-    }
-    let mut report = ExportReport {
-        title_id: metadata.title_id.clone(),
-        app_version: manifest
-            .as_ref()
-            .map_or_else(|| metadata.version.to_string(), |m| m.app_version.clone()),
-        destination: parent_path.join(&destination),
-        files: 0,
-        bytes: 0,
-        update_files: 0,
-    };
-    for entry in entries.values().filter(|entry| !entry.directory) {
-        report.files += 1;
-        report.update_files += usize::from(entry.layer == Layer::Update);
-        report.bytes = report
-            .bytes
-            .checked_add(entry.bytes)
-            .ok_or_else(|| invalid("export size overflows"))?;
-    }
-    let expected: BTreeMap<_, _> = manifest
-        .iter()
-        .flat_map(|m| m.files.iter().map(|file| (file.path.as_str(), file)))
-        .collect();
-    if expected.len() != report.update_files {
-        return Err(invalid("update changed during export"));
-    }
+    let mut prepared = PreparedExport::new(&location, destination.path(), &progress)?;
     if resume {
-        resume::run(
-            (&base_dir, update_dir.as_ref()),
-            &metadata,
-            manifest.as_ref(),
-            &entries,
-            &report,
-            &progress,
-        )?;
-        return Ok(report);
+        resume::run(&prepared, &destination, &progress)?;
+        return Ok(prepared.report);
     }
-    super::FilesystemPlan::inspect(
-        &parent_path,
-        entries.values().filter(|e| !e.directory).map(|e| e.bytes),
-        entries.len(),
-    )?
-    .require_space()?;
-    let stage = Stage::new(parent, destination)?;
+    prepared
+        .filesystem_plan(&destination.parent_path)?
+        .require_space()?;
+    let stage = Stage::new(destination.parent, destination.name)?;
     progress.phase("Exporting merged game");
-    progress.bytes_total(report.bytes);
+    progress.bytes_total(prepared.report.bytes);
     let mut records = Vec::new();
-    for entry in entries.values() {
+    for entry in prepared.entries.values() {
         check_cancelled(&progress)?;
         if entry.directory {
             stage.dir.as_ref().unwrap().create_dir_all(&entry.path)?;
             continue;
         }
-        let source = match entry.layer {
-            Layer::Base => &base_dir,
-            Layer::Update => update_dir.as_ref().unwrap(),
-        };
-        let record = if entry.layer == Layer::Update {
-            Some(
-                *expected
-                    .get(entry.path.as_str())
-                    .ok_or_else(|| invalid("update changed during export"))?,
-            )
-        } else {
-            None
-        };
+        let (source, record) = prepared.source(entry)?;
         records.push(copy_file(
             source,
             stage.dir.as_ref().unwrap(),
@@ -231,26 +140,13 @@ fn export_impl<P: ExtractProgress>(
             &progress,
         )?);
     }
-    let export_manifest = super::directory::ExportManifest {
-        schema_version: 1,
-        title_id: metadata.title_id,
-        content_id: metadata.content_id,
-        base_version: metadata.version.to_string(),
-        update_version: manifest.as_ref().map(|m| m.app_version.clone()),
-        complete: true,
-        directories: entries
-            .values()
-            .filter(|e| e.directory)
-            .map(|e| e.path.clone())
-            .collect(),
-        files: records,
-    };
+    let export_manifest = prepared.manifest(records, true);
     storage::write_json(
         stage.dir.as_ref().unwrap(),
         super::directory::MANIFEST,
         &export_manifest,
     )?;
-    entries.insert(
+    prepared.entries.insert(
         super::directory::MANIFEST.into(),
         Entry {
             path: super::directory::MANIFEST.into(),
@@ -260,14 +156,19 @@ fn export_impl<P: ExtractProgress>(
         },
     );
     // Persist all newly created directories before publishing their common root.
-    for entry in entries.values().rev().filter(|entry| entry.directory) {
+    for entry in prepared
+        .entries
+        .values()
+        .rev()
+        .filter(|entry| entry.directory)
+    {
         check_cancelled(&progress)?;
         storage::sync_dir(&stage.dir.as_ref().unwrap().open_dir(&entry.path)?)?;
     }
     check_cancelled(&progress)?;
-    stage.publish(&entries, report.bytes, &progress)?;
+    stage.publish(&prepared.entries, prepared.report.bytes, &progress)?;
     progress.pfs_completed();
-    Ok(report)
+    Ok(prepared.report)
 }
 
 fn check_cancelled(progress: &impl ExtractProgress) -> Result<()> {
@@ -277,14 +178,23 @@ fn check_cancelled(progress: &impl ExtractProgress) -> Result<()> {
     Ok(())
 }
 
-fn destination(location: &storage::Layout, output: &Path) -> Result<(Dir, PathBuf, OsString)> {
-    destination_inner(location, output, false)
+struct ExportDestination {
+    parent: Dir,
+    parent_path: PathBuf,
+    name: OsString,
 }
-fn destination_inner(
+
+impl ExportDestination {
+    fn path(&self) -> PathBuf {
+        self.parent_path.join(&self.name)
+    }
+}
+
+fn destination(
     location: &storage::Layout,
     output: &Path,
     allow_existing: bool,
-) -> Result<(Dir, PathBuf, OsString)> {
+) -> Result<ExportDestination> {
     let name = output
         .file_name()
         .ok_or_else(|| invalid("export output must name a new directory"))?;
@@ -341,7 +251,11 @@ fn destination_inner(
             "export output already exists; choose a new --output directory",
         ));
     }
-    Ok((dir, parent, name.to_owned()))
+    Ok(ExportDestination {
+        parent: dir,
+        parent_path: parent,
+        name: name.to_owned(),
+    })
 }
 
 fn scan(

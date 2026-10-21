@@ -616,3 +616,77 @@ fn resume_rejects_case_alias_of_an_export_used_as_its_base() {
     assert_eq!(fs::metadata(&manifest).unwrap().modified().unwrap(), before);
     assert!(!temp.path().join(".source-export.orbis-install").exists());
 }
+
+#[test]
+fn preview_staged_and_resumable_exports_agree_on_the_overlay() {
+    for with_update in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let base = base_game(temp.path());
+        fs::create_dir(base.join("empty")).unwrap();
+        if with_update {
+            let pkg = Pkg::new(update("01.09", "base.txt", b"UPDATE")).unwrap();
+            install::install(&pkg, &base, SilentProgress).unwrap();
+        }
+        let staged = temp.path().join("staged");
+        let resumed = temp.path().join("resumed");
+        let plan = plan_export(&base, &staged, SilentProgress).unwrap();
+        let report = export_merged(&base, &staged, SilentProgress).unwrap();
+        let resume = resume_export(&base, &resumed, SilentProgress).unwrap();
+        for exported in [report, resume] {
+            assert_eq!(exported.title_id, plan.title_id);
+            assert_eq!(exported.files, plan.files);
+            assert_eq!(exported.update_files, plan.update_files);
+            assert_eq!(exported.bytes, plan.bytes);
+            assert_eq!(
+                exported.app_version,
+                plan.update_version
+                    .as_ref()
+                    .unwrap_or(&plan.base_version)
+                    .as_str()
+            );
+        }
+        let manifest = super::super::directory::MANIFEST;
+        assert_eq!(
+            fs::read(staged.join(manifest)).unwrap(),
+            fs::read(resumed.join(manifest)).unwrap()
+        );
+        assert!(staged.join("empty").is_dir());
+        assert!(resumed.join("empty").is_dir());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn resume_keeps_the_validated_parent_when_its_path_is_replaced() {
+    struct MoveParent {
+        parent: PathBuf,
+        moved: PathBuf,
+    }
+    impl ExtractProgress for MoveParent {
+        fn phase(&self, phase: &str) {
+            if phase == "Hashing export sources for safe resume" {
+                fs::rename(&self.parent, &self.moved).unwrap();
+                fs::create_dir(&self.parent).unwrap();
+                fs::write(self.parent.join("keep"), b"KEEP").unwrap();
+            }
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let base = base_game(temp.path());
+    let parent = temp.path().join("output-parent");
+    let moved = temp.path().join("moved-parent");
+    fs::create_dir(&parent).unwrap();
+    resume_export(
+        &base,
+        &parent.join("merged"),
+        MoveParent {
+            parent: parent.clone(),
+            moved: moved.clone(),
+        },
+    )
+    .unwrap();
+    assert!(!parent.join("merged").exists());
+    assert_eq!(fs::read(parent.join("keep")).unwrap(), b"KEEP");
+    let verified = install::verify_directory(&moved.join("merged"), SilentProgress).unwrap();
+    assert!(verified.complete && verified.issues.is_empty());
+}

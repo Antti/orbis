@@ -1,35 +1,20 @@
-use super::super::directory::{self, DirectoryIssueKind, ExportManifest};
+use super::super::directory::{self, DirectoryIssueKind};
 use super::super::inventory::hash_file;
 use super::*;
-use orbis_pkg::sfo::AppMetadata;
 
 pub(super) fn run(
-    sources: (&Dir, Option<&Dir>),
-    metadata: &AppMetadata,
-    update: Option<&storage::Manifest>,
-    entries: &BTreeMap<String, Entry>,
-    report: &ExportReport,
+    prepared: &PreparedExport,
+    destination: &ExportDestination,
     progress: &impl ExtractProgress,
 ) -> Result<()> {
     progress.phase("Hashing export sources for safe resume");
-    progress.bytes_total(report.bytes);
-    let expected: BTreeMap<_, _> = update
-        .iter()
-        .flat_map(|m| m.files.iter().map(|f| (f.path.as_str(), f)))
-        .collect();
+    progress.bytes_total(prepared.report.bytes);
     let mut files = Vec::new();
     let mut buffer = vec![0u8; 1024 * 1024];
-    for entry in entries.values().filter(|e| !e.directory) {
-        let source = if entry.layer == Layer::Base {
-            sources.0
-        } else {
-            sources.1.unwrap()
-        };
+    for entry in prepared.files() {
+        let (source, expected) = prepared.source(entry)?;
         let record = hash_file(source, &entry.path, &mut buffer, progress)?;
-        if record.bytes != entry.bytes
-            || (entry.layer == Layer::Update
-                && expected.get(entry.path.as_str()).copied() != Some(&record))
-        {
+        if record.bytes != entry.bytes || expected.is_some_and(|expected| expected != &record) {
             return Err(invalid(format!(
                 "source changed while planning resume: {}",
                 entry.path
@@ -37,29 +22,17 @@ pub(super) fn run(
         }
         files.push(record);
     }
-    let mut manifest = ExportManifest {
-        schema_version: 1,
-        title_id: metadata.title_id.clone(),
-        content_id: metadata.content_id.clone(),
-        base_version: metadata.version.to_string(),
-        update_version: update.map(|m| m.app_version.clone()),
-        complete: false,
-        directories: entries
-            .values()
-            .filter(|e| e.directory)
-            .map(|e| e.path.clone())
-            .collect(),
-        files,
-    };
-    let output = &report.destination;
-    let parent_path = output.parent().unwrap();
-    let parent = Dir::open_ambient_dir(parent_path, ambient_authority())?;
-    let name = output.file_name().unwrap();
-    let existing = storage::exists(&parent, name)?;
+    let mut manifest = prepared.manifest(files, false);
+    let ExportDestination {
+        parent,
+        parent_path,
+        name,
+    } = destination;
+    let existing = storage::exists(parent, name)?;
     let mut missing: std::collections::BTreeSet<String> =
         manifest.files.iter().map(|f| f.path.clone()).collect();
-    if existing {
-        storage::require_directory(&parent, name)?;
+    let existing_dir = if existing {
+        storage::require_directory(parent, name)?;
         let dir = parent.open_dir(name)?;
         let mut previous = directory::read_manifest(&dir)?;
         previous.complete = false;
@@ -68,7 +41,7 @@ pub(super) fn run(
                 "resume sources or manifest changed; choose a new output directory",
             ));
         }
-        let verification = directory::verify_directory(output, progress)?;
+        let verification = directory::verify_open_directory(&dir, &manifest, progress)?;
         if let Some(issue) = verification
             .issues
             .iter()
@@ -85,7 +58,10 @@ pub(super) fn run(
             .filter(|i| i.kind == DirectoryIssueKind::Missing)
             .map(|i| i.path)
             .collect();
-    }
+        Some(dir)
+    } else {
+        None
+    };
     super::super::FilesystemPlan::inspect(
         parent_path,
         manifest
@@ -93,13 +69,16 @@ pub(super) fn run(
             .iter()
             .filter(|f| missing.contains(&f.path))
             .map(|f| f.bytes),
-        entries.len(),
+        prepared.entries.len(),
     )?
     .require_space()?;
-    if !existing {
-        parent.create_dir(name)?;
-    }
-    let dir = parent.open_dir(name)?;
+    let dir = match existing_dir {
+        Some(dir) => dir,
+        None => {
+            parent.create_dir(name)?;
+            parent.open_dir(name)?
+        }
+    };
     // Record intent before exposing any game files. A crash before this write
     // leaves an unowned empty directory that resume refuses to adopt.
     storage::write_json(&dir, directory::MANIFEST, &manifest)?;
@@ -120,12 +99,8 @@ pub(super) fn run(
         if !missing.contains(&record.path) {
             continue;
         }
-        let entry = &entries[&record.path.to_ascii_lowercase()];
-        let source = if entry.layer == Layer::Base {
-            sources.0
-        } else {
-            sources.1.unwrap()
-        };
+        let entry = &prepared.entries[&record.path.to_ascii_lowercase()];
+        let (source, _) = prepared.source(entry)?;
         let temporary = format!(".orbis-resume-{:032x}.tmp", fastrand::u128(..));
         let result = (|| {
             copy_file(source, &dir, entry, Some(record), &temporary, progress)?;
@@ -153,6 +128,6 @@ pub(super) fn run(
     check_cancelled(progress)?;
     manifest.complete = true;
     storage::write_json(&dir, directory::MANIFEST, &manifest)?;
-    storage::sync_dir(&parent)?;
+    storage::sync_dir(parent)?;
     Ok(())
 }

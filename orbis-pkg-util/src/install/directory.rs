@@ -138,6 +138,14 @@ pub(super) fn apple_double(dir: &Dir, name: &str) -> Result<bool> {
 pub fn verify_directory(path: &Path, progress: impl ExtractProgress) -> Result<DirectoryReport> {
     let dir = Dir::open_ambient_dir(path, ambient_authority())?;
     let manifest = read_manifest(&dir)?;
+    verify_open_directory(&dir, &manifest, &progress)
+}
+
+pub(super) fn verify_open_directory(
+    dir: &Dir,
+    manifest: &ExportManifest,
+    progress: &impl ExtractProgress,
+) -> Result<DirectoryReport> {
     let mut report = DirectoryReport {
         schema_version: 1,
         title_id: manifest.title_id.clone(),
@@ -186,7 +194,7 @@ pub fn verify_directory(path: &Path, progress: impl ExtractProgress) -> Result<D
                     Some(DirectoryIssueKind::WrongType)
                 } else {
                     report.checked_files += 1;
-                    if &hash_file(&dir, &path, &mut buffer, &progress)? != *expected {
+                    if &hash_file(dir, &path, &mut buffer, progress)? != *expected {
                         Some(DirectoryIssueKind::Changed)
                     } else {
                         None
