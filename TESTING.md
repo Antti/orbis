@@ -40,6 +40,17 @@ at 256 file descriptors on Unix, without changing parallel tests' resource limit
 Injected failures of the final directory sync verify successful install, rollback,
 and recovery outcomes with warnings; quiet console output retains these warnings.
 
+Merged export regressions cover update precedence, base fallback, empty directories,
+base-only exports, independent copies, metadata exclusion, preserved rollback,
+managed-state validation, path conflicts, cancellation, copy failures, and a
+destination created during copying. CLI tests check the reported version, quiet
+output, argument errors, and shell completion. They run in the existing platform
+matrix and library-only checks without additional dependencies.
+Directory-identity checks also cover case aliases on case-insensitive volumes.
+The available PS4Load homebrew extraction could not exercise a real export: its
+`LOAD00044` title ID is outside the installer's supported `CUSA` identities. Merged
+exports have synthetic base/update coverage, not a verified Bloodborne launch.
+
 Synthetic fixtures do not replace compatibility checks against real packages.
 Before a release, extract a known package and compare file contents with a trusted
 reference extraction. For installation, use a representative original base plus

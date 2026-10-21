@@ -419,7 +419,7 @@ impl<'a, R: AsRef<[u8]> + Sync, P: ExtractProgress> PkgExtractor<'a, R, P> {
                     self.progress.bytes_processed(chunk.len() as u64);
                 }
                 self.check_cancelled()?;
-                file.commit()?;
+                file.commit(&self.progress)?;
             } else {
                 self.progress.bytes_processed(data.len() as u64);
             }
@@ -565,7 +565,7 @@ fn process_file<P: ExtractProgress>(
         return Err(ExtractError::Cancelled);
     }
     if let Some(dest) = dest {
-        dest.commit()?;
+        dest.commit(progress)?;
     }
     progress.pfs_file_completed(offset);
     Ok(offset)

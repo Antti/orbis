@@ -6,6 +6,7 @@ use std::process::Command;
 fn documented_commands_have_help() {
     for command in [
         "extract",
+        "export",
         "info",
         "list",
         "verify",

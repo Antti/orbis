@@ -29,6 +29,25 @@ enum Error {
 
 pub(crate) fn run(cli: &Cli, out: &mut impl Write, cancelled: Arc<AtomicBool>) -> Result<u8> {
     match &cli.command {
+        Command::Export { base, output } => {
+            let report = orbis_pkg_util::install::export_merged(
+                base,
+                output,
+                ConsoleProgress::with_options(cli.quiet, cancelled),
+            )?;
+            if !cli.quiet {
+                diagnostic(&format!(
+                    "Exported {} version {}: {} files ({}, {} from the update) to {}.",
+                    report.title_id,
+                    report.app_version,
+                    report.files,
+                    human_size(report.bytes),
+                    report.update_files,
+                    escaped(&report.destination),
+                ));
+            }
+            Ok(0)
+        }
         Command::Install {
             pkg_path,
             base,

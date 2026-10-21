@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
 #[command(name = "orbis-pkg-util", version, propagate_version = true)]
-#[command(about = "Inspect, extract, check, and install PS4 PKG updates")]
+#[command(about = "Inspect and extract PS4 packages, install updates, and export merged games")]
 #[command(
     after_help = "Examples:\n  orbis-pkg-util info game.pkg\n  orbis-pkg-util list game.pkg --json\n  orbis-pkg-util extract game.pkg -o ./game\n  orbis-pkg-util verify game.pkg\n\nExit codes: 0 complete, 1 failed, 2 invalid arguments, 3 incomplete, 130 interrupted."
 )]
@@ -33,6 +33,18 @@ pub struct Selection {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Export the base and its installed update as one merged game directory
+    #[command(
+        after_help = "Example:\n  orbis-pkg-util export --base ./games/CUSA12345 -o ./bbport-game\n\nUpdate files take precedence; unchanged files come from the base. With no installed\nupdate, exports the base alone. Uses the managed sibling -UPDATE directory and\nvalidates its inventory. Installer metadata and rollback copies are excluded.\nThe output must be a new directory outside the sources, with an existing parent.\nOn filesystems without exclusive rename (such as macOS exFAT), publication needs\na second full copy and space for two merged games. Do not use the output until\nexport succeeds; forced termination can leave a partial destination.\nKeep the emulator stopped and source files unchanged until export completes.\nThis copies files; it does not decrypt executables or check game-specific requirements."
+    )]
+    Export {
+        /// Original extracted base game directory used by install
+        #[arg(long, value_name = "DIR")]
+        base: PathBuf,
+        /// New merged game directory (must not already exist)
+        #[arg(short, long, value_name = "DIR")]
+        output: PathBuf,
+    },
     /// Install a full-file update into the base directory's sibling -UPDATE directory
     #[command(
         after_help = "Examples:\n  orbis-pkg-util install update.pkg --base ./games/CUSA12345 --dry-run\n  orbis-pkg-util install update.pkg --base ./games/CUSA12345\n\nStop the emulator first. The base directory is preserved. Only full-file cumulative\nor first updates with matching title/content IDs and a newer APP_VER are accepted.\nBinary deltas, downgrades, modified managed updates, and unmanaged update directories\nare refused. One previous installation is kept for rollback.\nAfter a process crash, run recover --base <DIR> before retrying."

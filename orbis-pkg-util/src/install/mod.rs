@@ -1,9 +1,13 @@
-//! Full-file update installation into shadPS4's sibling `-UPDATE` directory.
+//! Full-file update installation into shadPS4's sibling `-UPDATE` directory,
+//! and independent merged game exports for consumers that need a single tree.
 //!
 //! The base is never modified. Activation uses a recoverable sequence of directory
 //! renames, not a cross-platform atomic directory exchange. Stop the emulator first.
+mod export;
 mod storage;
 mod transaction;
+
+pub use export::{ExportReport, export_merged};
 
 use crate::{ExtractError, ExtractOptions, ExtractProgress, PkgExtractor, SilentProgress};
 use cap_std::fs::Dir;

@@ -70,21 +70,34 @@ selection fails before writing files. `--metadata-only` avoids opening the
 filesystem and can recover readable metadata from otherwise unsupported packages.
 
 Existing files are preserved unless `--force` is supplied. Each file is staged
-beside its destination, synced, and published only after a complete write. A
+beside its destination and synced after a complete write. A
 failed replacement preserves the previous file. Known output conflicts are
 checked before writing; publication also checks for files created concurrently.
 Archive-controlled paths remain confined to the output directory.
 
-Linux, macOS, and Windows use exclusive rename when `--force` is absent.
-Other platforms use hard links and require filesystem support for them.
+Linux, macOS, and Windows prefer exclusive rename when `--force` is absent.
+Other platforms first try hard links. If the operation is unsupported, as with
+macOS exFAT, extraction creates the destination exclusively and copies the completed
+staging file into it. Existing files and symlinks are still refused. This fallback
+adds a second copy and makes the destination visible during that copy. Normal
+errors and Ctrl-C remove the unfinished copy, but forced termination or power loss
+can leave a partial destination as well as staging files. Retry with `--force`
+after checking the destination. Atomic publication remains in use where supported.
 Staging temporarily uses space for both the old and replacement files, and
 syncing each completed file can add I/O overhead.
 
-An operation is atomic per file, not across the entire directory. Files completed
+On filesystems supporting rename publication, each file is published atomically;
+the overall extraction is not atomic across the directory. Files completed
 before a later failure remain. Ctrl-C cooperatively stops processing, discards
 unfinished staged files, and exits 130. A process killed forcibly or a power
 failure can leave `.orbis-*.tmp` staging files. After investigating a failure,
 retry with `--force` to replace completed files safely.
+
+To run the optional regression on a mounted filesystem, set
+`ORBIS_TEST_EXTRACT_ROOT=/path/to/mount` and run
+`cargo test -p orbis-pkg-util --lib extracts_to_a_configured_external_filesystem`.
+It creates and removes only a private temporary subtree on that volume. The normal
+test suite also injects unsupported-rename errors without requiring an external disk.
 
 Missing decryption keys are reported as omissions. An incomplete extraction returns exit code 3 and identifies skipped entries;
 `--quiet` does not hide these warnings.
@@ -332,6 +345,69 @@ and its `-UPDATE` sibling. A successful rollback consumes the one rollback slot.
 Process interruption is tested on each platform in CI; storage-device failure
 and power-loss durability are not guaranteed, particularly on Windows where
 directory syncing is not available through this implementation.
+
+## Export a merged game
+
+Use `export` when a consumer needs the base and update in one directory, rather
+than shadPS4's separate update layer:
+
+```sh
+# Install the desired update first, if it is not already installed.
+orbis-pkg-util install update.pkg --base ./games/CUSA12345
+
+# The output directory must not exist; its parent must already exist.
+orbis-pkg-util export --base ./games/CUSA12345 -o ./merged-game
+```
+
+The command reads the original base and its managed sibling `-UPDATE` directory,
+using the same base metadata requirements as `install` (a `CUSA` title ID and
+`gd` category).
+Update files replace matching base paths in the export; unchanged base files and
+empty directories are retained. With no installed update, it exports the base
+alone. It uses the current update only, not older rollback copies. Installer
+manifests and state are excluded. Exported files are independent copies, so edits
+to the export do not affect the originals. Future installs or rollbacks do not
+change an existing export; export again to a new destination when needed.
+
+Export verifies the installed update against its recorded SHA-256 inventory and
+holds the installation lock while copying. It may create the sibling state/lock
+directory when exporting a base that has never had an update. Keep the emulator
+stopped and source files unchanged until it finishes; the lock coordinates Orbis
+operations, not external file editors. Unmanaged or modified updates, pending
+recovery, symlinks, special files, case collisions, and file/directory conflicts
+are refused. The output must be outside the base, update, and installation state.
+
+Allow space for the full merged game. Overridden base files are not copied. A
+temporary sibling `.orbis-export-*.tmp` directory holds the export until every file
+has been copied; publication refuses even an empty destination created meanwhile.
+When exclusive directory rename is unsupported, including macOS exFAT, export
+creates the destination exclusively and copies the completed staging tree into it.
+Existing destinations are still refused, even empty directories. This fallback
+adds a second full copy, needs temporary space for **two merged game copies**, and
+makes the destination visible while copying. A separate publication progress phase
+tracks that copy. Only planned game paths are copied; filesystem-generated metadata
+sidecars in staging are not treated as additional game files.
+
+Normal failures and Ctrl-C discard staging and attempt to remove partial output.
+Cleanup preserves files or directories added or replaced by another process, so
+these can leave a destination behind. Do not use or modify the export until the
+command succeeds. Forced termination or power loss can leave staging and a partial
+destination; after the exporter exits, inspect and remove abandoned output before
+retrying, or choose a new destination. An error syncing the parent after
+publication reports success with a durability warning because the export already
+exists. Success messages go to stderr and `--quiet` suppresses them.
+
+For an optional regression on a mounted filesystem, run
+`ORBIS_TEST_EXPORT_ROOT=/path/to/mount cargo test -p orbis-pkg-util --lib exports_to_a_configured_external_filesystem`.
+It creates and removes only a private temporary subtree on that volume. Portable
+tests also inject unsupported-rename errors and exercise fallback cleanup.
+
+For [bbport](https://github.com/deadinside28/bloodborne_pc), select the merged
+directory in its launcher or set `BB_GAME_DIR` to its absolute path. bbport requires
+the supported, clean Bloodborne 1.09 executable and decrypted game modules; consult
+its current requirements. Export copies existing file contents: it does not decrypt
+SELF executables, apply binary deltas, modify SFO values, or validate bbport's
+executable hash. A successful export alone does not establish game compatibility.
 
 The library exposes the same operations through `orbis_pkg_util::install`:
 `update_metadata`, `plan`, `install`, `rollback`, and `recover`, with cancellable

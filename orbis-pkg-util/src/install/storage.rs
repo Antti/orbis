@@ -63,7 +63,18 @@ pub(super) struct Layout {
     pub root_name: OsString,
     pub root: Option<Dir>,
     // Keep the OS lock until all directory handles and transaction work are done.
-    _lock: Option<std::fs::File>,
+    _lock: Option<InstallLock>,
+}
+
+struct InstallLock(std::fs::File);
+
+impl Drop for InstallLock {
+    fn drop(&mut self) {
+        // Closing our descriptor alone can leave flock held by a concurrently
+        // forked child's copy until it execs. Explicitly release the lock when
+        // this operation ends, regardless of those duplicate descriptors.
+        let _ = FileExt::unlock(&self.0);
+    }
 }
 
 impl Layout {
@@ -113,7 +124,7 @@ impl Layout {
                 .into_std();
             file.try_lock_exclusive()
                 .map_err(|_| invalid("another installation operation holds the lock"))?;
-            Some(file)
+            Some(InstallLock(file))
         } else {
             None
         };
@@ -425,6 +436,26 @@ pub(super) fn verify_manifest<P: ExtractProgress>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_layout_releases_lock_despite_a_duplicate_descriptor() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = crate::test_support::base_game(temp.path());
+        let layout = Layout::open(&base, true).unwrap();
+        // A concurrent fork can retain this open file description until exec,
+        // even when the descriptor is marked close-on-exec. Duplicate it here
+        // to reproduce that lifetime deterministically without timing a fork.
+        let inherited = layout._lock.as_ref().unwrap().0.try_clone().unwrap();
+        assert!(Layout::open(&base, true).is_err());
+        drop(layout);
+        let next = Layout::open(&base, true).unwrap();
+        assert!(Layout::open(&base, true).is_err());
+        drop(inherited);
+        assert!(Layout::open(&base, true).is_err());
+        drop(next);
+        assert!(Layout::open(&base, true).is_ok());
+    }
 
     #[test]
     fn inventories_wide_trees_with_bounded_handles() {

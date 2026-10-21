@@ -183,12 +183,41 @@ fn destination_created_during_staging_is_not_overwritten() {
     let mut staged = output.create_file(Path::new("hello.txt"), false).unwrap();
     staged.write_all(b"NEW").unwrap();
     std::fs::write(dir.path().join("hello.txt"), b"KEEP").unwrap();
-    assert!(staged.commit().is_err());
+    assert!(staged.commit(&SilentProgress).is_err());
     assert_eq!(
         std::fs::read(dir.path().join("hello.txt")).unwrap(),
         b"KEEP"
     );
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn extracts_to_a_configured_external_filesystem() {
+    // Optional real-volume regression. Always create a private subtree; never
+    // overwrite or remove existing content on the supplied volume.
+    let Some(root) = std::env::var_os("ORBIS_TEST_EXTRACT_ROOT") else {
+        return;
+    };
+    let temp = tempfile::tempdir_in(root).unwrap();
+    let package = Pkg::new(pkg(pfs("hello.txt", b"hello", false))).unwrap();
+    let extractor = PkgExtractor::new(&package, SilentProgress, false);
+    let report = extractor
+        .extract_with_options(temp.path(), &ExtractOptions::default())
+        .unwrap();
+    assert_eq!(report.files, 4);
+    assert_eq!(
+        std::fs::read(temp.path().join("hello.txt")).unwrap(),
+        b"hello"
+    );
+    assert_eq!(
+        std::fs::read(temp.path().join("sce_sys/param.sfo")).unwrap(),
+        b"NEW"
+    );
+    assert!(extractor.extract(temp.path()).is_err());
+    assert_eq!(
+        std::fs::read(temp.path().join("hello.txt")).unwrap(),
+        b"hello"
+    );
 }
 
 #[test]

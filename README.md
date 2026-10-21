@@ -69,6 +69,17 @@ preserves the base, and keeps one previous installation for rollback. Binary
 deltas are rejected. See the [update installation guide](orbis-pkg-util/README.md#install-a-full-file-update)
 for compatibility checks, space requirements, and crash recovery.
 
+Export a single merged game directory for software that expects the update files
+in the base tree:
+
+```sh
+orbis-pkg-util export --base ./games/CUSA12345 -o ./merged-game
+```
+
+The installed update takes precedence over matching base files. The new directory
+contains independent copies; the original installation and rollback stay available.
+See [merged exports](orbis-pkg-util/README.md#export-a-merged-game) for requirements.
+
 See the [CLI guide](orbis-pkg-util/README.md) for path selection, JSON fields,
 exit codes, safe replacement behavior, and shell completions. `verify` checks
 readability and decompression. Add `--integrity` for stored SHA-256 and PFS HMAC
