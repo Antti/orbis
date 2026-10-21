@@ -32,6 +32,174 @@ fn no_staging(parent: &Path) {
     }));
 }
 
+fn publication_fixture() -> (tempfile::TempDir, Stage, BTreeMap<String, Entry>) {
+    let temp = tempfile::tempdir().unwrap();
+    let parent = Dir::open_ambient_dir(temp.path(), cap_std::ambient_authority()).unwrap();
+    let stage = Stage::new(parent, "merged".into()).unwrap();
+    stage
+        .dir
+        .as_ref()
+        .unwrap()
+        .write("file", b"CONTENTS")
+        .unwrap();
+    let entries = BTreeMap::from([(
+        "file".into(),
+        Entry {
+            path: "file".into(),
+            layer: Layer::Base,
+            directory: false,
+            bytes: 8,
+        },
+    )]);
+    (temp, stage, entries)
+}
+
+#[cfg(unix)]
+#[test]
+fn staging_cleanup_preserves_replaced_directories_and_symlinks() {
+    for symlink in [false, true] {
+        let (temp, mut stage, _) = publication_fixture();
+        stage.dir.take();
+        let staged = temp.path().join(&stage.temporary);
+        fs::rename(&staged, temp.path().join("moved")).unwrap();
+        if symlink {
+            let other = temp.path().join("other");
+            fs::create_dir(&other).unwrap();
+            fs::write(other.join("keep"), b"KEEP").unwrap();
+            std::os::unix::fs::symlink(other, &staged).unwrap();
+        } else {
+            fs::create_dir(&staged).unwrap();
+            fs::write(staged.join("keep"), b"KEEP").unwrap();
+        }
+        drop(stage);
+        assert_eq!(fs::read(staged.join("keep")).unwrap(), b"KEEP");
+    }
+}
+
+fn unsupported_rename(_: &Dir, _: &str, _: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    return Err(std::io::Error::from_raw_os_error(
+        rustix::io::Errno::NOTSUP.raw_os_error(),
+    ));
+    #[cfg(not(target_os = "macos"))]
+    Err(std::io::ErrorKind::Unsupported.into())
+}
+
+#[test]
+fn unsupported_directory_rename_publishes_the_complete_export() {
+    let (temp, stage, entries) = publication_fixture();
+    // Filesystem-generated metadata is not part of the planned game tree.
+    stage
+        .dir
+        .as_ref()
+        .unwrap()
+        .write("unplanned", b"METADATA")
+        .unwrap();
+    stage
+        .publish_with(&entries, 8, &SilentProgress, unsupported_rename)
+        .unwrap();
+    assert_eq!(
+        fs::read(temp.path().join("merged/file")).unwrap(),
+        b"CONTENTS"
+    );
+    assert!(!temp.path().join("merged/unplanned").exists());
+    no_staging(temp.path());
+}
+
+#[test]
+fn publication_preserves_destinations_created_before_fallback() {
+    let (temp, stage, entries) = publication_fixture();
+    assert!(
+        stage
+            .publish_with(
+                &entries,
+                8,
+                &SilentProgress,
+                |parent, temporary, destination| {
+                    parent.create_dir(destination)?;
+                    unsupported_rename(parent, temporary, destination)
+                }
+            )
+            .is_err()
+    );
+    assert!(temp.path().join("merged").is_dir());
+    assert_eq!(fs::read_dir(temp.path().join("merged")).unwrap().count(), 0);
+    no_staging(temp.path());
+}
+
+#[test]
+fn publication_does_not_fallback_for_permission_errors() {
+    let (temp, stage, entries) = publication_fixture();
+    assert!(
+        stage
+            .publish_with(&entries, 8, &SilentProgress, |_, _, _| {
+                Err(std::io::ErrorKind::PermissionDenied.into())
+            })
+            .is_err()
+    );
+    assert!(!temp.path().join("merged").exists());
+    no_staging(temp.path());
+}
+
+#[test]
+fn cancellation_during_fallback_cleans_both_output_and_staging() {
+    struct Cancel(AtomicBool);
+    impl ExtractProgress for Cancel {
+        fn bytes_processed(&self, bytes: u64) {
+            if bytes > 0 {
+                self.0.store(true, Ordering::Relaxed);
+            }
+        }
+        fn is_cancelled(&self) -> bool {
+            self.0.load(Ordering::Relaxed)
+        }
+    }
+    let (temp, stage, entries) = publication_fixture();
+    let error = stage
+        .publish_with(
+            &entries,
+            8,
+            &Cancel(AtomicBool::new(false)),
+            unsupported_rename,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        install::InstallError::Extract {
+            source: ExtractError::Cancelled
+        }
+    ));
+    assert!(!temp.path().join("merged").exists());
+    no_staging(temp.path());
+}
+
+#[test]
+fn exports_to_a_configured_external_filesystem() {
+    let Some(root) = std::env::var_os("ORBIS_TEST_EXPORT_ROOT") else {
+        return;
+    };
+    // Keep source fixtures local and touch only a private subtree on the volume.
+    let source = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir_in(root).unwrap();
+    let base = base_game(source.path());
+    fs::create_dir_all(base.join("assets/empty")).unwrap();
+    install_update(&base, "new", b"UPDATE");
+    let output = target.path().join("merged");
+    let report = export_merged(&base, &output, SilentProgress).unwrap();
+    assert_eq!(report.update_files, 4);
+    assert_eq!(fs::read(output.join("base.txt")).unwrap(), b"BASE");
+    assert_eq!(fs::read(output.join("new")).unwrap(), b"UPDATE");
+    assert_eq!(
+        fs::read(output.join("sce_sys/param.sfo")).unwrap(),
+        sfo("CUSA00000", "gp", "01.09")
+    );
+    assert!(output.join("assets/empty").is_dir());
+    assert!(!output.join(storage::MANIFEST).exists());
+    assert!(export_merged(&base, &output, SilentProgress).is_err());
+    assert_eq!(fs::read(output.join("new")).unwrap(), b"UPDATE");
+    no_staging(target.path());
+}
+
 #[test]
 fn merges_update_with_base_fallback_and_preserves_rollback() {
     let temp = tempfile::tempdir().unwrap();

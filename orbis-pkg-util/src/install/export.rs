@@ -1,12 +1,15 @@
 //! Materialize the installed base/update overlay as an independent directory.
 use super::{Result, invalid, storage};
-use crate::{ExtractError, ExtractProgress, fs_output::publish_new};
+use crate::{
+    ExtractError, ExtractProgress,
+    fs_output::{copy_new_directory, publish_new, unsupported_publication},
+};
 use cap_std::{ambient_authority, fs::Dir, fs::OpenOptions};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     ffi::OsString,
-    io::{Read, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -42,8 +45,10 @@ struct Entry {
 /// base, update, and installation state. Existing destinations are never replaced.
 /// Symlinks, special files, case collisions, and file/directory conflicts are rejected.
 ///
-/// All content is copied, not linked. Errors or cooperative cancellation discard the
-/// staging directory; a forced process exit may leave a `.orbis-export-*.tmp` sibling.
+/// All content is copied, not linked. Filesystems without exclusive rename use a
+/// second copy into an exclusively created destination, visible while copying.
+/// Errors or cooperative cancellation discard staging and attempt to remove owned
+/// fallback output. A forced exit can leave staging and a partial destination.
 /// Callers must keep the source files unchanged during export. This does not decrypt
 /// executables, apply binary deltas, or establish that a game will run in a consumer.
 pub fn export_merged<P: ExtractProgress>(
@@ -137,7 +142,7 @@ pub fn export_merged<P: ExtractProgress>(
         storage::sync_dir(&stage.dir.as_ref().unwrap().open_dir(&entry.path)?)?;
     }
     check_cancelled(&progress)?;
-    stage.publish(&progress)?;
+    stage.publish(&entries, report.bytes, &progress)?;
     progress.pfs_completed();
     Ok(report)
 }
@@ -353,6 +358,7 @@ struct Stage {
     dir: Option<Dir>,
     temporary: String,
     destination: OsString,
+    identity: Option<(u64, u64)>,
 }
 
 impl Stage {
@@ -364,16 +370,64 @@ impl Stage {
             dir: None,
             temporary,
             destination,
+            identity: None,
         };
         stage.dir = Some(stage.parent.open_dir(&stage.temporary)?);
+        #[cfg(any(unix, windows))]
+        {
+            stage.identity = Some(directory_id(stage.dir.as_ref().unwrap())?);
+        }
         Ok(stage)
     }
 
-    fn publish(mut self, progress: &impl ExtractProgress) -> Result<()> {
+    fn publish(
+        self,
+        entries: &BTreeMap<String, Entry>,
+        bytes: u64,
+        progress: &impl ExtractProgress,
+    ) -> Result<()> {
+        self.publish_with(entries, bytes, progress, publish_new)
+    }
+
+    fn publish_with(
+        mut self,
+        entries: &BTreeMap<String, Entry>,
+        bytes: u64,
+        progress: &impl ExtractProgress,
+        rename: impl FnOnce(&Dir, &str, &Path) -> std::io::Result<()>,
+    ) -> Result<()> {
         storage::sync_dir(self.dir.as_ref().unwrap())?;
         // Windows cannot rename a directory while it has an open directory handle.
         self.dir.take();
-        publish_new(&self.parent, &self.temporary, Path::new(&self.destination))?;
+        match rename(&self.parent, &self.temporary, Path::new(&self.destination)) {
+            Err(error) if unsupported_publication(&error) => {
+                progress.phase("Publishing export on this filesystem");
+                progress.bytes_total(bytes);
+                copy_new_directory(
+                    &self.parent,
+                    &self.temporary,
+                    Path::new(&self.destination),
+                    entries
+                        .values()
+                        .map(|entry| (Path::new(&entry.path), entry.directory)),
+                    |bytes| {
+                        if progress.is_cancelled() {
+                            return Err(std::io::ErrorKind::Interrupted.into());
+                        }
+                        progress.bytes_processed(bytes);
+                        Ok(())
+                    },
+                )
+                .map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::Interrupted && progress.is_cancelled() {
+                        super::InstallError::from(ExtractError::Cancelled)
+                    } else {
+                        error.into()
+                    }
+                })?;
+            }
+            result => result?,
+        }
         if let Err(error) = storage::sync_dir(&self.parent) {
             progress.warning(&format!(
                 "Export completed, but syncing its parent directory failed: {error}"
@@ -386,8 +440,69 @@ impl Stage {
 impl Drop for Stage {
     fn drop(&mut self) {
         self.dir.take();
-        let _ = self.parent.remove_dir_all(&self.temporary);
+        let _ = remove_staging(&self.parent, Path::new(&self.temporary), self.identity);
     }
+}
+
+fn remove_staging(parent: &Dir, path: &Path, identity: Option<(u64, u64)>) -> io::Result<()> {
+    if !parent.symlink_metadata(path)?.is_dir() {
+        return Ok(());
+    }
+    let root = match parent.open_dir(path) {
+        Ok(root) => root,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    // Do not recurse into a replacement directory after the original was moved.
+    #[cfg(any(unix, windows))]
+    if identity != Some(directory_id(&root).map_err(io::Error::other)?) {
+        return Ok(());
+    }
+    #[cfg(not(any(unix, windows)))]
+    let _ = identity;
+    // exFAT on macOS removes AppleDouble sidecars alongside their associated
+    // files. A previously enumerated sidecar may therefore disappear before
+    // unlink. Tolerate those missing entries at every level of this private tree.
+    let mut pending = vec![(PathBuf::new(), false)];
+    while let Some((relative, visited)) = pending.pop() {
+        let result = (|| {
+            if visited {
+                return root.remove_dir(&relative);
+            }
+            let dir = root.open_dir(if relative.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                &relative
+            })?;
+            if !relative.as_os_str().is_empty() {
+                pending.push((relative.clone(), true));
+            }
+            for entry in dir.entries()? {
+                let entry = match entry {
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    entry => entry?,
+                };
+                let child = relative.join(entry.file_name());
+                match root.symlink_metadata(&child) {
+                    Ok(metadata) if metadata.is_dir() => pending.push((child, false)),
+                    Ok(_) => match root.remove_file(&child) {
+                        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+                        _ => {}
+                    },
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = result
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            return Err(error);
+        }
+    }
+    drop(root);
+    parent.remove_dir(path)
 }
 
 #[cfg(test)]
