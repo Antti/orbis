@@ -333,6 +333,53 @@ Process interruption is tested on each platform in CI; storage-device failure
 and power-loss durability are not guaranteed, particularly on Windows where
 directory syncing is not available through this implementation.
 
+## Export a merged game
+
+Use `export` when a consumer needs the base and update in one directory, rather
+than shadPS4's separate update layer:
+
+```sh
+# Install the desired update first, if it is not already installed.
+orbis-pkg-util install update.pkg --base ./games/CUSA12345
+
+# The output directory must not exist; its parent must already exist.
+orbis-pkg-util export --base ./games/CUSA12345 -o ./merged-game
+```
+
+The command reads the original base and its managed sibling `-UPDATE` directory,
+using the same base metadata requirements as `install` (a `CUSA` title ID and
+`gd` category).
+Update files replace matching base paths in the export; unchanged base files and
+empty directories are retained. With no installed update, it exports the base
+alone. It uses the current update only, not older rollback copies. Installer
+manifests and state are excluded. Exported files are independent copies, so edits
+to the export do not affect the originals. Future installs or rollbacks do not
+change an existing export; export again to a new destination when needed.
+
+Export verifies the installed update against its recorded SHA-256 inventory and
+holds the installation lock while copying. It may create the sibling state/lock
+directory when exporting a base that has never had an update. Keep the emulator
+stopped and source files unchanged until it finishes; the lock coordinates Orbis
+operations, not external file editors. Unmanaged or modified updates, pending
+recovery, symlinks, special files, case collisions, and file/directory conflicts
+are refused. The output must be outside the base, update, and installation state.
+
+Allow space for the full merged game. Overridden base files are not copied. A
+temporary sibling `.orbis-export-*.tmp` directory holds the export until every file
+has been copied; publication refuses even an empty destination created meanwhile.
+Normal failures and Ctrl-C discard staging and leave the destination absent.
+A forced termination can leave a temporary directory; after the exporter exits,
+remove that abandoned directory and retry. An error syncing the parent after
+publication reports success with a durability warning because the export already
+exists. Success messages go to stderr and `--quiet` suppresses them.
+
+For [bbport](https://github.com/deadinside28/bloodborne_pc), select the merged
+directory in its launcher or set `BB_GAME_DIR` to its absolute path. bbport requires
+the supported, clean Bloodborne 1.09 executable and decrypted game modules; consult
+its current requirements. Export copies existing file contents: it does not decrypt
+SELF executables, apply binary deltas, modify SFO values, or validate bbport's
+executable hash. A successful export alone does not establish game compatibility.
+
 The library exposes the same operations through `orbis_pkg_util::install`:
 `update_metadata`, `plan`, `install`, `rollback`, and `recover`, with cancellable
 planning and rollback variants. Progress reporters receive non-fatal commit
