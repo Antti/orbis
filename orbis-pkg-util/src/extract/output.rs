@@ -1,5 +1,5 @@
 use super::ExtractError;
-use crate::fs_output::publish_new;
+use crate::{ExtractProgress, fs_output::publish_new_file};
 use cap_std::{
     ambient_authority,
     fs::{Dir, File, OpenOptions},
@@ -29,7 +29,7 @@ impl Write for StagedFile {
 }
 
 impl StagedFile {
-    pub fn commit(mut self) -> Result<(), ExtractError> {
+    pub fn commit(mut self, progress: &impl ExtractProgress) -> Result<(), ExtractError> {
         self.file
             .take()
             .unwrap()
@@ -46,11 +46,23 @@ impl StagedFile {
                     .rename(&self.temporary, &self.parent, &self.destination)
             })
         } else {
-            publish_new(&self.parent, &self.temporary, &self.destination)
+            publish_new_file(&self.parent, &self.temporary, &self.destination, || {
+                if progress.is_cancelled() {
+                    Err(io::ErrorKind::Interrupted.into())
+                } else {
+                    Ok(())
+                }
+            })
         };
-        result.map_err(|source| ExtractError::CreateFileFailed {
-            path: self.display_path.clone(),
-            source,
+        result.map_err(|source| {
+            if source.kind() == io::ErrorKind::Interrupted && progress.is_cancelled() {
+                ExtractError::Cancelled
+            } else {
+                ExtractError::CreateFileFailed {
+                    path: self.display_path.clone(),
+                    source,
+                }
+            }
         })
     }
 }
