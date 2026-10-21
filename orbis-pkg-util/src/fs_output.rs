@@ -225,7 +225,7 @@ impl Drop for DirectoryCopy<'_> {
     }
 }
 
-fn directory_identity(dir: &Dir) -> io::Result<(u64, u64)> {
+pub(crate) fn directory_identity(dir: &Dir) -> io::Result<(u64, u64)> {
     file_identity(&File::from_std(dir.try_clone()?.into_std_file()))
 }
 

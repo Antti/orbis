@@ -2,7 +2,7 @@
 use super::{Result, invalid, storage};
 use crate::{
     ExtractError, ExtractProgress,
-    fs_output::{copy_new_directory, publish_new, unsupported_publication},
+    fs_output::{copy_new_directory, directory_identity, publish_new, unsupported_publication},
 };
 use cap_std::{ambient_authority, fs::Dir, fs::OpenOptions};
 use sha2::{Digest, Sha256};
@@ -313,7 +313,7 @@ fn destination_inner(
         let mut sources = Vec::new();
         for source in [&location.base, &location.active, &location.root_name] {
             if storage::exists(&location.parent, source)? {
-                sources.push(directory_id(&location.parent.open_dir(source)?)?);
+                sources.push(directory_identity(&location.parent.open_dir(source)?)?);
             }
         }
         // Resume can accept an existing directory. Compare that root too:
@@ -321,7 +321,7 @@ fn destination_inner(
         if allow_existing
             && storage::exists(&dir, name)?
             && dir.symlink_metadata(name)?.is_dir()
-            && sources.contains(&directory_id(&dir.open_dir(name)?)?)
+            && sources.contains(&directory_identity(&dir.open_dir(name)?)?)
         {
             return Err(invalid(
                 "export output must be outside the base, update, and installation state",
@@ -329,7 +329,7 @@ fn destination_inner(
         }
         for ancestor in parent.ancestors() {
             let ancestor = Dir::open_ambient_dir(ancestor, ambient_authority())?;
-            if sources.contains(&directory_id(&ancestor)?) {
+            if sources.contains(&directory_identity(&ancestor)?) {
                 return Err(invalid(
                     "export output must be outside the base, update, and installation state",
                 ));
@@ -342,31 +342,6 @@ fn destination_inner(
         ));
     }
     Ok((dir, parent, name.to_owned()))
-}
-
-#[cfg(unix)]
-fn directory_id(dir: &Dir) -> Result<(u64, u64)> {
-    use cap_std::fs::MetadataExt;
-    let meta = dir.dir_metadata()?;
-    Ok((meta.dev(), meta.ino()))
-}
-
-#[cfg(windows)]
-fn directory_id(dir: &Dir) -> Result<(u64, u64)> {
-    use std::{mem::MaybeUninit, os::windows::io::AsRawHandle};
-    use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
-    };
-    let mut info = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
-    // The directory handle remains live and the API initializes info on success.
-    if unsafe { GetFileInformationByHandle(dir.as_raw_handle(), info.as_mut_ptr()) } == 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    let info = unsafe { info.assume_init() };
-    Ok((
-        u64::from(info.dwVolumeSerialNumber),
-        (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
-    ))
 }
 
 fn scan(
@@ -523,7 +498,7 @@ impl Stage {
         stage.dir = Some(stage.parent.open_dir(&stage.temporary)?);
         #[cfg(any(unix, windows))]
         {
-            stage.identity = Some(directory_id(stage.dir.as_ref().unwrap())?);
+            stage.identity = Some(directory_identity(stage.dir.as_ref().unwrap())?);
         }
         Ok(stage)
     }
@@ -603,7 +578,7 @@ fn remove_staging(parent: &Dir, path: &Path, identity: Option<(u64, u64)>) -> io
     };
     // Do not recurse into a replacement directory after the original was moved.
     #[cfg(any(unix, windows))]
-    if identity != Some(directory_id(&root).map_err(io::Error::other)?) {
+    if identity != Some(directory_identity(&root)?) {
         return Ok(());
     }
     #[cfg(not(any(unix, windows)))]
