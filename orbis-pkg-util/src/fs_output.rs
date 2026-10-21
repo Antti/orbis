@@ -254,7 +254,12 @@ mod tests {
                 },
             )
             .unwrap_err();
-            assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+            // Windows may report access denied for an existing destination.
+            // Both errors must leave the conflicting entry untouched.
+            assert!(matches!(
+                error.kind(),
+                io::ErrorKind::AlreadyExists | io::ErrorKind::PermissionDenied
+            ));
             if directory {
                 assert!(dir.metadata("final").unwrap().is_dir());
             } else {
