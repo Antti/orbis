@@ -9,7 +9,7 @@
     <p>A command line utility for inspecting package metadata, listing entries,
     and extracting PlayStation 4 PKG files.</p>
   </description>
-  <url type="homepage">https://github.com/videobitva/orbis</url>
+  <url type="homepage">https://github.com/Antti/orbis</url>
   <provides>
     <binary>orbis-pkg-util</binary>
   </provides>

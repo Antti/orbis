@@ -14,10 +14,15 @@ Each release contains:
 | `orbis-pkg-util-VERSION-linux-x86_64.flatpak` | Linux x86_64, Freedesktop 25.08 runtime |
 | `orbis-pkg-util-VERSION-x86_64-apple-darwin.tar.gz` | Intel Mac, macOS 11 or later |
 | `orbis-pkg-util-VERSION-aarch64-apple-darwin.tar.gz` | Apple Silicon Mac, macOS 11 or later |
-| `SHA256SUMS` | SHA-256 checksums for all four downloads |
+| `orbis-pkg-util-VERSION-linux-aarch64.AppImage` | Linux ARM64, static musl binary |
+| `orbis-pkg-util-VERSION-linux-aarch64.flatpak` | Linux ARM64, Freedesktop 25.08 runtime |
+| `orbis-pkg-util-VERSION-x86_64-pc-windows-msvc.zip` | Windows x86-64 |
+| `SHA256SUMS` | SHA-256 checksums for all seven downloads |
 
-The packages contain the CLI and both project licenses. Mac binaries are
-unsigned and not notarized; macOS may require explicit approval to run them.
+The packages contain the CLI and both project licenses. Mac archives include
+`BUILD-INFO.txt` stating whether the binary was signed and notarized. Builds are
+unsigned until the optional signing configuration below is enabled; macOS may
+require explicit approval for unsigned binaries. Windows binaries are unsigned.
 Flatpak bundles are unsigned and distributed through GitHub, not Flathub.
 Flathub supplies only the runtime. There is no automatic update repository for
 the application.
@@ -49,7 +54,7 @@ To disable future publication, disable `Release packages` in Actions.
 
 The repository must allow GitHub Actions and the workflow's `contents: write`
 permission. Only the publishing job has that permission; PR builds use read-only
-permissions. No signing or third-party service secrets are required.
+permissions. Unsigned releases require no third-party service secrets.
 
 ## Installing packages
 
@@ -60,7 +65,7 @@ Replace `VERSION` with the downloaded release version and verify checksums first
 sha256sum --check --ignore-missing SHA256SUMS
 ```
 
-AppImage:
+AppImage (replace `x86_64` with `aarch64` for Linux ARM64):
 
 ```sh
 chmod +x orbis-pkg-util-VERSION-linux-x86_64.AppImage
@@ -91,11 +96,49 @@ tar -xzf orbis-pkg-util-VERSION-aarch64-apple-darwin.tar.gz
 ./orbis-pkg-util-VERSION-aarch64-apple-darwin/orbis-pkg-util --help
 ```
 
+Windows (PowerShell):
+
+```powershell
+Get-FileHash .\orbis-pkg-util-VERSION-x86_64-pc-windows-msvc.zip -Algorithm SHA256
+# Compare the result with the corresponding line in SHA256SUMS.
+Expand-Archive .\orbis-pkg-util-VERSION-x86_64-pc-windows-msvc.zip -DestinationPath .
+.\orbis-pkg-util-VERSION-x86_64-pc-windows-msvc\orbis-pkg-util.exe --help
+```
+
+## Optional macOS signing and notarization
+
+Configure these repository secrets through GitHub Settings → Secrets and variables
+→ Actions. Never commit certificate material or passwords:
+
+| Secret | Value |
+| --- | --- |
+| `MACOS_CERTIFICATE_BASE64` | Base64-encoded Developer ID Application `.p12`, including its private key |
+| `MACOS_CERTIFICATE_PASSWORD` | Password protecting that `.p12` |
+| `MACOS_SIGNING_IDENTITY` | Full Developer ID Application identity from the certificate |
+| `APPLE_ID` | Apple Developer account email |
+| `APPLE_TEAM_ID` | Developer team ID |
+| `APPLE_APP_PASSWORD` | App-specific password for notarization |
+
+After all secrets are configured, set repository variable `MACOS_SIGNING_ENABLED`
+to `true`, then release a new version. Signing runs only on `master` pushes;
+pull requests and manual builds remain unsigned. Missing credentials, invalid
+signatures, or rejected notarization fail the release instead of silently
+publishing unsigned assets. Remove/set the variable to `false` to return to
+unsigned releases; published assets remain immutable.
+
+The workflow imports the certificate into a temporary keychain, enables hardened
+runtime, timestamps the signature, verifies it, and waits for Apple to accept
+notarization before archiving. The keychain is removed on exit. A standalone CLI
+cannot carry a stapled ticket; Gatekeeper needs network access to retrieve it.
+Follow [Apple's notarization workflow](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow)
+for certificate and account setup. Signed release execution cannot be validated
+without these credentials; unsigned PR builds still smoke-test both Mac targets.
+
 ## Maintaining the automation
 
 `scripts/release/version.py` compares the pre-push commit with the checked-out
 manifest; it does not depend on commit messages or a separate version file.
-`publish.py` requires exactly four nonempty assets before writing checksums.
+`publish.py` requires exactly seven nonempty assets before writing checksums.
 Their tests run with Python 3.11 or later:
 
 ```sh

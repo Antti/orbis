@@ -21,6 +21,9 @@ TAG = f"v{VERSION}"
 ASSETS = [
     f"orbis-pkg-util-{VERSION}-linux-x86_64.AppImage",
     f"orbis-pkg-util-{VERSION}-linux-x86_64.flatpak",
+    f"orbis-pkg-util-{VERSION}-linux-aarch64.AppImage",
+    f"orbis-pkg-util-{VERSION}-linux-aarch64.flatpak",
+    f"orbis-pkg-util-{VERSION}-x86_64-pc-windows-msvc.zip",
     f"orbis-pkg-util-{VERSION}-x86_64-apple-darwin.tar.gz",
     f"orbis-pkg-util-{VERSION}-aarch64-apple-darwin.tar.gz",
 ]
@@ -92,9 +95,9 @@ class FakeGitHub:
                 "generate_release_notes": ("-F", "true"),
                 "body": (
                     "-f",
-                    f"Built from `{SHA}`. Includes Linux x86_64 AppImage/Flatpak bundles "
-                    "and unsigned macOS Intel/Apple Silicon CLI archives. "
-                    "Verify downloads with SHA256SUMS. See RELEASE.md for installation.",
+                    f"Built from `{SHA}`. Includes Linux x86_64/ARM64 AppImage/Flatpak bundles, "
+                    "Windows x86_64 ZIP, and macOS Intel/Apple Silicon archives. "
+                    "Verify downloads with SHA256SUMS. Mac signing status is in BUILD-INFO.txt. See RELEASE.md for installation.",
                 ),
             }
             if fields != expected_fields:

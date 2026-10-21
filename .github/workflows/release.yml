@@ -46,35 +46,47 @@ jobs:
           --event "$EVENT_NAME" --ref "$EVENT_REF" --before "$BEFORE_SHA"
 
   linux:
-    name: Linux AppImage and Flatpak
+    name: Linux AppImage and Flatpak (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            arch: x86_64
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+            target: aarch64-unknown-linux-musl
     needs: plan
     if: needs.plan.outputs.build == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-musl
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-linux-musl
+          key: release-${{ matrix.target }}
       - name: Install packaging dependencies
         run: |
           sudo apt-get update
           sudo apt-get install --yes musl-tools flatpak dbus-x11
-      - run: cargo test --workspace --all-features --release --locked --target x86_64-unknown-linux-musl
-      - run: cargo build -p orbis-pkg-util --release --locked --target x86_64-unknown-linux-musl
+      - run: cargo test --workspace --all-features --release --locked --target ${{ matrix.target }}
+      - run: cargo build -p orbis-pkg-util --release --locked --target ${{ matrix.target }}
       - name: Build and smoke-test both packages
         env:
+          RELEASE_ARCH: ${{ matrix.arch }}
+          RELEASE_TARGET: ${{ matrix.target }}
           RELEASE_VERSION: ${{ needs.plan.outputs.version }}
         run: >-
           bash scripts/release/package-linux.sh "$RELEASE_VERSION"
-          target/x86_64-unknown-linux-musl/release/orbis-pkg-util dist
+          "target/$RELEASE_TARGET/release/orbis-pkg-util" dist "$RELEASE_ARCH"
       - uses: actions/upload-artifact@v4
         with:
-          name: release-linux-x86_64
+          name: release-linux-${{ matrix.arch }}
           path: dist/*
           if-no-files-found: error
           retention-days: 14
@@ -106,10 +118,22 @@ jobs:
           key: release-${{ matrix.target }}
       - run: cargo test --workspace --all-features --release --locked --target ${{ matrix.target }}
       - run: cargo build -p orbis-pkg-util --release --locked --target ${{ matrix.target }}
+      - name: Sign and notarize trusted release builds
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && vars.MACOS_SIGNING_ENABLED == 'true'
+        env:
+          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          RELEASE_TARGET: ${{ matrix.target }}
+        run: bash scripts/release/sign-macos.sh "target/$RELEASE_TARGET/release/orbis-pkg-util"
       - name: Archive and smoke-test the native binary
         env:
           RELEASE_VERSION: ${{ needs.plan.outputs.version }}
           RELEASE_TARGET: ${{ matrix.target }}
+          MACOS_NOTARIZED: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && vars.MACOS_SIGNING_ENABLED == 'true' && 'true' || 'false' }}
         run: >-
           bash scripts/release/package-macos.sh "$RELEASE_VERSION" "$RELEASE_TARGET"
           "target/$RELEASE_TARGET/release/orbis-pkg-util" dist
@@ -120,9 +144,40 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  windows:
+    name: Windows x86_64
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-windows-x86_64
+      - run: cargo test --workspace --all-features --release --locked --target x86_64-pc-windows-msvc
+      - run: cargo build -p orbis-pkg-util --release --locked --target x86_64-pc-windows-msvc
+      - name: Archive and smoke-test Windows binary
+        env:
+          RELEASE_VERSION: ${{ needs.plan.outputs.version }}
+        run: python scripts/release/package-windows.py "$env:RELEASE_VERSION" target/x86_64-pc-windows-msvc/release/orbis-pkg-util.exe dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-x86_64
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
   publish:
     name: Publish versioned release
-    needs: [plan, linux, macos]
+    needs: [plan, linux, macos, windows]
     if: >-
       github.event_name == 'push' &&
       github.ref == 'refs/heads/master' &&
