@@ -180,7 +180,9 @@ fn failed_decompression_preserves_existing_files_and_removes_staging_files() {
 fn destination_created_during_staging_is_not_overwritten() {
     let dir = tempfile::tempdir().unwrap();
     let output = output::Output::new(dir.path()).unwrap();
-    let mut staged = output.create_file(Path::new("hello.txt"), false).unwrap();
+    let mut staged = output
+        .create_file(Path::new("hello.txt"), false, false)
+        .unwrap();
     staged.write_all(b"NEW").unwrap();
     std::fs::write(dir.path().join("hello.txt"), b"KEEP").unwrap();
     assert!(staged.commit(&SilentProgress).is_err());
@@ -420,4 +422,34 @@ fn refuses_existing_symlinks_outside_output() {
             .is_err()
     );
     assert!(!outside.join("param.sfo").exists());
+}
+
+#[test]
+fn resume_checks_existing_contents_and_copies_only_missing_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let package = Pkg::new(pkg(pfs("hello.txt", b"hello", false))).unwrap();
+    let extractor = PkgExtractor::new(&package, SilentProgress, false).with_resume(true);
+    std::fs::create_dir(dir.path().join("sce_sys")).unwrap();
+    std::fs::write(dir.path().join("sce_sys/param.sfo"), b"NEW").unwrap();
+    let before = std::fs::metadata(dir.path().join("sce_sys/param.sfo"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    extractor.extract(dir.path()).unwrap();
+    assert_eq!(
+        std::fs::metadata(dir.path().join("sce_sys/param.sfo"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        before
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("hello.txt")).unwrap(),
+        b"hello"
+    );
+    for bytes in [b"wrong".as_slice(), b"hell", b"hello extra"] {
+        std::fs::write(dir.path().join("hello.txt"), bytes).unwrap();
+        assert!(extractor.extract(dir.path()).is_err());
+        assert_eq!(std::fs::read(dir.path().join("hello.txt")).unwrap(), bytes);
+    }
 }

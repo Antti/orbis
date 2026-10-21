@@ -13,6 +13,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[path = "export_resume.rs"]
+mod resume;
+
 /// The exported version and the bytes actually copied (overridden base files are skipped).
 #[derive(Debug, serde::Serialize)]
 pub struct ExportReport {
@@ -112,10 +115,29 @@ pub fn export_merged<P: ExtractProgress>(
     output: &Path,
     progress: P,
 ) -> Result<ExportReport> {
+    export_impl(base, output, progress, false)
+}
+
+/// Export directly into a resumable directory. The output is visible while
+/// incomplete; rerun with resume to verify completed files and copy missing ones.
+pub fn resume_export<P: ExtractProgress>(
+    base: &Path,
+    output: &Path,
+    progress: P,
+) -> Result<ExportReport> {
+    export_impl(base, output, progress, true)
+}
+
+fn export_impl<P: ExtractProgress>(
+    base: &Path,
+    output: &Path,
+    progress: P,
+    resume: bool,
+) -> Result<ExportReport> {
     check_cancelled(&progress)?;
     // Validate the destination before creating the state directory/lock.
     let preview = storage::Layout::open(base, false)?;
-    let (parent, parent_path, destination) = destination(&preview, output)?;
+    let (parent, parent_path, destination) = destination_inner(&preview, output, resume)?;
     drop(preview);
     let location = storage::Layout::open(base, true)?;
     location.require_recovered()?;
@@ -160,6 +182,17 @@ pub fn export_merged<P: ExtractProgress>(
     if expected.len() != report.update_files {
         return Err(invalid("update changed during export"));
     }
+    if resume {
+        resume::run(
+            (&base_dir, update_dir.as_ref()),
+            &metadata,
+            manifest.as_ref(),
+            &entries,
+            &report,
+            &progress,
+        )?;
+        return Ok(report);
+    }
     super::FilesystemPlan::inspect(
         &parent_path,
         entries.values().filter(|e| !e.directory).map(|e| e.bytes),
@@ -169,7 +202,6 @@ pub fn export_merged<P: ExtractProgress>(
     let stage = Stage::new(parent, destination)?;
     progress.phase("Exporting merged game");
     progress.bytes_total(report.bytes);
-    let mut buffer = vec![0; 1024 * 1024];
     let mut records = Vec::new();
     for entry in entries.values() {
         check_cancelled(&progress)?;
@@ -195,7 +227,7 @@ pub fn export_merged<P: ExtractProgress>(
             stage.dir.as_ref().unwrap(),
             entry,
             record,
-            &mut buffer,
+            &entry.path,
             &progress,
         )?);
     }
@@ -246,6 +278,13 @@ fn check_cancelled(progress: &impl ExtractProgress) -> Result<()> {
 }
 
 fn destination(location: &storage::Layout, output: &Path) -> Result<(Dir, PathBuf, OsString)> {
+    destination_inner(location, output, false)
+}
+fn destination_inner(
+    location: &storage::Layout,
+    output: &Path,
+    allow_existing: bool,
+) -> Result<(Dir, PathBuf, OsString)> {
     let name = output
         .file_name()
         .ok_or_else(|| invalid("export output must name a new directory"))?;
@@ -286,7 +325,7 @@ fn destination(location: &storage::Layout, output: &Path) -> Result<(Dir, PathBu
             }
         }
     }
-    if storage::exists(&dir, name)? {
+    if !allow_existing && storage::exists(&dir, name)? {
         return Err(invalid(
             "export output already exists; choose a new --output directory",
         ));
@@ -388,7 +427,7 @@ fn copy_file(
     destination: &Dir,
     entry: &Entry,
     expected: Option<&storage::FileRecord>,
-    buffer: &mut [u8],
+    target_path: &str,
     progress: &impl ExtractProgress,
 ) -> Result<storage::FileRecord> {
     if !source.symlink_metadata(&entry.path)?.is_file() {
@@ -405,13 +444,14 @@ fn copy_file(
             entry.path
         )));
     }
+    let mut buffer = vec![0; 1024 * 1024];
     let mut output =
-        destination.open_with(&entry.path, OpenOptions::new().write(true).create_new(true))?;
+        destination.open_with(target_path, OpenOptions::new().write(true).create_new(true))?;
     let mut hash = Sha256::new();
     let mut bytes = 0;
     loop {
         check_cancelled(progress)?;
-        let n = input.read(buffer)?;
+        let n = input.read(&mut buffer)?;
         if n == 0 {
             break;
         }

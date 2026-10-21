@@ -44,6 +44,9 @@ pub enum Command {
         /// New merged game directory (must not already exist)
         #[arg(short, long, value_name = "DIR")]
         output: PathBuf,
+        /// Keep incomplete output and verify completed files when restarting
+        #[arg(long, conflicts_with = "dry_run")]
+        resume: bool,
         /// Inspect versions, file counts, filesystem limits, and peak space without writing
         #[arg(long)]
         dry_run: bool,
@@ -97,6 +100,9 @@ pub enum Command {
         /// Replace existing files after successfully writing their replacements
         #[arg(short, long)]
         force: bool,
+        /// Verify and reuse completed files; refuse mismatches instead of overwriting
+        #[arg(long, conflicts_with = "force")]
+        resume: bool,
         #[command(flatten)]
         selection: Selection,
     },

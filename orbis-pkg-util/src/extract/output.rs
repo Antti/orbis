@@ -5,7 +5,61 @@ use cap_std::{
     fs::{Dir, File, OpenOptions},
 };
 use std::path::{Component, Path, PathBuf};
-use std::{io, io::Write};
+use std::{
+    io,
+    io::{Read, Write},
+};
+
+/// Existing files are compared with the decoded source stream; no bytes are written.
+pub(super) enum FileOutput {
+    Staged(StagedFile),
+    Existing { file: File, path: PathBuf },
+}
+impl Write for FileOutput {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Staged(file) => file.write(bytes),
+            Self::Existing { file, .. } => {
+                let mut buffer = [0u8; 64 * 1024];
+                for chunk in bytes.chunks(buffer.len()) {
+                    file.read_exact(&mut buffer[..chunk.len()]).map_err(|_| io::Error::other("resume file is truncated; preserve or remove the conflicting file before retrying"))?;
+                    if chunk != &buffer[..chunk.len()] {
+                        return Err(io::Error::other(
+                            "resume file differs from the package; preserve or remove the conflicting file before retrying",
+                        ));
+                    }
+                }
+                Ok(bytes.len())
+            }
+        }
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Staged(file) => file.flush(),
+            Self::Existing { .. } => Ok(()),
+        }
+    }
+}
+impl FileOutput {
+    pub fn commit(self, progress: &impl ExtractProgress) -> Result<(), ExtractError> {
+        match self {
+            Self::Staged(file) => file.commit(progress),
+            Self::Existing { mut file, path } => {
+                let mut extra = [0u8; 1];
+                let result = file.read(&mut extra).and_then(|n| {
+                    if n == 0 {
+                        Ok(())
+                    } else {
+                        Err(io::Error::other(
+                            "resume file is longer than the package file",
+                        ))
+                    }
+                });
+                result.map_err(|source| ExtractError::WriteFailed { path, source })
+            }
+        }
+    }
+}
 
 /// Stages a file beside its destination, using the same confined directory
 /// handle for creation, publication, and cleanup.
@@ -129,7 +183,47 @@ impl Output {
         })
     }
 
-    pub fn create_file(&self, path: &Path, overwrite: bool) -> Result<StagedFile, ExtractError> {
+    pub fn create_file(
+        &self,
+        path: &Path,
+        overwrite: bool,
+        resume: bool,
+    ) -> Result<FileOutput, ExtractError> {
+        if resume {
+            let open = || -> io::Result<Option<File>> {
+                let mut prefix = PathBuf::new();
+                for part in path.components() {
+                    prefix.push(part);
+                    match self.dir.symlink_metadata(&prefix) {
+                        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+                        Err(e) => return Err(e),
+                        Ok(meta)
+                            if (prefix != path && meta.is_dir())
+                                || (prefix == path && meta.is_file()) => {}
+                        Ok(_) => {
+                            return Err(io::Error::other(
+                                "resume refuses symlinks and special files",
+                            ));
+                        }
+                    }
+                }
+                Ok(Some(self.dir.open(path)?))
+            };
+            if let Some(file) = open().map_err(|source| ExtractError::CreateFileFailed {
+                path: self.path.join(path),
+                source,
+            })? {
+                return Ok(FileOutput::Existing {
+                    file,
+                    path: self.path.join(path),
+                });
+            }
+        }
+        self.create_staged_file(path, overwrite)
+            .map(FileOutput::Staged)
+    }
+
+    fn create_staged_file(&self, path: &Path, overwrite: bool) -> Result<StagedFile, ExtractError> {
         self.check_file(path, overwrite)?;
         let create = || -> io::Result<StagedFile> {
             let parent_path = path

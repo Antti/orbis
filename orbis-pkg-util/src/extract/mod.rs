@@ -57,6 +57,7 @@ pub struct PkgExtractor<'a, R: AsRef<[u8]> + Sync, P: ExtractProgress> {
     pkg: &'a Pkg<R>,
     progress: P,
     overwrite: bool,
+    resume: bool,
 }
 
 struct EntryWork {
@@ -77,7 +78,16 @@ impl<'a, R: AsRef<[u8]> + Sync, P: ExtractProgress> PkgExtractor<'a, R, P> {
             pkg,
             progress,
             overwrite,
+            resume: false,
         }
+    }
+
+    /// Reuse existing files only after comparing their complete decoded contents.
+    /// Missing files are copied; mismatches are preserved and reported as errors.
+    /// Resume takes precedence over overwrite for existing files.
+    pub fn with_resume(mut self, resume: bool) -> Self {
+        self.resume = resume;
+        self
     }
 
     /// Extracts metadata to `sce_sys/` and filesystem contents to the output root.
@@ -348,7 +358,7 @@ impl<'a, R: AsRef<[u8]> + Sync, P: ExtractProgress> PkgExtractor<'a, R, P> {
                 .filter_map(|entry| entry.path.as_ref())
                 .chain(plan.filesystem.files.iter().map(|work| &work.output_path))
             {
-                output.check_file(path, self.overwrite)?;
+                output.check_file(path, self.overwrite || self.resume)?;
             }
             for dir in &plan.filesystem.dirs {
                 output.create_dir(dir)?;
@@ -408,7 +418,7 @@ impl<'a, R: AsRef<[u8]> + Sync, P: ExtractProgress> PkgExtractor<'a, R, P> {
                 if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
                     output.create_dir(parent)?;
                 }
-                let mut file = output.create_file(path, self.overwrite)?;
+                let mut file = output.create_file(path, self.overwrite, self.resume)?;
                 for chunk in data.chunks(1024 * 1024) {
                     self.check_cancelled()?;
                     file.write_all(chunk)
@@ -442,7 +452,13 @@ impl<'a, R: AsRef<[u8]> + Sync, P: ExtractProgress> PkgExtractor<'a, R, P> {
             .map(|work| {
                 self.check_cancelled()?;
                 self.progress.pfs_file(&work.output_path, work.file.len());
-                process_file(work, output.as_ref(), &self.progress, self.overwrite)
+                process_file(
+                    work,
+                    output.as_ref(),
+                    &self.progress,
+                    self.overwrite,
+                    self.resume,
+                )
             })
             .collect();
         for bytes in results? {
@@ -504,6 +520,7 @@ fn process_file<P: ExtractProgress>(
     output: Option<&Output>,
     progress: &P,
     overwrite: bool,
+    resume: bool,
 ) -> Result<u64, ExtractError> {
     let source: Box<dyn Image + '_> = if work.file.is_compressed() {
         Box::new(
@@ -525,7 +542,7 @@ fn process_file<P: ExtractProgress>(
         });
     }
     let mut dest = output
-        .map(|out| out.create_file(&work.output_path, overwrite))
+        .map(|out| out.create_file(&work.output_path, overwrite, resume))
         .transpose()?;
     let mut buffer = vec![0u8; 8 * 1024 * 1024];
     let mut offset = 0;

@@ -32,6 +32,7 @@ pub(crate) fn run(cli: &Cli, out: &mut impl Write, cancelled: Arc<AtomicBool>) -
         Command::Export {
             base,
             output,
+            resume,
             dry_run,
             json,
         } => {
@@ -83,11 +84,12 @@ pub(crate) fn run(cli: &Cli, out: &mut impl Write, cancelled: Arc<AtomicBool>) -
                 );
             }
 
-            let report = orbis_pkg_util::install::export_merged(
-                base,
-                output,
-                ConsoleProgress::with_options(cli.quiet, cancelled),
-            )?;
+            let progress = ConsoleProgress::with_options(cli.quiet, cancelled);
+            let report = if *resume {
+                orbis_pkg_util::install::resume_export(base, output, progress)?
+            } else {
+                orbis_pkg_util::install::export_merged(base, output, progress)?
+            };
             if !cli.quiet {
                 diagnostic(&format!(
                     "Exported {} version {}: {} files ({}, {} from the update) to {}.",
@@ -198,10 +200,11 @@ pub(crate) fn run(cli: &Cli, out: &mut impl Write, cancelled: Arc<AtomicBool>) -
             pkg_path,
             output,
             force,
+            resume,
             selection,
         } => process(
             pkg_path,
-            Some((output.as_deref(), *force)),
+            Some((output.as_deref(), *force, *resume)),
             selection,
             cli,
             cancelled,
@@ -300,7 +303,7 @@ fn prepare_filesystem(pkg: &mut Package) -> Result<()> {
 
 fn process(
     path: &Path,
-    extraction: Option<(Option<&Path>, bool)>,
+    extraction: Option<(Option<&Path>, bool, bool)>,
     selection: &cli::Selection,
     cli: &Cli,
     cancelled: Arc<AtomicBool>,
@@ -319,7 +322,7 @@ fn process(
     }
     let progress = ConsoleProgress::with_options(quiet, cancelled);
     let start = std::time::Instant::now();
-    let report = if let Some((output, force)) = extraction {
+    let report = if let Some((output, force, resume)) = extraction {
         let destination = match output {
             Some(path) => path.to_path_buf(),
             None => {
@@ -335,7 +338,9 @@ fn process(
                 escaped(&destination)
             ));
         }
-        PkgExtractor::new(&pkg, progress, force).extract_with_options(&destination, &options)?
+        PkgExtractor::new(&pkg, progress, force)
+            .with_resume(resume)
+            .extract_with_options(&destination, &options)?
     } else {
         if !quiet {
             diagnostic(&format!("Checking {}", escaped(path)));

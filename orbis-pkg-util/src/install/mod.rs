@@ -10,7 +10,7 @@ mod preflight;
 mod storage;
 mod transaction;
 
-pub use export::{ExportPlan, ExportReport, export_merged, plan_export};
+pub use export::{ExportPlan, ExportReport, export_merged, plan_export, resume_export};
 pub use preflight::FilesystemPlan;
 
 use crate::{ExtractError, ExtractOptions, ExtractProgress, PkgExtractor, SilentProgress};

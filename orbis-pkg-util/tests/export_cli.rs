@@ -193,3 +193,76 @@ fn refuses_unsafe_or_ambiguous_manifest_paths() {
         assert_eq!(run(root, &["verify-dir", "merged"]).status.code(), Some(1));
     }
 }
+
+#[test]
+fn resumes_missing_export_files_but_preserves_conflicts_and_refuses_changed_sources() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let base = base_game(root);
+    let args = [
+        "export",
+        "--base",
+        "CUSA00000",
+        "-o",
+        "merged",
+        "--resume",
+        "-q",
+    ];
+    success(&run(root, &args));
+    let before = fs::metadata(root.join("merged/base.txt"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    fs::remove_file(root.join("merged/sce_sys/param.sfo")).unwrap();
+    success(&run(root, &args));
+    assert_eq!(
+        fs::metadata(root.join("merged/base.txt"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        before
+    );
+    assert!(
+        run(root, &["verify-dir", "merged", "--json"])
+            .status
+            .success()
+    );
+    fs::write(root.join("merged/base.txt"), b"EDIT").unwrap();
+    assert_eq!(run(root, &args).status.code(), Some(1));
+    assert_eq!(fs::read(root.join("merged/base.txt")).unwrap(), b"EDIT");
+    fs::write(root.join("merged/base.txt"), b"BASE").unwrap();
+    fs::write(base.join("base.txt"), b"different base").unwrap();
+    assert_eq!(run(root, &args).status.code(), Some(1));
+    assert_eq!(fs::read(root.join("merged/base.txt")).unwrap(), b"BASE");
+}
+
+#[test]
+fn resume_requires_matching_manifest_and_force_is_not_allowed() {
+    let temp = tempfile::tempdir().unwrap();
+    base_game(temp.path());
+    fs::create_dir(temp.path().join("unowned")).unwrap();
+    assert_eq!(
+        run(
+            temp.path(),
+            &["export", "--base", "CUSA00000", "-o", "unowned", "--resume"]
+        )
+        .status
+        .code(),
+        Some(1)
+    );
+    assert!(
+        fs::read_dir(temp.path().join("unowned"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
+    assert_eq!(
+        run(
+            temp.path(),
+            &["extract", "anything.pkg", "--resume", "--force"]
+        )
+        .status
+        .code(),
+        Some(2)
+    );
+}

@@ -536,3 +536,45 @@ fn rejects_symlink_sources_and_destinations() {
     assert_eq!(fs::read_link(output).unwrap(), Path::new("missing"));
     no_staging(temp.path());
 }
+
+#[test]
+fn cancelled_resumable_export_keeps_manifest_and_can_continue() {
+    struct CancelCopy {
+        copying: AtomicBool,
+        cancelled: AtomicBool,
+    }
+    impl ExtractProgress for CancelCopy {
+        fn phase(&self, phase: &str) {
+            self.copying
+                .store(phase == "Resuming merged export", Ordering::SeqCst);
+        }
+        fn bytes_processed(&self, _: u64) {
+            if self.copying.load(Ordering::SeqCst) {
+                self.cancelled.store(true, Ordering::SeqCst);
+            }
+        }
+        fn is_cancelled(&self) -> bool {
+            self.cancelled.load(Ordering::SeqCst)
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let base = base_game(temp.path());
+    let out = temp.path().join("resumable");
+    assert!(
+        resume_export(
+            &base,
+            &out,
+            CancelCopy {
+                copying: AtomicBool::new(false),
+                cancelled: AtomicBool::new(false)
+            }
+        )
+        .is_err()
+    );
+    let report = install::verify_directory(&out, SilentProgress).unwrap();
+    assert!(!report.complete);
+    assert!(!report.issues.is_empty());
+    resume_export(&base, &out, SilentProgress).unwrap();
+    let report = install::verify_directory(&out, SilentProgress).unwrap();
+    assert!(report.complete && report.issues.is_empty());
+}
