@@ -70,21 +70,34 @@ selection fails before writing files. `--metadata-only` avoids opening the
 filesystem and can recover readable metadata from otherwise unsupported packages.
 
 Existing files are preserved unless `--force` is supplied. Each file is staged
-beside its destination, synced, and published only after a complete write. A
+beside its destination and synced after a complete write. A
 failed replacement preserves the previous file. Known output conflicts are
 checked before writing; publication also checks for files created concurrently.
 Archive-controlled paths remain confined to the output directory.
 
-Linux, macOS, and Windows use exclusive rename when `--force` is absent.
-Other platforms use hard links and require filesystem support for them.
+Linux, macOS, and Windows prefer exclusive rename when `--force` is absent.
+Other platforms first try hard links. If the operation is unsupported, as with
+macOS exFAT, extraction creates the destination exclusively and copies the completed
+staging file into it. Existing files and symlinks are still refused. This fallback
+adds a second copy and makes the destination visible during that copy. Normal
+errors and Ctrl-C remove the unfinished copy, but forced termination or power loss
+can leave a partial destination as well as staging files. Retry with `--force`
+after checking the destination. Atomic publication remains in use where supported.
 Staging temporarily uses space for both the old and replacement files, and
 syncing each completed file can add I/O overhead.
 
-An operation is atomic per file, not across the entire directory. Files completed
+On filesystems supporting rename publication, each file is published atomically;
+the overall extraction is not atomic across the directory. Files completed
 before a later failure remain. Ctrl-C cooperatively stops processing, discards
 unfinished staged files, and exits 130. A process killed forcibly or a power
 failure can leave `.orbis-*.tmp` staging files. After investigating a failure,
 retry with `--force` to replace completed files safely.
+
+To run the optional regression on a mounted filesystem, set
+`ORBIS_TEST_EXTRACT_ROOT=/path/to/mount` and run
+`cargo test -p orbis-pkg-util --lib extracts_to_a_configured_external_filesystem`.
+It creates and removes only a private temporary subtree on that volume. The normal
+test suite also injects unsupported-rename errors without requiring an external disk.
 
 Missing decryption keys are reported as omissions. An incomplete extraction returns exit code 3 and identifies skipped entries;
 `--quiet` does not hide these warnings.
@@ -367,6 +380,8 @@ are refused. The output must be outside the base, update, and installation state
 Allow space for the full merged game. Overridden base files are not copied. A
 temporary sibling `.orbis-export-*.tmp` directory holds the export until every file
 has been copied; publication refuses even an empty destination created meanwhile.
+Merged directory export still requires exclusive directory rename support; the
+exFAT copy fallback applies to extracted files, not whole-directory publication.
 Normal failures and Ctrl-C discard staging and leave the destination absent.
 A forced termination can leave a temporary directory; after the exporter exits,
 remove that abandoned directory and retry. An error syncing the parent after
