@@ -1,4 +1,4 @@
-use super::super::directory::{self, ExportManifest, hash_file};
+use super::super::directory::{self, DirectoryIssueKind, ExportManifest, hash_file};
 use super::*;
 use orbis_pkg::sfo::AppMetadata;
 
@@ -67,7 +67,11 @@ pub(super) fn run(
             ));
         }
         let verification = directory::verify_directory(output, progress)?;
-        if let Some(issue) = verification.issues.iter().find(|i| i.kind != "missing") {
+        if let Some(issue) = verification
+            .issues
+            .iter()
+            .find(|i| i.kind != DirectoryIssueKind::Missing)
+        {
             return Err(invalid(format!(
                 "resume refuses {} file {}; preserve or remove the conflict before retrying",
                 issue.kind, issue.path
@@ -76,7 +80,7 @@ pub(super) fn run(
         missing = verification
             .issues
             .into_iter()
-            .filter(|i| i.kind == "missing")
+            .filter(|i| i.kind == DirectoryIssueKind::Missing)
             .map(|i| i.path)
             .collect();
     }

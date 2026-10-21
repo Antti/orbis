@@ -28,10 +28,31 @@ pub(super) struct ExportManifest {
     pub files: Vec<FileRecord>,
 }
 
+/// Stable categories used by verification reports and resume conflict checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectoryIssueKind {
+    Missing,
+    Changed,
+    Unexpected,
+    WrongType,
+}
+
+impl std::fmt::Display for DirectoryIssueKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Missing => "missing",
+            Self::Changed => "changed",
+            Self::Unexpected => "unexpected",
+            Self::WrongType => "wrong_type",
+        })
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct DirectoryIssue {
     pub path: String,
-    pub kind: String,
+    pub kind: DirectoryIssueKind,
 }
 #[derive(Debug, Serialize)]
 pub struct DirectoryReport {
@@ -211,11 +232,11 @@ pub fn verify_directory(path: &Path, progress: impl ExtractProgress) -> Result<D
             let metadata = current.symlink_metadata(&name)?;
             let kind = if let Some(expected) = expected.get(path.as_str()) {
                 if !metadata.is_file() {
-                    Some("wrong_type")
+                    Some(DirectoryIssueKind::WrongType)
                 } else {
                     report.checked_files += 1;
                     if &hash_file(&dir, &path, &progress)? != *expected {
-                        Some("changed")
+                        Some(DirectoryIssueKind::Changed)
                     } else {
                         None
                     }
@@ -225,16 +246,13 @@ pub fn verify_directory(path: &Path, progress: impl ExtractProgress) -> Result<D
                     pending.push(path.clone());
                     None
                 } else {
-                    Some("wrong_type")
+                    Some(DirectoryIssueKind::WrongType)
                 }
             } else {
-                Some("unexpected")
+                Some(DirectoryIssueKind::Unexpected)
             };
             if let Some(kind) = kind {
-                report.issues.push(DirectoryIssue {
-                    path,
-                    kind: kind.into(),
-                });
+                report.issues.push(DirectoryIssue { path, kind });
             }
         }
     }
@@ -242,7 +260,7 @@ pub fn verify_directory(path: &Path, progress: impl ExtractProgress) -> Result<D
         if !seen.contains(path) {
             report.issues.push(DirectoryIssue {
                 path: path.into(),
-                kind: "missing".into(),
+                kind: DirectoryIssueKind::Missing,
             });
         }
     }

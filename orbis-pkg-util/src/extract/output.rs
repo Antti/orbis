@@ -10,6 +10,26 @@ use std::{
     io::{Read, Write},
 };
 
+/// Policy resolved once from the public extraction builder options.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ExistingFilePolicy {
+    Refuse,
+    Replace,
+    Verify,
+}
+
+impl ExistingFilePolicy {
+    pub fn from_options(overwrite: bool, resume: bool) -> Self {
+        if resume {
+            Self::Verify
+        } else if overwrite {
+            Self::Replace
+        } else {
+            Self::Refuse
+        }
+    }
+}
+
 /// Existing files are compared with the decoded source stream; no bytes are written.
 pub(super) enum FileOutput {
     Staged(StagedFile),
@@ -69,7 +89,7 @@ pub(super) struct StagedFile {
     destination: PathBuf,
     display_path: PathBuf,
     file: Option<File>,
-    overwrite: bool,
+    policy: ExistingFilePolicy,
 }
 
 impl Write for StagedFile {
@@ -92,13 +112,14 @@ impl StagedFile {
                 path: self.display_path.clone(),
                 source,
             })?;
-        let result = if self.overwrite {
+        let result = if self.policy == ExistingFilePolicy::Replace {
             // rename replaces a symlink itself, never its target. Refuse known
             // symlinks anyway so --force retains the extractor's existing policy.
-            check_destination(&self.parent, &self.destination, true).and_then(|()| {
-                self.parent
-                    .rename(&self.temporary, &self.parent, &self.destination)
-            })
+            check_destination(&self.parent, &self.destination, ExistingFilePolicy::Replace)
+                .and_then(|()| {
+                    self.parent
+                        .rename(&self.temporary, &self.parent, &self.destination)
+                })
         } else {
             publish_new_file(&self.parent, &self.temporary, &self.destination, || {
                 if progress.is_cancelled() {
@@ -128,9 +149,9 @@ impl Drop for StagedFile {
     }
 }
 
-fn check_destination(dir: &Dir, path: &Path, overwrite: bool) -> io::Result<()> {
+fn check_destination(dir: &Dir, path: &Path, policy: ExistingFilePolicy) -> io::Result<()> {
     match dir.symlink_metadata(path) {
-        Ok(metadata) if overwrite && metadata.is_file() => Ok(()),
+        Ok(metadata) if policy != ExistingFilePolicy::Refuse && metadata.is_file() => Ok(()),
         Ok(_) => Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
             "destination already exists",
@@ -174,8 +195,8 @@ impl Output {
             })
     }
 
-    pub fn check_file(&self, path: &Path, overwrite: bool) -> Result<(), ExtractError> {
-        check_destination(&self.dir, path, overwrite).map_err(|source| {
+    pub fn check_file(&self, path: &Path, policy: ExistingFilePolicy) -> Result<(), ExtractError> {
+        check_destination(&self.dir, path, policy).map_err(|source| {
             ExtractError::CreateFileFailed {
                 path: self.path.join(path),
                 source,
@@ -186,10 +207,9 @@ impl Output {
     pub fn create_file(
         &self,
         path: &Path,
-        overwrite: bool,
-        resume: bool,
+        policy: ExistingFilePolicy,
     ) -> Result<FileOutput, ExtractError> {
-        if resume {
+        if policy == ExistingFilePolicy::Verify {
             let open = || -> io::Result<Option<File>> {
                 let mut prefix = PathBuf::new();
                 for part in path.components() {
@@ -219,12 +239,23 @@ impl Output {
                 });
             }
         }
-        self.create_staged_file(path, overwrite)
+        // A missing resume file must still be published without replacing a file
+        // that appeared after verification.
+        let publication = if policy == ExistingFilePolicy::Replace {
+            ExistingFilePolicy::Replace
+        } else {
+            ExistingFilePolicy::Refuse
+        };
+        self.create_staged_file(path, publication)
             .map(FileOutput::Staged)
     }
 
-    fn create_staged_file(&self, path: &Path, overwrite: bool) -> Result<StagedFile, ExtractError> {
-        self.check_file(path, overwrite)?;
+    fn create_staged_file(
+        &self,
+        path: &Path,
+        policy: ExistingFilePolicy,
+    ) -> Result<StagedFile, ExtractError> {
+        self.check_file(path, policy)?;
         let create = || -> io::Result<StagedFile> {
             let parent_path = path
                 .parent()
@@ -235,7 +266,7 @@ impl Output {
                 path.file_name()
                     .ok_or_else(|| io::Error::other("missing destination filename"))?,
             );
-            check_destination(&parent, &destination, overwrite)?;
+            check_destination(&parent, &destination, policy)?;
             for _ in 0..128 {
                 let temporary = format!(".orbis-{:032x}.tmp", fastrand::u128(..));
                 let mut options = OpenOptions::new();
@@ -248,7 +279,7 @@ impl Output {
                             destination,
                             display_path: self.path.join(path),
                             file: Some(file),
-                            overwrite,
+                            policy,
                         });
                     }
                     Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,

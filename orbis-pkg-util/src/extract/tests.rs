@@ -178,19 +178,19 @@ fn failed_decompression_preserves_existing_files_and_removes_staging_files() {
 
 #[test]
 fn destination_created_during_staging_is_not_overwritten() {
-    let dir = tempfile::tempdir().unwrap();
-    let output = output::Output::new(dir.path()).unwrap();
-    let mut staged = output
-        .create_file(Path::new("hello.txt"), false, false)
-        .unwrap();
-    staged.write_all(b"NEW").unwrap();
-    std::fs::write(dir.path().join("hello.txt"), b"KEEP").unwrap();
-    assert!(staged.commit(&SilentProgress).is_err());
-    assert_eq!(
-        std::fs::read(dir.path().join("hello.txt")).unwrap(),
-        b"KEEP"
-    );
-    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    for policy in [ExistingFilePolicy::Refuse, ExistingFilePolicy::Verify] {
+        let dir = tempfile::tempdir().unwrap();
+        let output = output::Output::new(dir.path()).unwrap();
+        let mut staged = output.create_file(Path::new("hello.txt"), policy).unwrap();
+        staged.write_all(b"NEW").unwrap();
+        std::fs::write(dir.path().join("hello.txt"), b"KEEP").unwrap();
+        assert!(staged.commit(&SilentProgress).is_err());
+        assert_eq!(
+            std::fs::read(dir.path().join("hello.txt")).unwrap(),
+            b"KEEP"
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
 }
 
 #[test]
@@ -457,4 +457,30 @@ fn resume_checks_existing_contents_and_copies_only_missing_files() {
         assert!(extractor.extract(dir.path()).is_err());
         assert_eq!(std::fs::read(dir.path().join("hello.txt")).unwrap(), bytes);
     }
+}
+
+#[test]
+fn resume_precedes_overwrite_and_disabling_it_restores_the_builder_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let package = Pkg::new(pkg(pfs("hello.txt", b"hello", false))).unwrap();
+    let extractor = PkgExtractor::new(&package, SilentProgress, true).with_resume(true);
+    extractor.extract(dir.path()).unwrap();
+    std::fs::write(dir.path().join("hello.txt"), b"EDITED").unwrap();
+    assert!(extractor.extract(dir.path()).is_err());
+    assert_eq!(
+        std::fs::read(dir.path().join("hello.txt")).unwrap(),
+        b"EDITED"
+    );
+    extractor.with_resume(false).extract(dir.path()).unwrap();
+    assert_eq!(
+        std::fs::read(dir.path().join("hello.txt")).unwrap(),
+        b"hello"
+    );
+    assert!(
+        PkgExtractor::new(&package, SilentProgress, false)
+            .with_resume(true)
+            .with_resume(false)
+            .extract(dir.path())
+            .is_err()
+    );
 }
