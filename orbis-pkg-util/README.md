@@ -380,13 +380,27 @@ are refused. The output must be outside the base, update, and installation state
 Allow space for the full merged game. Overridden base files are not copied. A
 temporary sibling `.orbis-export-*.tmp` directory holds the export until every file
 has been copied; publication refuses even an empty destination created meanwhile.
-Merged directory export still requires exclusive directory rename support; the
-exFAT copy fallback applies to extracted files, not whole-directory publication.
-Normal failures and Ctrl-C discard staging and leave the destination absent.
-A forced termination can leave a temporary directory; after the exporter exits,
-remove that abandoned directory and retry. An error syncing the parent after
+When exclusive directory rename is unsupported, including macOS exFAT, export
+creates the destination exclusively and copies the completed staging tree into it.
+Existing destinations are still refused, even empty directories. This fallback
+adds a second full copy, needs temporary space for **two merged game copies**, and
+makes the destination visible while copying. A separate publication progress phase
+tracks that copy. Only planned game paths are copied; filesystem-generated metadata
+sidecars in staging are not treated as additional game files.
+
+Normal failures and Ctrl-C discard staging and attempt to remove partial output.
+Cleanup preserves files or directories added or replaced by another process, so
+these can leave a destination behind. Do not use or modify the export until the
+command succeeds. Forced termination or power loss can leave staging and a partial
+destination; after the exporter exits, inspect and remove abandoned output before
+retrying, or choose a new destination. An error syncing the parent after
 publication reports success with a durability warning because the export already
 exists. Success messages go to stderr and `--quiet` suppresses them.
+
+For an optional regression on a mounted filesystem, run
+`ORBIS_TEST_EXPORT_ROOT=/path/to/mount cargo test -p orbis-pkg-util --lib exports_to_a_configured_external_filesystem`.
+It creates and removes only a private temporary subtree on that volume. Portable
+tests also inject unsupported-rename errors and exercise fallback cleanup.
 
 For [bbport](https://github.com/deadinside28/bloodborne_pc), select the merged
 directory in its launcher or set `BB_GAME_DIR` to its absolute path. bbport requires

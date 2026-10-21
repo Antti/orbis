@@ -35,7 +35,7 @@ pub struct Selection {
 pub enum Command {
     /// Export the base and its installed update as one merged game directory
     #[command(
-        after_help = "Example:\n  orbis-pkg-util export --base ./games/CUSA12345 -o ./bbport-game\n\nUpdate files take precedence; unchanged files come from the base. With no installed\nupdate, exports the base alone. Uses the managed sibling -UPDATE directory and\nvalidates its inventory. Installer metadata and rollback copies are excluded.\nThe output must be a new directory outside the sources, with an existing parent.\nKeep the emulator stopped and source files unchanged until export completes.\nThis copies files; it does not decrypt executables or check game-specific requirements."
+        after_help = "Example:\n  orbis-pkg-util export --base ./games/CUSA12345 -o ./bbport-game\n\nUpdate files take precedence; unchanged files come from the base. With no installed\nupdate, exports the base alone. Uses the managed sibling -UPDATE directory and\nvalidates its inventory. Installer metadata and rollback copies are excluded.\nThe output must be a new directory outside the sources, with an existing parent.\nOn filesystems without exclusive rename (such as macOS exFAT), publication needs\na second full copy and space for two merged games. Do not use the output until\nexport succeeds; forced termination can leave a partial destination.\nKeep the emulator stopped and source files unchanged until export completes.\nThis copies files; it does not decrypt executables or check game-specific requirements."
     )]
     Export {
         /// Original extracted base game directory used by install
