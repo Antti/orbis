@@ -216,6 +216,11 @@ fn extracts_to_a_configured_external_filesystem() {
         b"NEW"
     );
     assert!(extractor.extract(temp.path()).is_err());
+    std::fs::remove_file(temp.path().join("hello.txt")).unwrap();
+    PkgExtractor::new(&package, SilentProgress, false)
+        .with_resume(true)
+        .extract(temp.path())
+        .unwrap();
     assert_eq!(
         std::fs::read(temp.path().join("hello.txt")).unwrap(),
         b"hello"

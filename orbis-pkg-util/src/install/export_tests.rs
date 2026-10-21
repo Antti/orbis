@@ -185,7 +185,27 @@ fn exports_to_a_configured_external_filesystem() {
     fs::create_dir_all(base.join("assets/empty")).unwrap();
     install_update(&base, "new", b"UPDATE");
     let output = target.path().join("merged");
+    let plan = plan_export(&base, &output, SilentProgress).unwrap();
+    if let Ok(expected) = std::env::var("ORBIS_TEST_FILESYSTEM") {
+        assert_eq!(plan.filesystem.filesystem, expected);
+    }
     let report = export_merged(&base, &output, SilentProgress).unwrap();
+    assert!(
+        install::verify_directory(&output, SilentProgress)
+            .unwrap()
+            .issues
+            .is_empty()
+    );
+    let resumable = target.path().join("resumable");
+    resume_export(&base, &resumable, SilentProgress).unwrap();
+    fs::remove_file(resumable.join("base.txt")).unwrap();
+    resume_export(&base, &resumable, SilentProgress).unwrap();
+    assert!(
+        install::verify_directory(&resumable, SilentProgress)
+            .unwrap()
+            .issues
+            .is_empty()
+    );
     assert_eq!(report.update_files, 4);
     assert_eq!(fs::read(output.join("base.txt")).unwrap(), b"BASE");
     assert_eq!(fs::read(output.join("new")).unwrap(), b"UPDATE");

@@ -1,0 +1,22 @@
+{
+  "assets/fonts/Gontserrat-Regular.ttf": "e5d0395c7e0a3f43846ac532e1d054ee0c8b964ba7b715096b0d424d97e7aa3d",
+  "assets/images/psl1ght.tga": "159cfced73b82082f660f8f76e39756af881c3be728406de2eaeb3c9c0264d62",
+  "eboot.bin": "8ebd1aaabbd79aa1904053712b82dc75b62bfbd7f57ec125f8cdb4931547d3a9",
+  "sce_module/libSceFios2.prx": "905cf6b7c699eccb6b95291fc4dcaf5ce2d2605f450f36496d9b973777afa745",
+  "sce_module/libc.prx": "8ac205d14351edb241238b372b2f1c3350a6385a271483d4867fe9a33bc6e4d3",
+  "sce_sys/about/right.sprx": "1d7b1298bf219ad62a3452fd8ab7fe35fccf674431a24783336a6cb37f45dfed",
+  "sce_sys/digests": "9e011c22372c8be949f3ace6a022b3d6acd7aa675db7dba33d935abbd878a973",
+  "sce_sys/entry_keys": "3e3bd457f1edd4106ec3a658f529257d0a1a1c43066abe7520eb827e56bd71db",
+  "sce_sys/entry_names": "b600c973419ff9253ce87f669a00f09a53296a635f97fb73d4aa3f31c4b7b180",
+  "sce_sys/general_digests": "55e7c67309035cad334cf80ff47215c3b044da8a7ec0e2b7abff3a9393a2d484",
+  "sce_sys/icon0.png": "fa03b31d2aec8ad618f63d3e4179c97a033f6364d7356263cba00b0954f0a18b",
+  "sce_sys/image_key": "a2aaa155479c7980d9cc7aea8e5db6c397ede61e10dab99aef15ae3a2b37dfae",
+  "sce_sys/keystone": "d09eb8ab5f3b700164fc8ad85c54c2acbad71244e942aeedf7e3e7eb56408aac",
+  "sce_sys/license.dat": "8d9b948f7e0291017cebf090ef4aeaa9646bd9c0377d002c7a2b4023f9ef2404",
+  "sce_sys/metas": "47a79d41e1706bb4b251cbc085880e3f3977eb451867b7791463af453482f86f",
+  "sce_sys/param.sfo": "ba8e0be516aa2516b2764d3d54725571f9272d055563c720beaa81053e34575d",
+  "sce_sys/playgo-chunk.dat": "086851f47172fa86f03fb427795712cdbcebb3c6cb29a4b32adc455e99409d76",
+  "sce_sys/playgo-chunk.sha": "70cd74a94f94afeaf83d18aba3c807d200fd555d6d4e72f2bfefc54c93df6264",
+  "sce_sys/playgo-manifest.xml": "b4d0036b544a66edc732cbd2e034cf5f5b1f46b5817209d333b33e5efc016b11",
+  "sce_sys/psreserved.dat": "9f1dcbc35c350d6027f98be0f5c8b43b42ca52b7604459c0c42be3aa88913d47"
+}

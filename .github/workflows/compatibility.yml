@@ -1,0 +1,57 @@
+name: Filesystem and package compatibility
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: compatibility-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  filesystem:
+    name: Filesystem (${{ matrix.os }}, ${{ matrix.filesystem }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            filesystem: exfat
+          - os: macos-14
+            filesystem: apfs
+          - os: ubuntu-24.04
+            filesystem: exfat
+          - os: ubuntu-24.04
+            filesystem: ext4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes exfatprogs
+      - run: bash scripts/validation/filesystems.sh '${{ matrix.filesystem }}'
+  homebrew:
+    name: Public PKG (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p orbis-pkg-util --locked
+      - shell: bash
+        run: python scripts/validation/public_package.py target/debug/orbis-pkg-util${{ runner.os == 'Windows' && '.exe' || '' }}
