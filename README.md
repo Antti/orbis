@@ -209,9 +209,13 @@ under these conditions.
 Storage speed, package contents, integrity checking, and filesystem copy fallbacks
 affect runtime.
 
+## Authors and maintainers
+
+- **Original author:** [videobitva](https://github.com/videobitva) — the original Orbis Rust libraries and CLI.
+- **Fork maintainer:** [Andrii Dmytrenko (@Antti)](https://github.com/Antti) — update installation, merged exports, integrity checks, CLI improvements, and release automation.
+
 ## Acknowledgements
 
-- [videobitva/orbis](https://github.com/videobitva/orbis) — the original Rust implementation on which this fork is based.
 - [shadPS4](https://github.com/shadps4-emu/shadPS4) — motivated the original project. Its since-removed PKG install code served as an initial format reference.
 - [Obliteration](https://github.com/obhq/obliteration) — provided a Rust reference implementation for working with these formats.
 - [shadPKG](https://github.com/seregonwar/ShadPKG) — used by the original project to validate extraction output.

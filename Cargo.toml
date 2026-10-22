@@ -4,7 +4,7 @@ members = ["orbis-integrity", "orbis-pfs", "orbis-pkg", "orbis-pkg-util"]
 exclude = ["fuzz"]
 
 [workspace.package]
-authors = ["videobitva"]
+authors = ["videobitva", "Andrii Dmytrenko"]
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/Antti/orbis"
