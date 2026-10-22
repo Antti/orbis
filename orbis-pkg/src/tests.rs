@@ -121,3 +121,79 @@ fn metadata_remains_readable_without_decryption_keys() {
     assert_eq!(pkg.entry_data(&entry).unwrap(), b"data");
     assert!(Pkg::new(raw_pkg()).is_err());
 }
+
+#[test]
+fn param_sfo_data_is_optional_and_leaves_parsing_to_the_caller() {
+    let pkg = Pkg::parse(raw_pkg()).unwrap();
+    assert_eq!(pkg.param_sfo_data().unwrap().unwrap(), b"data");
+
+    let mut bytes = raw_pkg();
+    put_u32(&mut bytes, 0x1000, EntryId::Icon0Png.as_u32());
+    assert!(
+        Pkg::parse(bytes)
+            .unwrap()
+            .param_sfo_data()
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn param_sfo_data_checks_the_entire_table_before_reading_payloads() {
+    let mut bytes = raw_pkg();
+    put_u32(&mut bytes, 0x10, 2);
+    put_u32(&mut bytes, 0x1010, u32::MAX);
+    put_u32(&mut bytes, 0x1020, EntryId::ParamSfo.as_u32());
+    assert!(matches!(
+        Pkg::parse(bytes).unwrap().param_sfo_data(),
+        Err(ParamSfoError::DuplicateOrOversized)
+    ));
+
+    let mut bytes = raw_pkg();
+    put_u32(&mut bytes, 0x10, 2);
+    bytes.truncate(0x1020);
+    assert!(matches!(
+        Pkg::parse(bytes).unwrap().param_sfo_data(),
+        Err(ParamSfoError::ReadEntry {
+            source: EntryReadError::InvalidOffset { num: 1 }
+        })
+    ));
+}
+
+#[test]
+fn param_sfo_data_limits_the_payload_before_allocation() {
+    let mut bytes = raw_pkg();
+    put_u32(&mut bytes, 0x1014, 1024 * 1024);
+    bytes.resize(0x1020 + 1024 * 1024, 0);
+    let pkg = Pkg::parse(bytes).unwrap();
+    assert_eq!(pkg.param_sfo_data().unwrap().unwrap().len(), 1024 * 1024);
+
+    let mut bytes = raw_pkg();
+    put_u32(&mut bytes, 0x1014, 1024 * 1024 + 1);
+    assert!(matches!(
+        Pkg::parse(bytes).unwrap().param_sfo_data(),
+        Err(ParamSfoError::DuplicateOrOversized)
+    ));
+}
+
+#[test]
+fn param_sfo_data_preserves_payload_and_key_errors() {
+    let mut bytes = raw_pkg();
+    put_u32(&mut bytes, 0x1010, 0x10ff);
+    assert!(matches!(
+        Pkg::parse(bytes).unwrap().param_sfo_data(),
+        Err(ParamSfoError::ReadData {
+            source: EntryDataError::InvalidDataOffset
+        })
+    ));
+
+    let mut bytes = raw_pkg();
+    put_u32(&mut bytes, 0x1008, 0x80000000);
+    put_u32(&mut bytes, 0x100c, 0x3000);
+    assert!(matches!(
+        Pkg::parse(bytes).unwrap().param_sfo_data(),
+        Err(ParamSfoError::ReadData {
+            source: EntryDataError::NoDecryptionKey { key_index: 3 }
+        })
+    ));
+}

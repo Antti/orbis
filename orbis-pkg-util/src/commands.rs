@@ -30,6 +30,21 @@ enum Error {
     },
 }
 
+#[derive(Clone, Copy)]
+enum ExtractionMode {
+    Create,
+    Replace,
+    Resume,
+}
+
+enum Operation<'a> {
+    Verify,
+    Extract {
+        output: Option<&'a Path>,
+        mode: ExtractionMode,
+    },
+}
+
 pub(crate) fn run(cli: &Cli, out: &mut impl Write, cancelled: Arc<AtomicBool>) -> Result<u8> {
     match &cli.command {
         Command::Export {
@@ -74,7 +89,16 @@ pub(crate) fn run(cli: &Cli, out: &mut impl Write, cancelled: Arc<AtomicBool>) -
             selection,
         } => process(
             pkg_path,
-            Some((output.as_deref(), *force, *resume)),
+            Operation::Extract {
+                output: output.as_deref(),
+                mode: if *resume {
+                    ExtractionMode::Resume
+                } else if *force {
+                    ExtractionMode::Replace
+                } else {
+                    ExtractionMode::Create
+                },
+            },
             selection,
             cli,
             cancelled,
@@ -94,7 +118,7 @@ pub(crate) fn run(cli: &Cli, out: &mut impl Write, cancelled: Arc<AtomicBool>) -
                     cancelled,
                 )
             } else {
-                process(pkg_path, None, selection, cli, cancelled)
+                process(pkg_path, Operation::Verify, selection, cli, cancelled)
             }
         }
         Command::VerifyDir { directory, json } => {
@@ -145,7 +169,7 @@ fn prepare_filesystem(pkg: &mut Package) -> Result<()> {
 
 fn process(
     path: &Path,
-    extraction: Option<(Option<&Path>, bool, bool)>,
+    operation: Operation<'_>,
     selection: &cli::Selection,
     cli: &Cli,
     cancelled: Arc<AtomicBool>,
@@ -164,45 +188,41 @@ fn process(
     }
     let progress = ConsoleProgress::with_options(quiet, cancelled);
     let start = std::time::Instant::now();
-    let report = if let Some((output, force, resume)) = extraction {
-        let destination = match output {
-            Some(path) => path.to_path_buf(),
-            None => {
-                let title_id = pkg.header().content_id().title_id();
-                validate_title_id(title_id)?;
-                std::env::current_dir()?.join(title_id)
+    let extracting = matches!(operation, Operation::Extract { .. });
+    let report = match operation {
+        Operation::Extract { output, mode } => {
+            let destination = match output {
+                Some(path) => path.to_path_buf(),
+                None => {
+                    let title_id = pkg.header().content_id().title_id();
+                    validate_title_id(title_id)?;
+                    std::env::current_dir()?.join(title_id)
+                }
+            };
+            if !quiet {
+                diagnostic(&format!(
+                    "Extracting {} to {}",
+                    escaped(path),
+                    escaped(&destination)
+                ));
             }
-        };
-        if !quiet {
-            diagnostic(&format!(
-                "Extracting {} to {}",
-                escaped(path),
-                escaped(&destination)
-            ));
+            PkgExtractor::new(&pkg, progress, matches!(mode, ExtractionMode::Replace))
+                .with_resume(matches!(mode, ExtractionMode::Resume))
+                .extract_with_options(&destination, &options)?
         }
-        PkgExtractor::new(&pkg, progress, force)
-            .with_resume(resume)
-            .extract_with_options(&destination, &options)?
-    } else {
-        if !quiet {
-            diagnostic(&format!("Checking {}", escaped(path)));
+        Operation::Verify => {
+            if !quiet {
+                diagnostic(&format!("Checking {}", escaped(path)));
+            }
+            PkgExtractor::new(&pkg, progress, false).verify(&options)?
         }
-        PkgExtractor::new(&pkg, progress, false).verify(&options)?
     };
-    let action = if extraction.is_some() {
-        "Extracted"
-    } else {
-        "Checked"
-    };
+    let action = if extracting { "Extracted" } else { "Checked" };
     if !report.skipped.is_empty() {
         diagnostic(&format!(
             "Incomplete: {} files {}; {} entries skipped.",
             report.files,
-            if extraction.is_some() {
-                "extracted"
-            } else {
-                "checked"
-            },
+            if extracting { "extracted" } else { "checked" },
             report.skipped.len()
         ));
         return Ok(3);
@@ -214,7 +234,7 @@ fn process(
             human_size(report.bytes),
             start.elapsed().as_secs_f64()
         ));
-        if extraction.is_none() {
+        if !extracting {
             diagnostic("Readability and decompression passed; authenticity was not checked.");
         }
     }
@@ -415,25 +435,11 @@ fn item_source(item: &ListedItem) -> &'static str {
 }
 
 fn application_info(pkg: &Package) -> (Value, Value, Vec<String>) {
-    use orbis_pkg::{
-        entry::EntryId,
-        sfo::{Sfo, Value as SfoValue},
-    };
+    use orbis_pkg::sfo::{Sfo, Value as SfoValue};
     let read = || -> Result<(Value, Value)> {
-        let mut found = None;
-        for result in pkg.entries() {
-            let (_, entry) = result?;
-            if entry.entry_id() == EntryId::ParamSfo {
-                if found.is_some() || entry.data_size() > 1024 * 1024 {
-                    return Err("duplicate or oversized PARAM.SFO entry".into());
-                }
-                found = Some(entry);
-            }
-        }
-        let Some(entry) = found else {
+        let Some(data) = pkg.param_sfo_data()? else {
             return Ok((Value::Null, Value::Null));
         };
-        let data = pkg.entry_data(&entry)?;
         let sfo = Sfo::parse(&data)?;
         let fields: serde_json::Map<String, Value> = sfo.entries().map(|(key, value)| {
             let value = match value {
