@@ -46,10 +46,9 @@ The release workflow builds these packages:
 | macOS | Intel x86-64 | `.tar.gz` archive |
 | macOS | Apple Silicon ARM64 | `.tar.gz` archive |
 
-Check the assets attached to your chosen release. **v0.2.0 predates Windows and
-Linux ARM64 downloads and the export/resume commands documented here**; those
-changes are on `master` for the next release. To use them now, build from source
-with [Rust](https://www.rust-lang.org/tools/install):
+Check the assets attached to your chosen release. **Windows and Linux ARM64
+downloads and the export/resume commands documented here require v0.3.0 or
+later.** To build the current source with [Rust](https://www.rust-lang.org/tools/install):
 
 ```sh
 cargo install --git https://github.com/Antti/orbis.git --locked orbis-pkg-util
