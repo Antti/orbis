@@ -1,7 +1,11 @@
-# orbis-pkg-util
+# orbis-pkg-util: PS4 PKG extractor CLI reference
 
-Inspect, extract, check, and install updates from PlayStation 4 PKG files. Run `orbis-pkg-util --help`
-or add `--help` after any command for examples.
+`orbis-pkg-util` is the Orbis command-line tool for extracting PlayStation 4 PKG
+files, inspecting metadata, checking integrity, installing full-file updates, and
+exporting merged games on Windows, Linux, and macOS.
+
+For downloads and a quick start, see the [Orbis PS4 PKG extractor overview](../README.md).
+Run `orbis-pkg-util --help` or add `--help` after any command for examples.
 
 ## Installation
 
@@ -11,8 +15,9 @@ From the repository root:
 cargo install --path orbis-pkg-util
 ```
 
-Prebuilt Linux and macOS packages and installation instructions are described in
-[RELEASE.md](../RELEASE.md).
+Prebuilt packages and platform-specific installation instructions are described in
+[RELEASE.md](../RELEASE.md#installing-packages). This guide describes the current
+source tree; check your release tag for the commands available in an older binary.
 
 ## Inspect a package
 
@@ -205,6 +210,8 @@ The entry encryption flag does not describe filesystem-sector encryption.
 Listings are sorted by path and entry ID. Incomplete listings still produce valid
 JSON and include warnings. A fatal error exits 1 without a JSON document.
 Consumers should accept added fields within schema version 1.
+
+### Exit codes
 
 | Exit code | Meaning |
 | --- | --- |
