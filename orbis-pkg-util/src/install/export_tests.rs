@@ -185,7 +185,27 @@ fn exports_to_a_configured_external_filesystem() {
     fs::create_dir_all(base.join("assets/empty")).unwrap();
     install_update(&base, "new", b"UPDATE");
     let output = target.path().join("merged");
+    let plan = plan_export(&base, &output, SilentProgress).unwrap();
+    if let Ok(expected) = std::env::var("ORBIS_TEST_FILESYSTEM") {
+        assert_eq!(plan.filesystem.filesystem, expected);
+    }
     let report = export_merged(&base, &output, SilentProgress).unwrap();
+    assert!(
+        install::verify_directory(&output, SilentProgress)
+            .unwrap()
+            .issues
+            .is_empty()
+    );
+    let resumable = target.path().join("resumable");
+    resume_export(&base, &resumable, SilentProgress).unwrap();
+    fs::remove_file(resumable.join("base.txt")).unwrap();
+    resume_export(&base, &resumable, SilentProgress).unwrap();
+    assert!(
+        install::verify_directory(&resumable, SilentProgress)
+            .unwrap()
+            .issues
+            .is_empty()
+    );
     assert_eq!(report.update_files, 4);
     assert_eq!(fs::read(output.join("base.txt")).unwrap(), b"BASE");
     assert_eq!(fs::read(output.join("new")).unwrap(), b"UPDATE");
@@ -535,4 +555,138 @@ fn rejects_symlink_sources_and_destinations() {
     assert!(export_merged(&base, &output, SilentProgress).is_err());
     assert_eq!(fs::read_link(output).unwrap(), Path::new("missing"));
     no_staging(temp.path());
+}
+
+#[test]
+fn cancelled_resumable_export_keeps_manifest_and_can_continue() {
+    struct CancelCopy {
+        copying: AtomicBool,
+        cancelled: AtomicBool,
+    }
+    impl ExtractProgress for CancelCopy {
+        fn phase(&self, phase: &str) {
+            self.copying
+                .store(phase == "Resuming merged export", Ordering::SeqCst);
+        }
+        fn bytes_processed(&self, _: u64) {
+            if self.copying.load(Ordering::SeqCst) {
+                self.cancelled.store(true, Ordering::SeqCst);
+            }
+        }
+        fn is_cancelled(&self) -> bool {
+            self.cancelled.load(Ordering::SeqCst)
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let base = base_game(temp.path());
+    let out = temp.path().join("resumable");
+    assert!(
+        resume_export(
+            &base,
+            &out,
+            CancelCopy {
+                copying: AtomicBool::new(false),
+                cancelled: AtomicBool::new(false)
+            }
+        )
+        .is_err()
+    );
+    let report = install::verify_directory(&out, SilentProgress).unwrap();
+    assert!(!report.complete);
+    assert!(!report.issues.is_empty());
+    resume_export(&base, &out, SilentProgress).unwrap();
+    let report = install::verify_directory(&out, SilentProgress).unwrap();
+    assert!(report.complete && report.issues.is_empty());
+}
+
+#[test]
+fn resume_rejects_case_alias_of_an_export_used_as_its_base() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = base_game(temp.path());
+    let source = temp.path().join("source-export");
+    export_merged(&base, &source, SilentProgress).unwrap();
+    let alias = temp.path().join("SOURCE-EXPORT");
+    if !alias.is_dir() {
+        return;
+    } // The alias only exists on case-insensitive filesystems.
+    let manifest = source.join(super::super::directory::MANIFEST);
+    let before = fs::metadata(&manifest).unwrap().modified().unwrap();
+    let error = resume_export(&source, &alias, SilentProgress).unwrap_err();
+    assert!(error.to_string().contains("outside"));
+    assert_eq!(fs::metadata(&manifest).unwrap().modified().unwrap(), before);
+    assert!(!temp.path().join(".source-export.orbis-install").exists());
+}
+
+#[test]
+fn preview_staged_and_resumable_exports_agree_on_the_overlay() {
+    for with_update in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let base = base_game(temp.path());
+        fs::create_dir(base.join("empty")).unwrap();
+        if with_update {
+            let pkg = Pkg::new(update("01.09", "base.txt", b"UPDATE")).unwrap();
+            install::install(&pkg, &base, SilentProgress).unwrap();
+        }
+        let staged = temp.path().join("staged");
+        let resumed = temp.path().join("resumed");
+        let plan = plan_export(&base, &staged, SilentProgress).unwrap();
+        let report = export_merged(&base, &staged, SilentProgress).unwrap();
+        let resume = resume_export(&base, &resumed, SilentProgress).unwrap();
+        for exported in [report, resume] {
+            assert_eq!(exported.title_id, plan.title_id);
+            assert_eq!(exported.files, plan.files);
+            assert_eq!(exported.update_files, plan.update_files);
+            assert_eq!(exported.bytes, plan.bytes);
+            assert_eq!(
+                exported.app_version,
+                plan.update_version
+                    .as_ref()
+                    .unwrap_or(&plan.base_version)
+                    .as_str()
+            );
+        }
+        let manifest = super::super::directory::MANIFEST;
+        assert_eq!(
+            fs::read(staged.join(manifest)).unwrap(),
+            fs::read(resumed.join(manifest)).unwrap()
+        );
+        assert!(staged.join("empty").is_dir());
+        assert!(resumed.join("empty").is_dir());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn resume_keeps_the_validated_parent_when_its_path_is_replaced() {
+    struct MoveParent {
+        parent: PathBuf,
+        moved: PathBuf,
+    }
+    impl ExtractProgress for MoveParent {
+        fn phase(&self, phase: &str) {
+            if phase == "Hashing export sources for safe resume" {
+                fs::rename(&self.parent, &self.moved).unwrap();
+                fs::create_dir(&self.parent).unwrap();
+                fs::write(self.parent.join("keep"), b"KEEP").unwrap();
+            }
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let base = base_game(temp.path());
+    let parent = temp.path().join("output-parent");
+    let moved = temp.path().join("moved-parent");
+    fs::create_dir(&parent).unwrap();
+    resume_export(
+        &base,
+        &parent.join("merged"),
+        MoveParent {
+            parent: parent.clone(),
+            moved: moved.clone(),
+        },
+    )
+    .unwrap();
+    assert!(!parent.join("merged").exists());
+    assert_eq!(fs::read(parent.join("keep")).unwrap(), b"KEEP");
+    let verified = install::verify_directory(&moved.join("merged"), SilentProgress).unwrap();
+    assert!(verified.complete && verified.issues.is_empty());
 }

@@ -11,6 +11,9 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, atomic::AtomicBool};
 
+mod directory;
+mod export;
+mod install;
 mod verify;
 
 type Result<T> = std::result::Result<T, Box<dyn StdError>>;
@@ -29,106 +32,28 @@ enum Error {
 
 pub(crate) fn run(cli: &Cli, out: &mut impl Write, cancelled: Arc<AtomicBool>) -> Result<u8> {
     match &cli.command {
-        Command::Export { base, output } => {
-            let report = orbis_pkg_util::install::export_merged(
-                base,
-                output,
-                ConsoleProgress::with_options(cli.quiet, cancelled),
-            )?;
-            if !cli.quiet {
-                diagnostic(&format!(
-                    "Exported {} version {}: {} files ({}, {} from the update) to {}.",
-                    report.title_id,
-                    report.app_version,
-                    report.files,
-                    human_size(report.bytes),
-                    report.update_files,
-                    escaped(&report.destination),
-                ));
+        Command::Export {
+            base,
+            output,
+            resume,
+            dry_run,
+            json,
+        } => {
+            if *dry_run {
+                export::preview(base, output, *json, cli, out, cancelled)
+            } else {
+                export::run(base, output, *resume, cli, cancelled)
             }
-            Ok(0)
         }
         Command::Install {
             pkg_path,
             base,
             dry_run,
             json,
-        } => {
-            let mut pkg = open(pkg_path, cli.passcode_file.as_deref())?;
-            let _ = pkg.load_entry_keys();
-            orbis_pkg_util::install::update_metadata(&pkg)?;
-            prepare_filesystem(&mut pkg)?;
-            if *dry_run {
-                let plan = orbis_pkg_util::install::plan_with_progress(
-                    &pkg,
-                    base,
-                    ConsoleProgress::with_options(cli.quiet, cancelled),
-                )?;
-                if *json {
-                    write_json(out, &json!({ "schema_version": 1, "plan": plan }))?;
-                } else {
-                    writeln!(
-                        out,
-                        "{}: {} -> {}",
-                        plan.title_id, plan.current_version, plan.update_version
-                    )?;
-                    writeln!(out, "Destination: {}", escaped(&plan.destination))?;
-                    writeln!(
-                        out,
-                        "Temporary space: approximately {} ({} available)",
-                        human_size(plan.required_free_bytes),
-                        human_size(plan.available_bytes)
-                    )?;
-                    for file in plan.files {
-                        let action = match file.change {
-                            orbis_pkg_util::install::ChangeKind::Add => "add",
-                            orbis_pkg_util::install::ChangeKind::Replace => "replace",
-                            orbis_pkg_util::install::ChangeKind::RemoveFromUpdate => {
-                                "remove from update"
-                            }
-                        };
-                        writeln!(out, "{action}: {}", file.path.escape_debug())?;
-                    }
-                    writeln!(
-                        out,
-                        "The base stays unchanged; paths removed from the update fall back to the base."
-                    )?;
-                }
-            } else {
-                let progress = ConsoleProgress::with_options(cli.quiet, cancelled);
-                let plan = orbis_pkg_util::install::install(&pkg, base, progress)?;
-                if !cli.quiet {
-                    diagnostic(&format!(
-                        "Installed {} version {} to {}. Previous installation is available with rollback --base {}.",
-                        plan.title_id,
-                        plan.update_version,
-                        escaped(&plan.destination),
-                        escaped(base)
-                    ));
-                }
-            }
-            Ok(0)
-        }
-        Command::Rollback { base } => {
-            orbis_pkg_util::install::rollback_with_progress(
-                base,
-                ConsoleProgress::with_options(cli.quiet, cancelled),
-            )?;
-            if !cli.quiet {
-                diagnostic("Previous installation restored.");
-            }
-            Ok(0)
-        }
-        Command::Recover { base } => {
-            orbis_pkg_util::install::recover_with_progress(
-                base,
-                ConsoleProgress::with_options(cli.quiet, cancelled),
-            )?;
-            if !cli.quiet {
-                diagnostic("Recovery and staging cleanup completed.");
-            }
-            Ok(0)
-        }
+        } => install::run(pkg_path, base, *dry_run, *json, cli, out, cancelled),
+        Command::Status { base, json } => install::status(base, *json, cli, out, cancelled),
+        Command::Rollback { base } => install::rollback(base, cli, cancelled),
+        Command::Recover { base } => install::recover(base, cli, cancelled),
         Command::Info {
             pkg_path,
             json,
@@ -145,10 +70,11 @@ pub(crate) fn run(cli: &Cli, out: &mut impl Write, cancelled: Arc<AtomicBool>) -
             pkg_path,
             output,
             force,
+            resume,
             selection,
         } => process(
             pkg_path,
-            Some((output.as_deref(), *force)),
+            Some((output.as_deref(), *force, *resume)),
             selection,
             cli,
             cancelled,
@@ -170,6 +96,9 @@ pub(crate) fn run(cli: &Cli, out: &mut impl Write, cancelled: Arc<AtomicBool>) -
             } else {
                 process(pkg_path, None, selection, cli, cancelled)
             }
+        }
+        Command::VerifyDir { directory, json } => {
+            directory::verify(directory, *json, cli, out, cancelled)
         }
         Command::Completions { shell } => {
             // Generators assume infallible writes; buffer first so a closed pipe
@@ -216,7 +145,7 @@ fn prepare_filesystem(pkg: &mut Package) -> Result<()> {
 
 fn process(
     path: &Path,
-    extraction: Option<(Option<&Path>, bool)>,
+    extraction: Option<(Option<&Path>, bool, bool)>,
     selection: &cli::Selection,
     cli: &Cli,
     cancelled: Arc<AtomicBool>,
@@ -235,7 +164,7 @@ fn process(
     }
     let progress = ConsoleProgress::with_options(quiet, cancelled);
     let start = std::time::Instant::now();
-    let report = if let Some((output, force)) = extraction {
+    let report = if let Some((output, force, resume)) = extraction {
         let destination = match output {
             Some(path) => path.to_path_buf(),
             None => {
@@ -251,7 +180,9 @@ fn process(
                 escaped(&destination)
             ));
         }
-        PkgExtractor::new(&pkg, progress, force).extract_with_options(&destination, &options)?
+        PkgExtractor::new(&pkg, progress, force)
+            .with_resume(resume)
+            .extract_with_options(&destination, &options)?
     } else {
         if !quiet {
             diagnostic(&format!("Checking {}", escaped(path)));
@@ -558,7 +489,7 @@ fn application_info(pkg: &Package) -> (Value, Value, Vec<String>) {
     }
 }
 
-fn write_json(out: &mut impl Write, value: &Value) -> Result<()> {
+fn write_json(out: &mut impl Write, value: &impl serde::Serialize) -> Result<()> {
     // Serialize before writing so serialization failures cannot leave half JSON.
     let bytes = serde_json::to_vec_pretty(value)?;
     out.write_all(&bytes)?;
@@ -577,6 +508,27 @@ fn validate_title_id(title_id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn json_serialization_failure_leaves_output_untouched() {
+        struct FailingReport;
+        impl serde::Serialize for FailingReport {
+            fn serialize<S: serde::Serializer>(
+                &self,
+                serializer: S,
+            ) -> std::result::Result<S::Ok, S::Error> {
+                use serde::ser::SerializeStruct;
+                let mut report = serializer.serialize_struct("Report", 2)?;
+                report.serialize_field("schema_version", &1)?;
+                Err(serde::ser::Error::custom(
+                    "cannot serialize remaining fields",
+                ))
+            }
+        }
+        let mut out = Vec::new();
+        assert!(write_json(&mut out, &FailingReport).is_err());
+        assert!(out.is_empty());
+    }
+
     #[test]
     fn default_output_requires_a_valid_title_id() {
         assert!(validate_title_id("CUSA03173").is_ok());

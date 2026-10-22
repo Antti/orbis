@@ -7,8 +7,8 @@ exclude = ["fuzz"]
 authors = ["videobitva"]
 license = "MIT OR Apache-2.0"
 readme = "README.md"
-repository = "https://github.com/videobitva/orbis"
-homepage = "https://github.com/videobitva/orbis"
+repository = "https://github.com/Antti/orbis"
+homepage = "https://github.com/Antti/orbis"
 
 [workspace.dependencies]
 orbis-integrity = { version = "0.1.0", path = "orbis-integrity" }

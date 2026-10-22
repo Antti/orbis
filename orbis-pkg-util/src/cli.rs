@@ -35,15 +35,24 @@ pub struct Selection {
 pub enum Command {
     /// Export the base and its installed update as one merged game directory
     #[command(
-        after_help = "Example:\n  orbis-pkg-util export --base ./games/CUSA12345 -o ./bbport-game\n\nUpdate files take precedence; unchanged files come from the base. With no installed\nupdate, exports the base alone. Uses the managed sibling -UPDATE directory and\nvalidates its inventory. Installer metadata and rollback copies are excluded.\nThe output must be a new directory outside the sources, with an existing parent.\nOn filesystems without exclusive rename (such as macOS exFAT), publication needs\na second full copy and space for two merged games. Do not use the output until\nexport succeeds; forced termination can leave a partial destination.\nKeep the emulator stopped and source files unchanged until export completes.\nThis copies files; it does not decrypt executables or check game-specific requirements."
+        after_help = "Example:\n  orbis-pkg-util export --base ./games/CUSA12345 -o ./bbport-game\n\nUpdate files take precedence; unchanged files come from the base. With no installed\nupdate, exports the base alone. Uses the managed sibling -UPDATE directory and\nvalidates its inventory. Installer metadata and rollback copies are excluded.\nThe output must be outside the sources, with an existing parent. By default it\nmust be new; --resume accepts a matching export manifest, verifies completed\nfiles, and copies missing files. Resumable output remains visible while incomplete.\nUse --dry-run to inspect versions and space; verify-dir checks exported hashes.\nWithout --resume, filesystems without exclusive rename (such as macOS exFAT)\nneed a second full copy and space for two merged games. Do not use the output until\nexport succeeds; forced termination can leave a partial destination.\nKeep the emulator stopped and source files unchanged until export completes.\nThis copies files; it does not decrypt executables or check game-specific requirements."
     )]
     Export {
         /// Original extracted base game directory used by install
         #[arg(long, value_name = "DIR")]
         base: PathBuf,
-        /// New merged game directory (must not already exist)
+        /// Merged directory (must be new unless resuming a matching export)
         #[arg(short, long, value_name = "DIR")]
         output: PathBuf,
+        /// Keep incomplete output and verify completed files when restarting
+        #[arg(long, conflicts_with = "dry_run")]
+        resume: bool,
+        /// Inspect versions, file counts, filesystem limits, and peak space without writing
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit the dry-run plan as JSON
+        #[arg(long, requires = "dry_run")]
+        json: bool,
     },
     /// Install a full-file update into the base directory's sibling -UPDATE directory
     #[command(
@@ -60,6 +69,14 @@ pub enum Command {
         dry_run: bool,
         /// Emit the dry-run plan as schema-versioned JSON
         #[arg(long, requires = "dry_run")]
+        json: bool,
+    },
+    /// Inspect installed versions, rollback, local changes, and recovery needs (no writes)
+    #[command(alias = "doctor")]
+    Status {
+        #[arg(long, value_name = "DIR")]
+        base: PathBuf,
+        #[arg(long)]
         json: bool,
     },
     /// Restore the previous managed update, or return to the base game
@@ -80,7 +97,7 @@ pub enum Command {
     },
     /// Extract metadata and filesystem contents to a directory
     #[command(
-        after_help = "Examples:\n  orbis-pkg-util extract game.pkg\n  orbis-pkg-util extract game.pkg -o ./game --path sce_sys/param.sfo --metadata-only\n  orbis-pkg-util extract game.pkg -o ./game --path textures\n\nThe default destination is ./<TITLE_ID> in the current directory. Existing files\nare preserved unless --force is supplied. Each file is published after a complete\nwrite; files completed before a later failure remain. Exit 3 means entries were\nskipped. --quiet never hides those warnings."
+        after_help = "Examples:\n  orbis-pkg-util extract game.pkg\n  orbis-pkg-util extract game.pkg -o ./game --path sce_sys/param.sfo --metadata-only\n  orbis-pkg-util extract game.pkg -o ./game --path textures\n\nThe default destination is ./<TITLE_ID> in the current directory. Existing files\nare preserved unless --force is supplied. --resume compares existing files with\nthe package and copies missing files; mismatches are preserved and reported.\nEach file is published after a complete\nwrite; files completed before a later failure remain. Exit 3 means entries were\nskipped. --quiet never hides those warnings."
     )]
     Extract {
         #[arg(value_name = "PKG_FILE")]
@@ -91,6 +108,9 @@ pub enum Command {
         /// Replace existing files after successfully writing their replacements
         #[arg(short, long)]
         force: bool,
+        /// Verify and reuse completed files; refuse mismatches instead of overwriting
+        #[arg(long, conflicts_with = "force")]
+        resume: bool,
         #[command(flatten)]
         selection: Selection,
     },
@@ -143,6 +163,13 @@ pub enum Command {
         pkg_path: PathBuf,
         #[command(flatten)]
         selection: Selection,
+    },
+    /// Check an exported directory against its SHA-256 manifest (no writes)
+    VerifyDir {
+        #[arg(value_name = "DIR")]
+        directory: PathBuf,
+        #[arg(long)]
+        json: bool,
     },
     /// Generate a shell completion script on stdout
     #[command(

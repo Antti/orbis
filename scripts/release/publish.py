@@ -21,6 +21,9 @@ def expected_assets(version: str) -> list[str]:
     return [
         f"orbis-pkg-util-{version}-linux-x86_64.AppImage",
         f"orbis-pkg-util-{version}-linux-x86_64.flatpak",
+        f"orbis-pkg-util-{version}-linux-aarch64.AppImage",
+        f"orbis-pkg-util-{version}-linux-aarch64.flatpak",
+        f"orbis-pkg-util-{version}-x86_64-pc-windows-msvc.zip",
         f"orbis-pkg-util-{version}-x86_64-apple-darwin.tar.gz",
         f"orbis-pkg-util-{version}-aarch64-apple-darwin.tar.gz",
     ]
@@ -83,9 +86,9 @@ def publish(repo: str, sha: str, version: str, directory: Path) -> None:
             raise ValueError(f"Draft release contains unexpected assets: {sorted(unexpected)}")
     if release is None:
         notes = (
-            f"Built from `{sha}`. Includes Linux x86_64 AppImage/Flatpak bundles "
-            "and unsigned macOS Intel/Apple Silicon CLI archives. "
-            "Verify downloads with SHA256SUMS. See RELEASE.md for installation."
+            f"Built from `{sha}`. Includes Linux x86_64/ARM64 AppImage/Flatpak bundles, "
+            "Windows x86_64 ZIP, and macOS Intel/Apple Silicon archives. "
+            "Verify downloads with SHA256SUMS. Mac signing status is in BUILD-INFO.txt. See RELEASE.md for installation."
         )
         release = json.loads(
             gh(

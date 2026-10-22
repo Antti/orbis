@@ -1,5 +1,5 @@
 [![crates.io](https://img.shields.io/crates/v/orbis-pkg-util)](https://crates.io/crates/orbis-pkg-util)
-[![ci](https://github.com/videobitva/orbis/actions/workflows/ci.yml/badge.svg)](https://github.com/videobitva/orbis/actions/workflows/ci.yml)
+[![ci](https://github.com/Antti/orbis/actions/workflows/ci.yml/badge.svg)](https://github.com/Antti/orbis/actions/workflows/ci.yml)
 
 # Orbis
 
@@ -7,11 +7,14 @@ A Rust library and toolset for working with PlayStation 4 PKG and PFS file forma
 
 ## Install
 
+This fork publishes binaries through [GitHub Releases](https://github.com/Antti/orbis/releases).
+To build this fork directly (the crates.io package can differ):
+
 ```bash
-cargo install orbis-pkg-util
+cargo install --git https://github.com/Antti/orbis.git --locked orbis-pkg-util
 ```
 
-See [release packages](RELEASE.md) for AppImage, Flatpak, and native macOS
+See [release packages](RELEASE.md) for Linux x86-64/ARM64 AppImage and Flatpak, Windows x86-64 ZIP, and native macOS
 installation instructions and the version-bump release process.
 
 ## Building manually
@@ -73,7 +76,10 @@ Export a single merged game directory for software that expects the update files
 in the base tree:
 
 ```sh
-orbis-pkg-util export --base ./games/CUSA12345 -o ./merged-game
+orbis-pkg-util export --base ./games/CUSA12345 -o ./merged-game --dry-run
+orbis-pkg-util export --base ./games/CUSA12345 -o ./merged-game --resume
+orbis-pkg-util verify-dir ./merged-game
+orbis-pkg-util status --base ./games/CUSA12345
 ```
 
 The installed update takes precedence over matching base files. The new directory

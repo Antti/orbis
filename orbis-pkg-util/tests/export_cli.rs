@@ -98,3 +98,227 @@ fn export_usage_and_destination_errors_explain_the_required_action() {
     assert!(completion.status.success());
     assert!(String::from_utf8_lossy(&completion.stdout).contains("export"));
 }
+
+#[test]
+fn dry_run_reports_overlay_and_space_without_creating_state_or_output() {
+    let temp = tempfile::tempdir().unwrap();
+    base_game(temp.path());
+    let output = run(
+        temp.path(),
+        &[
+            "export",
+            "--base",
+            "CUSA00000",
+            "-o",
+            "merged",
+            "--dry-run",
+            "--json",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(plan["schema_version"], 1);
+    assert_eq!(plan["base_version"], "01.00");
+    assert!(plan["update_version"].is_null());
+    assert!(plan["files"].as_u64().unwrap() >= 2);
+    assert!(
+        plan["filesystem"]["required_free_bytes"].as_u64().unwrap()
+            >= 2 * plan["bytes"].as_u64().unwrap()
+    );
+    assert!(!temp.path().join("merged").exists());
+    assert!(!temp.path().join(".CUSA00000.orbis-install").exists());
+}
+
+#[test]
+fn verifies_export_and_reports_changed_missing_and_unexpected_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    base_game(root);
+    success(&run(
+        root,
+        &["export", "--base", "CUSA00000", "-o", "merged", "-q"],
+    ));
+    let checked = run(root, &["verify-dir", "merged", "--json"]);
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
+    assert_eq!(report["base_version"], "01.00");
+    assert_eq!(report["complete"], true);
+    assert_eq!(report["issues"], serde_json::json!([]));
+    fs::write(root.join("merged/base.txt"), b"EDIT").unwrap();
+    fs::remove_file(root.join("merged/sce_sys/param.sfo")).unwrap();
+    fs::write(root.join("merged/extra"), b"EXTRA").unwrap();
+    let checked = run(root, &["verify-dir", "merged", "--json"]);
+    assert_eq!(checked.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
+    assert_eq!(
+        report["issues"],
+        serde_json::json!([
+            {"path":"base.txt","kind":"changed"}, {"path":"extra","kind":"unexpected"},
+            {"path":"sce_sys/param.sfo","kind":"missing"}
+        ])
+    );
+}
+
+#[test]
+fn refuses_unsafe_or_ambiguous_manifest_paths() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    base_game(root);
+    success(&run(
+        root,
+        &["export", "--base", "CUSA00000", "-o", "merged", "-q"],
+    ));
+    let path = root.join("merged/.orbis-export.json");
+    let original: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for unsafe_path in [
+        "../outside",
+        "/absolute",
+        "sce_sys/../escape",
+        ".orbis-export.json",
+        "BASE.TXT",
+    ] {
+        let mut manifest = original.clone();
+        let mut extra = manifest["files"][0].clone();
+        extra["path"] = unsafe_path.into();
+        manifest["files"].as_array_mut().unwrap().push(extra);
+        fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert_eq!(run(root, &["verify-dir", "merged"]).status.code(), Some(1));
+    }
+}
+
+#[test]
+fn resumes_missing_export_files_but_preserves_conflicts_and_refuses_changed_sources() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let base = base_game(root);
+    let args = [
+        "export",
+        "--base",
+        "CUSA00000",
+        "-o",
+        "merged",
+        "--resume",
+        "-q",
+    ];
+    success(&run(root, &args));
+    let before = fs::metadata(root.join("merged/base.txt"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    fs::remove_file(root.join("merged/sce_sys/param.sfo")).unwrap();
+    success(&run(root, &args));
+    assert_eq!(
+        fs::metadata(root.join("merged/base.txt"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        before
+    );
+    assert!(
+        run(root, &["verify-dir", "merged", "--json"])
+            .status
+            .success()
+    );
+    fs::write(root.join("merged/base.txt"), b"EDIT").unwrap();
+    assert_eq!(run(root, &args).status.code(), Some(1));
+    assert_eq!(fs::read(root.join("merged/base.txt")).unwrap(), b"EDIT");
+    fs::write(root.join("merged/base.txt"), b"BASE").unwrap();
+    fs::write(base.join("base.txt"), b"different base").unwrap();
+    assert_eq!(run(root, &args).status.code(), Some(1));
+    assert_eq!(fs::read(root.join("merged/base.txt")).unwrap(), b"BASE");
+}
+
+#[test]
+fn resume_requires_matching_manifest_and_force_is_not_allowed() {
+    let temp = tempfile::tempdir().unwrap();
+    base_game(temp.path());
+    fs::create_dir(temp.path().join("unowned")).unwrap();
+    assert_eq!(
+        run(
+            temp.path(),
+            &["export", "--base", "CUSA00000", "-o", "unowned", "--resume"]
+        )
+        .status
+        .code(),
+        Some(1)
+    );
+    assert!(
+        fs::read_dir(temp.path().join("unowned"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
+    assert_eq!(
+        run(
+            temp.path(),
+            &["extract", "anything.pkg", "--resume", "--force"]
+        )
+        .status
+        .code(),
+        Some(2)
+    );
+}
+
+#[test]
+fn status_is_read_only_and_reports_versions_modifications_and_recovery() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    base_game(root);
+    let args = ["status", "--base", "CUSA00000", "--json"];
+    let output = run(root, &args);
+    assert!(output.status.success());
+    assert!(!root.join(".CUSA00000.orbis-install").exists());
+    fs::write(
+        root.join("update.pkg"),
+        update("01.09", "base.txt", b"UPDATED"),
+    )
+    .unwrap();
+    success(&run(
+        root,
+        &["install", "update.pkg", "--base", "CUSA00000", "-q"],
+    ));
+    let output = run(root, &args);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["active_version"], "01.09");
+    assert_eq!(report["rollback"], "base");
+    assert_eq!(report["base_integrity"], "not_tracked");
+    fs::write(root.join("CUSA00000-UPDATE/base.txt"), b"EDIT").unwrap();
+    fs::write(
+        root.join(".CUSA00000.orbis-install/journal.json"),
+        b"pending",
+    )
+    .unwrap();
+    fs::create_dir(root.join("CUSA00000-PATCH")).unwrap();
+    let output = run(root, &["doctor", "--base", "CUSA00000", "--json"]);
+    assert_eq!(output.status.code(), Some(3));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["modified_files"], serde_json::json!(["base.txt"]));
+    assert_eq!(report["pending_recovery"], true);
+    assert!(
+        !report["unmanaged_directories"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        fs::read(root.join("CUSA00000-UPDATE/base.txt")).unwrap(),
+        b"EDIT"
+    );
+    assert_eq!(
+        fs::read(root.join(".CUSA00000.orbis-install/journal.json")).unwrap(),
+        b"pending"
+    );
+}

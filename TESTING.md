@@ -124,3 +124,11 @@ good extraction. Record package hashes, tool revision, exit status and omissions
 do not treat an incomplete result as a full pass. Use `--passcode-file` only when
 the correct package passcode is known. A real base/update pair and large retail
 packages are still needed before claiming broader compatibility.
+
+## Automated compatibility validation
+
+The [compatibility workflow](.github/workflows/compatibility.yml) tests disposable
+exFAT images on macOS/Linux, APFS, ext4, and pinned PS4Load extraction/integrity
+on Linux/macOS/Windows. It checks output manifests and resume as well as copying.
+See [validation scripts](scripts/validation/README.md) for local runs and the
+opt-in matching base/update harness; incomplete real-package checks fail closed.

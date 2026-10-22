@@ -1,8 +1,8 @@
 //! Materialize the installed base/update overlay as an independent directory.
-use super::{Result, invalid, storage};
+use super::{Result, invalid, inventory::FileRecord, storage};
 use crate::{
     ExtractError, ExtractProgress,
-    fs_output::{copy_new_directory, publish_new, unsupported_publication},
+    fs_output::{copy_new_directory, directory_identity, publish_new, unsupported_publication},
 };
 use cap_std::{ambient_authority, fs::Dir, fs::OpenOptions};
 use sha2::{Digest, Sha256};
@@ -13,8 +13,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[path = "export_plan.rs"]
+mod plan;
+use plan::PreparedExport;
+
+#[path = "export_resume.rs"]
+mod resume;
+
 /// The exported version and the bytes actually copied (overridden base files are skipped).
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct ExportReport {
     pub title_id: String,
     pub app_version: String,
@@ -22,6 +29,30 @@ pub struct ExportReport {
     pub files: usize,
     pub bytes: u64,
     pub update_files: usize,
+}
+
+/// A read-only snapshot. Revalidated when export starts.
+#[derive(Debug, serde::Serialize)]
+pub struct ExportPlan {
+    pub schema_version: u32,
+    pub title_id: String,
+    pub base_version: String,
+    pub update_version: Option<String>,
+    pub destination: PathBuf,
+    pub files: usize,
+    pub update_files: usize,
+    pub bytes: u64,
+    pub filesystem: super::FilesystemPlan,
+}
+
+pub fn plan_export(
+    base: &Path,
+    output: &Path,
+    progress: impl ExtractProgress,
+) -> Result<ExportPlan> {
+    let location = storage::Layout::open(base, false)?;
+    let destination = destination(&location, output, false)?;
+    PreparedExport::new(&location, destination.path(), &progress)?.preview(&destination.parent_path)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -56,95 +87,88 @@ pub fn export_merged<P: ExtractProgress>(
     output: &Path,
     progress: P,
 ) -> Result<ExportReport> {
+    export_impl(base, output, progress, false)
+}
+
+/// Export directly into a resumable directory. The output is visible while
+/// incomplete; rerun with resume to verify completed files and copy missing ones.
+pub fn resume_export<P: ExtractProgress>(
+    base: &Path,
+    output: &Path,
+    progress: P,
+) -> Result<ExportReport> {
+    export_impl(base, output, progress, true)
+}
+
+fn export_impl<P: ExtractProgress>(
+    base: &Path,
+    output: &Path,
+    progress: P,
+    resume: bool,
+) -> Result<ExportReport> {
     check_cancelled(&progress)?;
     // Validate the destination before creating the state directory/lock.
     let preview = storage::Layout::open(base, false)?;
-    let (parent, parent_path, destination) = destination(&preview, output)?;
+    let destination = destination(&preview, output, resume)?;
     drop(preview);
     let location = storage::Layout::open(base, true)?;
-    location.require_recovered()?;
-    let metadata = location.base_metadata()?;
-    let state = location.state()?;
-    let manifest = location.active_manifest(&state, &metadata, &progress)?;
-    let base_dir = location.base_dir()?;
-    let update_dir = if manifest.is_some() {
-        Some(location.parent.open_dir(&location.active)?)
-    } else {
-        None
-    };
-
-    progress.phase("Planning merged export");
-    let mut entries = BTreeMap::new();
-    scan(&base_dir, Layer::Base, &mut entries, &progress)?;
-    if let Some(dir) = &update_dir {
-        scan(dir, Layer::Update, &mut entries, &progress)?;
+    let mut prepared = PreparedExport::new(&location, destination.path(), &progress)?;
+    if resume {
+        resume::run(&prepared, &destination, &progress)?;
+        return Ok(prepared.report);
     }
-    let mut report = ExportReport {
-        title_id: metadata.title_id,
-        app_version: manifest
-            .as_ref()
-            .map_or_else(|| metadata.version.to_string(), |m| m.app_version.clone()),
-        destination: parent_path.join(&destination),
-        files: 0,
-        bytes: 0,
-        update_files: 0,
-    };
-    for entry in entries.values().filter(|entry| !entry.directory) {
-        report.files += 1;
-        report.update_files += usize::from(entry.layer == Layer::Update);
-        report.bytes = report
-            .bytes
-            .checked_add(entry.bytes)
-            .ok_or_else(|| invalid("export size overflows"))?;
-    }
-    let expected: BTreeMap<_, _> = manifest
-        .iter()
-        .flat_map(|m| m.files.iter().map(|file| (file.path.as_str(), file)))
-        .collect();
-    if expected.len() != report.update_files {
-        return Err(invalid("update changed during export"));
-    }
-    let stage = Stage::new(parent, destination)?;
+    prepared
+        .filesystem_plan(&destination.parent_path)?
+        .require_space()?;
+    let stage = Stage::new(destination.parent, destination.name)?;
     progress.phase("Exporting merged game");
-    progress.bytes_total(report.bytes);
-    let mut buffer = vec![0; 1024 * 1024];
-    for entry in entries.values() {
+    progress.bytes_total(prepared.report.bytes);
+    let mut records = Vec::new();
+    for entry in prepared.entries.values() {
         check_cancelled(&progress)?;
         if entry.directory {
             stage.dir.as_ref().unwrap().create_dir_all(&entry.path)?;
             continue;
         }
-        let source = match entry.layer {
-            Layer::Base => &base_dir,
-            Layer::Update => update_dir.as_ref().unwrap(),
-        };
-        let record = if entry.layer == Layer::Update {
-            Some(
-                *expected
-                    .get(entry.path.as_str())
-                    .ok_or_else(|| invalid("update changed during export"))?,
-            )
-        } else {
-            None
-        };
-        copy_file(
+        let (source, record) = prepared.source(entry)?;
+        records.push(copy_file(
             source,
             stage.dir.as_ref().unwrap(),
             entry,
             record,
-            &mut buffer,
+            &entry.path,
             &progress,
-        )?;
+        )?);
     }
+    let export_manifest = prepared.manifest(records, true);
+    storage::write_json(
+        stage.dir.as_ref().unwrap(),
+        super::directory::MANIFEST,
+        &export_manifest,
+    )?;
+    prepared.entries.insert(
+        super::directory::MANIFEST.into(),
+        Entry {
+            path: super::directory::MANIFEST.into(),
+            layer: Layer::Base,
+            directory: false,
+            bytes: 0,
+        },
+    );
     // Persist all newly created directories before publishing their common root.
-    for entry in entries.values().rev().filter(|entry| entry.directory) {
+    for entry in prepared
+        .entries
+        .values()
+        .rev()
+        .filter(|entry| entry.directory)
+    {
         check_cancelled(&progress)?;
         storage::sync_dir(&stage.dir.as_ref().unwrap().open_dir(&entry.path)?)?;
     }
     check_cancelled(&progress)?;
-    stage.publish(&entries, report.bytes, &progress)?;
+    stage.publish(&prepared.entries, prepared.report.bytes, &progress)?;
     progress.pfs_completed();
-    Ok(report)
+    Ok(prepared.report)
 }
 
 fn check_cancelled(progress: &impl ExtractProgress) -> Result<()> {
@@ -154,7 +178,23 @@ fn check_cancelled(progress: &impl ExtractProgress) -> Result<()> {
     Ok(())
 }
 
-fn destination(location: &storage::Layout, output: &Path) -> Result<(Dir, PathBuf, OsString)> {
+struct ExportDestination {
+    parent: Dir,
+    parent_path: PathBuf,
+    name: OsString,
+}
+
+impl ExportDestination {
+    fn path(&self) -> PathBuf {
+        self.parent_path.join(&self.name)
+    }
+}
+
+fn destination(
+    location: &storage::Layout,
+    output: &Path,
+    allow_existing: bool,
+) -> Result<ExportDestination> {
     let name = output
         .file_name()
         .ok_or_else(|| invalid("export output must name a new directory"))?;
@@ -183,49 +223,39 @@ fn destination(location: &storage::Layout, output: &Path) -> Result<(Dir, PathBu
         let mut sources = Vec::new();
         for source in [&location.base, &location.active, &location.root_name] {
             if storage::exists(&location.parent, source)? {
-                sources.push(directory_id(&location.parent.open_dir(source)?)?);
+                sources.push(directory_identity(&location.parent.open_dir(source)?)?);
             }
+        }
+        // Resume can accept an existing directory. Compare that root too:
+        // a case alias must not turn a source export into its own destination.
+        if allow_existing
+            && storage::exists(&dir, name)?
+            && dir.symlink_metadata(name)?.is_dir()
+            && sources.contains(&directory_identity(&dir.open_dir(name)?)?)
+        {
+            return Err(invalid(
+                "export output must be outside the base, update, and installation state",
+            ));
         }
         for ancestor in parent.ancestors() {
             let ancestor = Dir::open_ambient_dir(ancestor, ambient_authority())?;
-            if sources.contains(&directory_id(&ancestor)?) {
+            if sources.contains(&directory_identity(&ancestor)?) {
                 return Err(invalid(
                     "export output must be outside the base, update, and installation state",
                 ));
             }
         }
     }
-    if storage::exists(&dir, name)? {
+    if !allow_existing && storage::exists(&dir, name)? {
         return Err(invalid(
             "export output already exists; choose a new --output directory",
         ));
     }
-    Ok((dir, parent, name.to_owned()))
-}
-
-#[cfg(unix)]
-fn directory_id(dir: &Dir) -> Result<(u64, u64)> {
-    use cap_std::fs::MetadataExt;
-    let meta = dir.dir_metadata()?;
-    Ok((meta.dev(), meta.ino()))
-}
-
-#[cfg(windows)]
-fn directory_id(dir: &Dir) -> Result<(u64, u64)> {
-    use std::{mem::MaybeUninit, os::windows::io::AsRawHandle};
-    use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
-    };
-    let mut info = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
-    // The directory handle remains live and the API initializes info on success.
-    if unsafe { GetFileInformationByHandle(dir.as_raw_handle(), info.as_mut_ptr()) } == 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    let info = unsafe { info.assume_init() };
-    Ok((
-        u64::from(info.dwVolumeSerialNumber),
-        (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
-    ))
+    Ok(ExportDestination {
+        parent: dir,
+        parent_path: parent,
+        name: name.to_owned(),
+    })
 }
 
 fn scan(
@@ -253,7 +283,10 @@ fn scan(
                 .into_string()
                 .map_err(|_| invalid("non-UTF8 export filename"))?;
             let path = format!("{prefix}{name}");
-            if path == storage::MANIFEST {
+            if path == storage::MANIFEST
+                || path == super::directory::MANIFEST
+                || super::directory::apple_double(&dir, &name)?
+            {
                 continue;
             }
             storage::validate_path(&path)?;
@@ -293,10 +326,10 @@ fn copy_file(
     source: &Dir,
     destination: &Dir,
     entry: &Entry,
-    expected: Option<&storage::FileRecord>,
-    buffer: &mut [u8],
+    expected: Option<&FileRecord>,
+    target_path: &str,
     progress: &impl ExtractProgress,
-) -> Result<()> {
+) -> Result<FileRecord> {
     if !source.symlink_metadata(&entry.path)?.is_file() {
         return Err(invalid(format!(
             "source is no longer a regular file: {}",
@@ -311,13 +344,14 @@ fn copy_file(
             entry.path
         )));
     }
+    let mut buffer = vec![0; 1024 * 1024];
     let mut output =
-        destination.open_with(&entry.path, OpenOptions::new().write(true).create_new(true))?;
+        destination.open_with(target_path, OpenOptions::new().write(true).create_new(true))?;
     let mut hash = Sha256::new();
     let mut bytes = 0;
     loop {
         check_cancelled(progress)?;
-        let n = input.read(buffer)?;
+        let n = input.read(&mut buffer)?;
         if n == 0 {
             break;
         }
@@ -329,9 +363,7 @@ fn copy_file(
             )));
         }
         output.write_all(&buffer[..n])?;
-        if expected.is_some() {
-            hash.update(&buffer[..n]);
-        }
+        hash.update(&buffer[..n]);
         progress.bytes_processed(n as u64);
     }
     let after = input.metadata()?;
@@ -341,8 +373,9 @@ fn copy_file(
             entry.path
         )));
     }
+    let sha256 = format!("{:x}", hash.finalize());
     if let Some(record) = expected
-        && (bytes != record.bytes || format!("{:x}", hash.finalize()) != record.sha256)
+        && (bytes != record.bytes || sha256 != record.sha256)
     {
         return Err(invalid(format!(
             "update changed during export: {}",
@@ -350,7 +383,11 @@ fn copy_file(
         )));
     }
     output.sync_all()?;
-    Ok(())
+    Ok(FileRecord {
+        path: entry.path.clone(),
+        bytes,
+        sha256,
+    })
 }
 
 struct Stage {
@@ -375,7 +412,7 @@ impl Stage {
         stage.dir = Some(stage.parent.open_dir(&stage.temporary)?);
         #[cfg(any(unix, windows))]
         {
-            stage.identity = Some(directory_id(stage.dir.as_ref().unwrap())?);
+            stage.identity = Some(directory_identity(stage.dir.as_ref().unwrap())?);
         }
         Ok(stage)
     }
@@ -455,7 +492,7 @@ fn remove_staging(parent: &Dir, path: &Path, identity: Option<(u64, u64)>) -> io
     };
     // Do not recurse into a replacement directory after the original was moved.
     #[cfg(any(unix, windows))]
-    if identity != Some(directory_id(&root).map_err(io::Error::other)?) {
+    if identity != Some(directory_identity(&root)?) {
         return Ok(());
     }
     #[cfg(not(any(unix, windows)))]
