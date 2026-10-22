@@ -4,7 +4,7 @@ members = ["orbis-integrity", "orbis-pfs", "orbis-pkg", "orbis-pkg-util"]
 exclude = ["fuzz"]
 
 [workspace.package]
-authors = ["videobitva"]
+authors = ["videobitva", "Andrii Dmytrenko"]
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/Antti/orbis"
@@ -19,4 +19,4 @@ zerocopy = { version = "0.8.38" }
 
 orbis-pfs = { version = "0.1.0", path = "orbis-pfs" }
 orbis-pkg = { version = "0.1.0", path = "orbis-pkg" }
-orbis-pkg-util = { version = "0.2.0", path = "orbis-pkg-util" }
+orbis-pkg-util = { version = "0.3.0", path = "orbis-pkg-util" }

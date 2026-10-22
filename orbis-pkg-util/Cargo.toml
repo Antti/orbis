@@ -1,8 +1,8 @@
 [package]
 name = "orbis-pkg-util"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
-description = "Library and CLI for working with PlayStation 4 PKG files"
+description = "PS4 PKG extractor, integrity checker, and update installer for Windows, Linux, and macOS"
 readme = "README.md"
 license.workspace = true
 authors.workspace = true
