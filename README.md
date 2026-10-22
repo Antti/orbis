@@ -1,3 +1,5 @@
+![Orbis — PS4 package tools](assets/readme-hero.svg)
+
 # Orbis: PS4 PKG extractor and update installer
 
 [![GitHub release](https://img.shields.io/github/v/release/Antti/orbis)](https://github.com/Antti/orbis/releases/latest)
