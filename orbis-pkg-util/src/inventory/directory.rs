@@ -90,7 +90,10 @@ pub(crate) fn verify_tree(
         let current = dir.open_dir(if prefix.is_empty() { "." } else { &prefix })?;
         for entry in current.entries()? {
             let entry = entry?;
-            let name = entry.file_name().to_string_lossy().into_owned();
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| invalid("non-UTF8 export filename"))?;
             let path = if prefix.is_empty() {
                 name.clone()
             } else {
