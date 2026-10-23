@@ -43,7 +43,7 @@ signed header, inode-table and data blocks. It walks direct and supported indire
 block references and returns counts of verified and unavailable checks. Supply a
 cancellation callback for long-running checks. Unsigned images have no HMACs;
 missing keys or zero signatures never count as verified. This does not verify
-publisher authenticity. See the [CLI integrity documentation](../orbis-pkg-util/README.md#check-data-without-extracting-it)
+publisher authenticity. See the [CLI integrity documentation](../orbis-cli/README.md#check-data-without-extracting-it)
 for supported layouts and incomplete-result handling.
 
 For per-check results, use `verify_integrity_with` and a fallible observer. Events

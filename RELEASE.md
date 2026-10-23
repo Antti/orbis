@@ -1,7 +1,7 @@
 # Releases
 
 The `Release packages` workflow publishes a GitHub release when
-`orbis-pkg-util/Cargo.toml` increases its `package.version` on `master`.
+`orbis-cli/Cargo.toml` increases its `package.version` on `master`.
 The version must be a stable `major.minor.patch` value; prereleases are not
 currently supported. Unchanged versions do not publish, and decreases fail
 validation.
@@ -10,16 +10,22 @@ Each release contains:
 
 | Asset | Platform |
 | --- | --- |
-| `orbis-pkg-util-VERSION-linux-x86_64.AppImage` | Linux x86_64, static musl binary |
-| `orbis-pkg-util-VERSION-linux-x86_64.flatpak` | Linux x86_64, Freedesktop 25.08 runtime |
-| `orbis-pkg-util-VERSION-x86_64-apple-darwin.tar.gz` | Intel Mac, macOS 11 or later |
-| `orbis-pkg-util-VERSION-aarch64-apple-darwin.tar.gz` | Apple Silicon Mac, macOS 11 or later |
-| `orbis-pkg-util-VERSION-linux-aarch64.AppImage` | Linux ARM64, static musl binary |
-| `orbis-pkg-util-VERSION-linux-aarch64.flatpak` | Linux ARM64, Freedesktop 25.08 runtime |
-| `orbis-pkg-util-VERSION-x86_64-pc-windows-msvc.zip` | Windows x86-64 |
-| `SHA256SUMS` | SHA-256 checksums for all seven downloads |
+| `orbis-cli-VERSION-linux-x86_64.AppImage` | Linux x86_64, static musl binary |
+| `orbis-cli-VERSION-linux-x86_64.flatpak` | Linux x86_64, Freedesktop 25.08 runtime |
+| `orbis-cli-VERSION-x86_64-apple-darwin.tar.gz` | Intel Mac, macOS 11 or later |
+| `orbis-cli-VERSION-aarch64-apple-darwin.tar.gz` | Apple Silicon Mac, macOS 11 or later |
+| `orbis-cli-VERSION-linux-aarch64.AppImage` | Linux ARM64, static musl binary |
+| `orbis-cli-VERSION-linux-aarch64.flatpak` | Linux ARM64, Freedesktop 25.08 runtime |
+| `orbis-cli-VERSION-x86_64-pc-windows-msvc.zip` | Windows x86-64 |
+| `orbis-desktop-VERSION-x86_64-pc-windows-msvc.zip` | Windows x86-64 desktop app |
+| `orbis-desktop-VERSION-x86_64-apple-darwin.tar.gz` | Intel Mac desktop app |
+| `orbis-desktop-VERSION-aarch64-apple-darwin.tar.gz` | Apple Silicon desktop app |
+| `orbis-desktop-VERSION-x86_64-unknown-linux-gnu.tar.gz` | Linux desktop, Ubuntu 22.04+ x86-64 |
+| `orbis-desktop-VERSION-aarch64-unknown-linux-gnu.tar.gz` | Linux desktop, Ubuntu 24.04+ ARM64 |
+| `SHA256SUMS` | SHA-256 checksums for all twelve downloads |
 
-The packages contain the CLI and both project licenses. Mac archives include
+CLI packages contain the command-line tool; desktop archives contain a separate
+graphical app and `START-HERE.txt`. Both include the project licenses. Mac archives include
 `BUILD-INFO.txt` stating whether the binary was signed and notarized. Builds are
 unsigned until the optional signing configuration below is enabled; macOS may
 require explicit approval for unsigned binaries. Windows binaries are unsigned.
@@ -27,17 +33,32 @@ Flatpak bundles are unsigned and distributed through GitHub, not Flathub.
 Flathub supplies only the runtime. There is no automatic update repository for
 the application.
 
+CLI download filenames now start with `orbis-cli-`; the command inside is
+`orbis` (`orbis.exe` on Windows). Packages retain `orbis-pkg-util` as a
+compatibility executable or symlink. Update automated download filename patterns
+to the new prefix. Previously published releases keep their original assets.
+The Cargo package and source directory are `orbis-cli`. Rust consumers use
+`orbis_cli` instead of `orbis_pkg_util`. The Flatpak ID `io.github.Antti.Orbis`
+remains unchanged. Version comparisons also recognize the old
+`orbis-pkg-util/Cargo.toml` path in commits preceding the rename; renaming alone
+does not publish a release.
+The Windows desktop executable is `orbis-desktop.exe`, so it can coexist with
+`orbis.exe` in the same directory.
+
 ## Cutting a release
 
-1. Increase the CLI package version in `orbis-pkg-util/Cargo.toml`. If the
-   workspace dependency on `orbis-pkg-util` in the root `Cargo.toml` no longer
-   accepts that version, update its requirement too.
+1. Increase the CLI package version in `orbis-cli/Cargo.toml`. If the
+   workspace dependency on `orbis-cli` in the root `Cargo.toml` no longer
+   accepts that version, update its requirement and the desktop crate's dependency too.
 2. Run `cargo check --workspace` to refresh `Cargo.lock`, and commit the lockfile
    with the version change. Library versions only need changes when those crates
    are released separately.
 3. Open a PR and inspect the `Release packages` checks and downloadable workflow
    artifacts. The workflow tests optimized builds and runs each packaged CLI
    with `--help`. Check a representative real PKG before merging.
+   Launch the desktop app on each platform and exercise native dialogs, package
+   extraction, cancellation, and a base/update install. GUI packages are built
+   separately from the musl CLI on Linux.
 4. Merge to `master`. A version increase across the entire push triggers the
    build, creates tag `vVERSION` at that exact commit, uploads all assets to a
    draft, and publishes it after the uploads finish.
@@ -58,6 +79,12 @@ permissions. Unsigned releases require no third-party service secrets.
 
 ## Installing packages
 
+For desktop use, extract the matching **orbis-desktop** archive and double-click
+`orbis-desktop.exe`, `Orbis.app`, or `orbis-desktop`. Move `Orbis.app` to Applications on
+macOS. The [desktop guide](orbis-desktop/README.md) describes file selection,
+updates, Linux runtime dependencies, and limits. The following commands are for
+the CLI downloads.
+
 Replace `VERSION` with the downloaded release version and verify checksums first:
 
 ```sh
@@ -68,8 +95,8 @@ sha256sum --check --ignore-missing SHA256SUMS
 AppImage (replace `x86_64` with `aarch64` for Linux ARM64):
 
 ```sh
-chmod +x orbis-pkg-util-VERSION-linux-x86_64.AppImage
-./orbis-pkg-util-VERSION-linux-x86_64.AppImage --help
+chmod +x orbis-cli-VERSION-linux-x86_64.AppImage
+./orbis-cli-VERSION-linux-x86_64.AppImage --help
 ```
 
 If FUSE is unavailable, add `--appimage-extract-and-run` before the CLI arguments.
@@ -77,7 +104,7 @@ If FUSE is unavailable, add `--appimage-extract-and-run` before the CLI argument
 Flatpak:
 
 ```sh
-flatpak install --user ./orbis-pkg-util-VERSION-linux-x86_64.flatpak
+flatpak install --user ./orbis-cli-VERSION-linux-x86_64.flatpak
 flatpak run io.github.Antti.Orbis --help
 mkdir -p "$HOME/Orbis"
 flatpak run --filesystem="$HOME/Orbis" io.github.Antti.Orbis \
@@ -92,17 +119,17 @@ macOS:
 
 ```sh
 # Choose aarch64 for Apple Silicon or x86_64 for Intel.
-tar -xzf orbis-pkg-util-VERSION-aarch64-apple-darwin.tar.gz
-./orbis-pkg-util-VERSION-aarch64-apple-darwin/orbis-pkg-util --help
+tar -xzf orbis-cli-VERSION-aarch64-apple-darwin.tar.gz
+./orbis-cli-VERSION-aarch64-apple-darwin/orbis --help
 ```
 
 Windows (PowerShell):
 
 ```powershell
-Get-FileHash .\orbis-pkg-util-VERSION-x86_64-pc-windows-msvc.zip -Algorithm SHA256
+Get-FileHash .\orbis-cli-VERSION-x86_64-pc-windows-msvc.zip -Algorithm SHA256
 # Compare the result with the corresponding line in SHA256SUMS.
-Expand-Archive .\orbis-pkg-util-VERSION-x86_64-pc-windows-msvc.zip -DestinationPath .
-.\orbis-pkg-util-VERSION-x86_64-pc-windows-msvc\orbis-pkg-util.exe --help
+Expand-Archive .\orbis-cli-VERSION-x86_64-pc-windows-msvc.zip -DestinationPath .
+.\orbis-cli-VERSION-x86_64-pc-windows-msvc\orbis.exe --help
 ```
 
 ## Optional macOS signing and notarization
@@ -130,6 +157,8 @@ The workflow imports the certificate into a temporary keychain, enables hardened
 runtime, timestamps the signature, verifies it, and waits for Apple to accept
 notarization before archiving. The keychain is removed on exit. A standalone CLI
 cannot carry a stapled ticket; Gatekeeper needs network access to retrieve it.
+Desktop `.app` bundles use the same signing credentials and have their accepted
+notarization ticket stapled before archiving.
 Follow [Apple's notarization workflow](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow)
 for certificate and account setup. Signed release execution cannot be validated
 without these credentials; unsigned PR builds still smoke-test both Mac targets.
@@ -138,7 +167,7 @@ without these credentials; unsigned PR builds still smoke-test both Mac targets.
 
 `scripts/release/version.py` compares the pre-push commit with the checked-out
 manifest; it does not depend on commit messages or a separate version file.
-`publish.py` requires exactly seven nonempty assets before writing checksums.
+`publish.py` requires exactly twelve nonempty assets before writing checksums.
 Their tests run with Python 3.11 or later:
 
 ```sh
