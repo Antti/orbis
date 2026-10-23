@@ -156,10 +156,12 @@ Restore the original base before applying another update: **Manage game → Rest
 base** in the desktop app, or `orbis rollback --base ./games/CUSA12345`. The PKG is
 not needed for restoration. See [merge requirements and recovery](orbis-cli/README.md#merge-into-the-game-folder).
 
-Use `export` for software that expects update files inside the base game tree:
+Use `export` to copy the original base and its separate update into a new directory.
+If you merged in place, restore the base before installing a separate update.
 
 ```sh
-# Install the desired update first, using the commands above.
+# Install the desired update in separate mode first, if needed.
+orbis install update.pkg --base ./games/CUSA12345
 orbis export --base ./games/CUSA12345 -o ./merged-game --dry-run
 orbis export --base ./games/CUSA12345 -o ./merged-game --resume
 orbis verify-dir ./merged-game

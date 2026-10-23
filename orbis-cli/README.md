@@ -529,6 +529,8 @@ orbis doctor --base ./CUSA12345 --json
 
 `doctor` is an alias for `status`. Both show base/update versions, rollback,
 pending recovery, unmanaged patch directories, and changed managed files. They
-verify the managed update and rollback inventories; the original extracted base
-has no trusted inventory, so its file integrity is explicitly reported as untracked.
+verify the managed update and rollback inventories in separate mode; the original
+extracted base has no trusted inventory, so its file integrity is reported as untracked.
+For a committed merge, diagnostics check touched game files and retained originals;
+untouched base files are not verified.
 Exit 3 means attention is needed. Diagnostics never repair or remove files.
