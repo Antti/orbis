@@ -30,6 +30,7 @@
 pub mod extract;
 mod fs_output;
 pub mod install;
+mod inventory;
 pub mod progress;
 
 #[cfg(test)]

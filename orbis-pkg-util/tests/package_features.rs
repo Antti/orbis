@@ -345,8 +345,20 @@ fn info_keeps_integer_and_binary_types_and_escapes_terminal_text() {
     let output = run(dir.path(), &["info", "game.pkg", "--json"]);
     assert_code(&output, 0);
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["application"]["required_system_version"], "9.03");
-    assert_eq!(value["application"]["build"]["sdk_ver"], "09030000");
+    assert_eq!(
+        value["application"],
+        serde_json::json!({
+            "app_version": "02.03",
+            "build": {"c_date": "20261020", "sdk_ver": "09030000"},
+            "category": null,
+            "content_id": null,
+            "package_version": null,
+            "region_from_content_id": "North America",
+            "required_system_version": "9.03",
+            "title": "Demo\u{1b}[31m",
+            "title_id": null,
+        })
+    );
     assert_eq!(
         value["sfo"]["SYSTEM_VER"],
         serde_json::json!({"type": "integer", "value": 0x09030000u32})
@@ -355,9 +367,32 @@ fn info_keeps_integer_and_binary_types_and_escapes_terminal_text() {
         value["sfo"]["BLOB"],
         serde_json::json!({"type": "binary", "hex": "00ff80"})
     );
+    // Preserve the existing sorted JSON order, including binary field keys.
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!("{}\n", serde_json::to_string_pretty(&value).unwrap())
+    );
     let output = run(dir.path(), &["info", "game.pkg", "--sfo"]);
     assert_code(&output, 0);
     assert!(!output.stdout.contains(&0x1b));
+    let text = String::from_utf8(output.stdout).unwrap();
+    let (_, application) = text.split_once("\nApplication:\n").unwrap();
+    assert_eq!(
+        application,
+        concat!(
+            "  app_version: 02.03\n",
+            "  build: {\"c_date\":\"20261020\",\"sdk_ver\":\"09030000\"}\n",
+            "  region_from_content_id: North America\n",
+            "  required_system_version: 9.03\n",
+            "  title: Demo\\u{1b}[31m\n",
+            "\nPARAM.SFO:\n",
+            "  APP_VER: {\"type\":\"string\",\"value\":\"02.03\"}\n",
+            "  BLOB: {\"hex\":\"00ff80\",\"type\":\"binary\"}\n",
+            "  PUBTOOLINFO: {\"type\":\"string\",\"value\":\"sdk_ver=09030000, c_date=20261020\"}\n",
+            "  SYSTEM_VER: {\"type\":\"integer\",\"value\":151191552}\n",
+            "  TITLE: {\"type\":\"string\",\"value\":\"Demo\\u001b[31m\"}\n",
+        )
+    );
 }
 
 fn named_pkg(name: &[u8]) -> Vec<u8> {

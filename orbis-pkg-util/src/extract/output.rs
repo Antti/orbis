@@ -4,7 +4,7 @@ use cap_std::{
     ambient_authority,
     fs::{Dir, File, OpenOptions},
 };
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::{
     io,
     io::{Read, Write},
@@ -296,9 +296,5 @@ impl Output {
 }
 
 pub(super) fn valid_name(name: &str) -> bool {
-    let mut components = Path::new(name).components();
-    !name.is_empty()
-        && !name.contains(['/', '\\', ':', '\0'])
-        && matches!(components.next(), Some(Component::Normal(_)))
-        && components.next().is_none()
+    orbis_pkg::path::ComponentPolicy::Extraction.accepts(name)
 }

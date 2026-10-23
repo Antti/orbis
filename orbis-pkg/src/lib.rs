@@ -57,6 +57,7 @@ pub mod integrity;
 pub mod keys;
 mod names;
 pub mod passcode;
+pub mod path;
 pub mod sfo;
 pub use names::EntryNameError;
 

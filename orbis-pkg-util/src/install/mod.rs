@@ -5,7 +5,6 @@
 //! renames, not a cross-platform atomic directory exchange. Stop the emulator first.
 mod directory;
 mod export;
-mod inventory;
 pub use directory::{DirectoryIssue, DirectoryIssueKind, DirectoryReport, verify_directory};
 mod preflight;
 mod status;
@@ -64,6 +63,20 @@ impl From<orbis_pkg::sfo::SfoError> for InstallError {
 impl From<serde_json::Error> for InstallError {
     fn from(source: serde_json::Error) -> Self {
         Self::State { source }
+    }
+}
+impl From<crate::inventory::InventoryError> for InstallError {
+    fn from(error: crate::inventory::InventoryError) -> Self {
+        use crate::inventory::InventoryError;
+        match error {
+            InventoryError::Invalid { message } => Self::Invalid { message },
+            InventoryError::Io { source } => Self::Io { source },
+            InventoryError::Json { source } => Self::State { source },
+            InventoryError::ManifestTooLarge => invalid("installation manifest is too large"),
+            InventoryError::Cancelled => Self::Extract {
+                source: ExtractError::Cancelled,
+            },
+        }
     }
 }
 pub(crate) fn invalid(message: impl Into<String>) -> InstallError {

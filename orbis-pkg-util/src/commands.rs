@@ -13,6 +13,7 @@ use std::sync::{Arc, atomic::AtomicBool};
 
 mod directory;
 mod export;
+mod info;
 mod install;
 mod verify;
 
@@ -74,7 +75,7 @@ pub(crate) fn run(cli: &Cli, out: &mut impl Write, cancelled: Arc<AtomicBool>) -
             json,
             header_only,
             sfo,
-        } => info(pkg_path, *json, *header_only, *sfo, cli, out),
+        } => info::run(pkg_path, *json, *header_only, *sfo, cli, out),
         Command::List {
             pkg_path,
             entries,
@@ -241,120 +242,6 @@ fn process(
     Ok(0)
 }
 
-fn info(
-    path: &Path,
-    as_json: bool,
-    header_only: bool,
-    all_sfo: bool,
-    cli: &Cli,
-    out: &mut impl Write,
-) -> Result<u8> {
-    let mut pkg = open(
-        path,
-        if header_only {
-            None
-        } else {
-            cli.passcode_file.as_deref()
-        },
-    )?;
-    let (application, sfo, warnings) = if header_only {
-        (Value::Null, Value::Null, Vec::new())
-    } else {
-        let _ = pkg.load_entry_keys();
-        application_info(&pkg)
-    };
-    let header = pkg.header();
-    let id = header.content_id();
-    if as_json {
-        write_json(
-            out,
-            &json!({
-                "schema_version": 1,
-                "package": path.to_string_lossy(),
-                "application": application, "sfo": sfo, "warnings": warnings,
-                "metadata": {
-                    "content_id": id.as_str(), "service_id": id.service_id(),
-                    "publisher_code": id.publisher_code(), "title_id": id.title_id(),
-                    "content_version": id.version(), "label": id.label(),
-                    "content_type": header.content_type(), "content_type_name": header.content_type_name(),
-                    "content_flags": header.content_flags().bits(), "content_flags_name": header.content_flags().to_string(),
-                    "drm_type": header.drm_type(), "drm_type_name": header.drm_type_name(),
-                    "pkg_type": header.pkg_type(), "pkg_size": header.pkg_size(),
-                    "file_count": header.file_count(), "entry_count": header.entry_count(),
-                    "table_offset": header.table_offset(), "pfs_offset": header.pfs_offset(), "pfs_size": header.pfs_size(),
-                }
-            }),
-        )?;
-    } else {
-        writeln!(out, "PKG: {}\n", escaped(path))?;
-        writeln!(out, "Content ID:       {}", id.as_str().escape_debug())?;
-        writeln!(out, "  Service ID:     {}", id.service_id().escape_debug())?;
-        writeln!(
-            out,
-            "  Publisher:      {}",
-            id.publisher_code().escape_debug()
-        )?;
-        writeln!(out, "  Title ID:       {}", id.title_id().escape_debug())?;
-        writeln!(out, "  Content version: {}", id.version().escape_debug())?;
-        writeln!(out, "  Label:          {}", id.label().escape_debug())?;
-        writeln!(
-            out,
-            "Content Type:     0x{:02X} ({})",
-            header.content_type(),
-            header.content_type_name()
-        )?;
-        writeln!(out, "Content Flags:    {}", header.content_flags())?;
-        writeln!(
-            out,
-            "DRM Type:         0x{:02X} ({})",
-            header.drm_type(),
-            header.drm_type_name()
-        )?;
-        writeln!(out, "PKG Type:         0x{:08X}", header.pkg_type())?;
-        writeln!(
-            out,
-            "PKG Size:         {} ({} bytes)",
-            human_size(header.pkg_size()),
-            header.pkg_size()
-        )?;
-        writeln!(out, "File Count:       {}", header.file_count())?;
-        writeln!(out, "Entry Count:      {}", header.entry_count())?;
-        writeln!(out, "Table Offset:     0x{:X}", header.table_offset())?;
-        writeln!(out, "PFS Offset:       0x{:X}", header.pfs_offset())?;
-        writeln!(
-            out,
-            "PFS Size:         {} ({} bytes)",
-            human_size(header.pfs_size() as u64),
-            header.pfs_size()
-        )?;
-    }
-    if !as_json && !application.is_null() {
-        writeln!(out, "\nApplication:")?;
-        for (key, value) in application.as_object().unwrap() {
-            if !value.is_null() {
-                writeln!(
-                    out,
-                    "  {key}: {}",
-                    value
-                        .as_str()
-                        .map(|s| s.escape_debug().to_string())
-                        .unwrap_or_else(|| value.to_string())
-                )?;
-            }
-        }
-        if all_sfo {
-            writeln!(out, "\nPARAM.SFO:")?;
-            for (key, value) in sfo.as_object().unwrap() {
-                writeln!(out, "  {}: {}", key.escape_debug(), value)?;
-            }
-        }
-    }
-    for warning in &warnings {
-        diagnostic(&format!("warning: {warning}"));
-    }
-    Ok(if warnings.is_empty() { 0 } else { 3 })
-}
-
 fn list(
     path: &Path,
     entries_only: bool,
@@ -431,67 +318,6 @@ fn item_source(item: &ListedItem) -> &'static str {
         "metadata"
     } else {
         "filesystem"
-    }
-}
-
-fn application_info(pkg: &Package) -> (Value, Value, Vec<String>) {
-    use orbis_pkg::sfo::{Sfo, Value as SfoValue};
-    let read = || -> Result<(Value, Value)> {
-        let Some(data) = pkg.param_sfo_data()? else {
-            return Ok((Value::Null, Value::Null));
-        };
-        let sfo = Sfo::parse(&data)?;
-        let fields: serde_json::Map<String, Value> = sfo.entries().map(|(key, value)| {
-            let value = match value {
-                SfoValue::String(s) => json!({"type": "string", "value": s}),
-                SfoValue::Integer(n) => json!({"type": "integer", "value": n}),
-                SfoValue::Binary(b) => json!({"type": "binary", "hex": b.iter().map(|v| format!("{v:02x}")).collect::<String>()}),
-            };
-            (key.to_owned(), value)
-        }).collect();
-        let firmware = match sfo.get("SYSTEM_VER") {
-            Some(SfoValue::Integer(n)) => Some(format!("{:x}.{:02x}", n >> 24, (n >> 16) & 0xff)),
-            _ => None,
-        };
-        let build: serde_json::Map<String, Value> = sfo
-            .string("PUBTOOLINFO")
-            .unwrap_or("")
-            .split(',')
-            .filter_map(|field| field.split_once('='))
-            .map(|(key, value)| (key.trim().to_owned(), json!(value.trim())))
-            .collect();
-        let region = match pkg.header().content_id().service_id() {
-            "UP" => Some("North America"),
-            "EP" => Some("Europe"),
-            "JP" => Some("Japan"),
-            "HP" => Some("Asia"),
-            _ => None,
-        };
-        Ok((
-            json!({
-                "title": sfo.string("TITLE").ok(),
-                "title_id": sfo.string("TITLE_ID").ok(),
-                "content_id": sfo.string("CONTENT_ID").ok(),
-                "app_version": sfo.string("APP_VER").ok(),
-                "package_version": sfo.string("VERSION").ok(),
-                "category": sfo.string("CATEGORY").ok(),
-                "required_system_version": firmware,
-                "region_from_content_id": region,
-                "build": build,
-            }),
-            Value::Object(fields),
-        ))
-    };
-    match read() {
-        Ok((application, sfo)) => (application, sfo, vec![]),
-        Err(error) => (
-            Value::Null,
-            Value::Null,
-            vec![format!(
-                "PARAM.SFO unavailable: {}; showing header metadata",
-                error_message(error.as_ref())
-            )],
-        ),
     }
 }
 
