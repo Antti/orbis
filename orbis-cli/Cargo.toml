@@ -1,6 +1,6 @@
 [package]
 name = "orbis-cli"
-version = "0.4.0"
+version = "0.4.1"
 default-run = "orbis"
 edition = "2024"
 description = "PS4 PKG extractor, integrity checker, and update installer for Windows, Linux, and macOS"

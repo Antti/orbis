@@ -49,12 +49,24 @@ impl<R: AsRef<[u8]>> Pkg<R> {
             .entries()
             .map(|e| e.map(|(_, e)| e).map_err(|e| invalid(e.to_string())))
             .collect::<io::Result<Vec<_>>>()?;
+        let bytes = |entry: &PkgEntry| {
+            let size = entry.data_size() as u64;
+            // Encrypted entry sizes describe the plaintext, but stored hashes
+            // cover whole AES blocks, including the final padding bytes.
+            // Widen the u32 size before rounding so it cannot overflow.
+            let stored_size = if entry.is_encrypted() {
+                (size + 15) & !15
+            } else {
+                size
+            };
+            self.stored_range(entry.data_offset() as u64, stored_size)
+        };
         let mut ids = HashSet::new();
         for entry in &entries {
             if !ids.insert(entry.id()) {
                 return Err(invalid("duplicate PKG entry ID"));
             }
-            self.stored_range(entry.data_offset() as u64, entry.data_size() as u64)?;
+            bytes(entry)?;
         }
         let mut report = IntegrityReport::default();
         let mut check = |name: &str, expected: &[u8], parts: &[&[u8]]| -> io::Result<()> {
@@ -98,9 +110,6 @@ impl<R: AsRef<[u8]>> Pkg<R> {
             &[self.stored_range(header.pkg_body_offset.get(), header.pkg_body_size.get())?],
         )?;
         let find = |id| entries.iter().find(|e| e.entry_id() == id);
-        let bytes = |entry: &PkgEntry| {
-            self.stored_range(entry.data_offset() as u64, entry.data_size() as u64)
-        };
         if let Some(digests) = find(EntryId::Digests) {
             let table = bytes(digests)?;
             if table.len() < entries.len() * 32 {

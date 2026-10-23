@@ -64,14 +64,15 @@ matrix and library-only checks without additional dependencies.
 Directory-identity checks also cover case aliases on case-insensitive volumes.
 The available PS4Load homebrew extraction could not exercise a real export: its
 `LOAD00044` title ID is outside the installer's supported `CUSA` identities. Merged
-exports have synthetic base/update coverage, not a verified Bloodborne launch.
+exports also have the local real-package coverage described below; no Bloodborne
+launch has been verified.
 
 Synthetic fixtures do not replace compatibility checks against real packages.
 Before a release, extract a known package and compare file contents with a trusted
 reference extraction. For installation, use a representative original base plus
 full-file update, compare the resulting update tree with a trusted extraction,
 check the version in shadPS4, and exercise upgrade/rollback while the emulator is
-stopped. No real base/update pair was available during implementation.
+stopped. The local validation below supplements the synthetic implementation tests.
 
 ## Fuzzing
 
@@ -137,8 +138,54 @@ target/release/orbis extract sample.pkg --output ./sample-extracted
 Compare extracted files against published source assets or an independent known
 good extraction. Record package hashes, tool revision, exit status and omissions;
 do not treat an incomplete result as a full pass. Use `--passcode-file` only when
-the correct package passcode is known. A real base/update pair and large retail
-packages are still needed before claiming broader compatibility.
+the correct package passcode is known. Broader compatibility still requires more
+representative packages and platforms.
+
+## Real base/update validation (2026-10-23)
+
+Local Bloodborne GOTY packages for `CUSA03173`, base `01.00` and cumulative
+update `01.09`, were supplied on an exFAT USB drive for macOS arm64 validation.
+Package bytes are not included in the repository. Sample SHA-256 values:
+
+- Base, 31,351,111,680 bytes: `7d574cc0b0716755c093f3fbedee8d302d82d9894922c1972c12956c69b4d992`
+- Update, 181,338,112 bytes: `a138cfdc6133d7718dca77a3ef05072d50020d8e987c21be8d795980f78ff818`
+
+Both packages exposed a verifier bug at `sce_sys/npbind.dat` (entry `0x403`):
+the entry declares 532 logical bytes, but its stored digest covers 544 bytes of
+AES-aligned ciphertext. Independent Python SHA-256 checks confirmed both hashes
+when including the padding. The verifier now hashes the padded encrypted range
+and validates its bounds; unencrypted entries retain their exact lengths.
+Synthetic regressions cover padding corruption, truncated padding even when a
+digest is missing, plaintext alignment, and length overflow. The false mismatch
+and missed-truncation tests failed before the fix.
+
+The standard FPKG default passcode matched all seven stored entry-key digests.
+Without it, base extraction explicitly omits `sce_sys/license.info` and returns
+exit 3; supplying it recovers that metadata file. The update needs no passcode.
+
+With the padding fix, full `verify --integrity --json` returned exit 0 for both:
+the base passed 29 stored SHA-256 checks and 478,187 PFS HMAC checks; the update
+passed 43 and 2,606 respectively. Readability and decompression passed with no
+skipped files or unavailable checks. The base verification used the validated
+default passcode. This establishes stored-data consistency, not authenticity.
+
+Extraction and mutable workflows used disposable APFS destinations; USB inputs
+and the existing game directory were left unchanged. The base extraction contains
+28,831 files (31,513,388,912 bytes), and the update contains 442 files
+(185,419,244 bytes). Separate installation reports `01.09` and its entire file
+tree matches a standalone extraction of the update. The exported overlay contains
+28,850 files (31,438,466,019 bytes); both manifest verification and an independent
+Python comparison of all file SHA-256 values and directory paths passed.
+
+Export resume passed. Separate-update rollback preserved the base inventory, and
+the exported copy still passed manifest verification afterward. In-place merge
+reported `01.09` and matched the same independently calculated overlay. Merge
+rollback restored all original file hashes and directory paths exactly, including
+the base `01.00` metadata. Status then reported no active update or recovery issues.
+
+These checks exercise CLI/library behavior on macOS with APFS output. They do not
+establish game launch compatibility, publisher authenticity, an independent
+reference extraction, Windows/Linux behavior, or merge support on exFAT.
 
 ## Automated compatibility validation
 
