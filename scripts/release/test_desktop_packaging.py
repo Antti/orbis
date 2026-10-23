@@ -26,13 +26,13 @@ class DesktopPackagingTests(unittest.TestCase):
                 prefix = f"orbis-desktop-1.2.3-{target}"
                 if target.endswith("windows-msvc"):
                     with zipfile.ZipFile(archive) as source:
-                        self.assertEqual(source.read(f"{prefix}/orbis-desktop.exe"), binary.read_bytes())
-                        self.assertIn(b"Double-click orbis-desktop.exe", source.read(f"{prefix}/START-HERE.txt"))
+                        self.assertEqual(source.read(f"{prefix}/Orbis.exe"), binary.read_bytes())
+                        self.assertIn(b"Double-click Orbis.exe", source.read(f"{prefix}/START-HERE.txt"))
                         self.assertIn(f"{prefix}/LICENSE-MIT", source.namelist())
                         self.assertIn(b"SIL OPEN FONT LICENSE", source.read(f"{prefix}/licenses/Inter-OFL.txt"))
                 else:
                     with tarfile.open(archive) as source:
-                        suffix = "Orbis.app/Contents/MacOS/orbis-desktop" if target.endswith("apple-darwin") else "orbis-desktop"
+                        suffix = "Orbis.app/Contents/MacOS/orbis-desktop" if target.endswith("apple-darwin") else "Orbis"
                         executable = source.getmember(f"{prefix}/{suffix}")
                         self.assertTrue(executable.mode & 0o111)
                         self.assertEqual(source.extractfile(executable).read(), binary.read_bytes())
@@ -41,9 +41,13 @@ class DesktopPackagingTests(unittest.TestCase):
                         self.assertIn(b"SIL OPEN FONT LICENSE", source.extractfile(f"{prefix}/{licenses}/Inter-OFL.txt").read())
                         if target.endswith("apple-darwin"):
                             plist = plistlib.loads(source.extractfile(f"{prefix}/Orbis.app/Contents/Info.plist").read())
+                            self.assertEqual(plist["CFBundleName"], "Orbis")
+                            self.assertEqual(plist["CFBundleDisplayName"], "Orbis")
                             self.assertEqual(plist["CFBundleExecutable"], "orbis-desktop")
                             self.assertEqual(plist["CFBundleShortVersionString"], "1.2.3")
                             self.assertNotIn("CFBundleDocumentTypes", plist)
+                        else:
+                            self.assertIn(b"Double-click Orbis in your file manager", source.extractfile(f"{prefix}/START-HERE.txt").read())
 
     def test_signing_failure_does_not_create_an_archive(self):
         with tempfile.TemporaryDirectory() as directory:

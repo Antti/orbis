@@ -42,8 +42,9 @@ The Cargo package and source directory are `orbis-cli`. Rust consumers use
 remains unchanged. Version comparisons also recognize the old
 `orbis-pkg-util/Cargo.toml` path in commits preceding the rename; renaming alone
 does not publish a release.
-The Windows desktop executable is `orbis-desktop.exe`, so it can coexist with
-`orbis.exe` in the same directory.
+The desktop app is `Orbis.exe` on Windows, `Orbis.app` on macOS, and `Orbis` on
+Linux. Keep the desktop and CLI downloads in their separate archive folders:
+Windows treats `Orbis.exe` and the CLI's `orbis.exe` as the same filename.
 
 ## Cutting a release
 
@@ -80,7 +81,7 @@ permissions. Unsigned releases require no third-party service secrets.
 ## Installing packages
 
 For desktop use, extract the matching **orbis-desktop** archive and double-click
-`orbis-desktop.exe`, `Orbis.app`, or `orbis-desktop`. Move `Orbis.app` to Applications on
+`Orbis.exe`, `Orbis.app`, or `Orbis`. Move `Orbis.app` to Applications on
 macOS. The [desktop guide](orbis-desktop/README.md) describes file selection,
 updates, Linux runtime dependencies, and limits. The following commands are for
 the CLI downloads.

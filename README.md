@@ -50,7 +50,7 @@ before installation. This example uses a synthetic sample package.
 
 The desktop app, merge mode, and renamed CLI downloads require **v0.4.0 or later**.
 For the graphical app, extract an **orbis-desktop** archive and double-click
-`orbis-desktop.exe` (Windows), `Orbis.app` (macOS), or `orbis-desktop` (Linux).
+`Orbis.exe` (Windows), `Orbis.app` (macOS), or `Orbis` (Linux).
 Choose **Open PKG**, then extract files or
 preview and install a supported update. See the [desktop guide](orbis-desktop/README.md)
 for platform requirements and source builds (`cargo run -p orbis-desktop --locked`).

@@ -9,9 +9,11 @@ See the [desktop screenshots](../README.md#desktop-screenshots) for package insp
 ## Open the app
 
 Use an **orbis-desktop** archive from v0.4.0 or later.
-Extract the archive, then open `orbis-desktop.exe` on Windows, `Orbis.app` on macOS, or
-`orbis-desktop` on Linux. On macOS, move the app to Applications first.
+Extract the archive, then open `Orbis.exe` on Windows, `Orbis.app` on macOS, or
+`Orbis` on Linux. On macOS, move the app to Applications first.
 The separate **orbis-cli** downloads provide the `orbis` command-line tool.
+Keep the desktop and CLI in separate folders on Windows, where `Orbis.exe` and
+`orbis.exe` are the same filename.
 Older `orbis-pkg-util` downloads are also command-line tools.
 
 Click **Open PKG**, or drop one PKG onto the window. The compact summary shows
@@ -56,7 +58,7 @@ separate updates, passcodes, merged export, and advanced verification remain in
 the [CLI](../orbis-cli/README.md).
 
 The app accepts one package path as its first argument. Windows **Open with** can
-use `orbis-desktop.exe`; Linux launchers can pass a file path. The app does not change
+use `Orbis.exe`; Linux launchers can pass a file path to `Orbis`. The app does not change
 default file associations. On macOS, use the app's picker or drag and drop;
 Finder document-open events are not supported in this version.
 

@@ -53,11 +53,11 @@ def package(version: str, target: str, binary: Path, output: Path) -> Path:
                 }, stream)
             launch = "Move Orbis.app to Applications, then double-click it."
         elif target.endswith("windows-msvc"):
-            executable = root / "orbis-desktop.exe"
-            launch = "Double-click orbis-desktop.exe."
+            executable = root / "Orbis.exe"
+            launch = "Double-click Orbis.exe. Keep the desktop and CLI downloads in separate folders."
         else:
-            executable = root / "orbis-desktop"
-            launch = "Double-click orbis-desktop in your file manager."
+            executable = root / "Orbis"
+            launch = "Double-click Orbis in your file manager."
         shutil.copyfile(binary, executable)
         executable.chmod(0o755)
         # Keep the font license with the app even when users move only Orbis.app.
