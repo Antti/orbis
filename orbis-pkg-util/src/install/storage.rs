@@ -1,16 +1,11 @@
-use super::inventory::{FileRecord, hash_file};
 use super::*;
+use crate::inventory::{FileRecord, InventoryDiff, compare_records, hash_file};
 use cap_std::{ambient_authority, fs::OpenOptions};
 use fs2::FileExt;
 use serde::de::DeserializeOwned;
-use std::{
-    ffi::OsString,
-    io::{Read, Write},
-    path::Component,
-};
+use std::{ffi::OsString, io::Read};
 
 pub(super) const MANIFEST: &str = ".orbis-install.json";
-const MAX_JSON: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
@@ -260,43 +255,15 @@ fn require_file(dir: &Dir, path: impl AsRef<Path>) -> Result<()> {
     }
     Ok(())
 }
+// Keep installation error variants and source chains stable at this boundary.
 pub(super) fn read_json<T: DeserializeOwned>(dir: &Dir, name: &str) -> Result<T> {
-    require_file(dir, name)?;
-    let mut data = Vec::new();
-    dir.open(name)?.take(MAX_JSON + 1).read_to_end(&mut data)?;
-    if data.len() as u64 > MAX_JSON {
-        return Err(invalid("installation manifest is too large"));
-    }
-    Ok(serde_json::from_slice(&data)?)
+    Ok(crate::inventory::read_json(dir, name)?)
 }
 pub(super) fn write_json(dir: &Dir, name: &str, value: &impl Serialize) -> Result<()> {
-    let data = serde_json::to_vec(value)?;
-    // Never activate an update whose manifest our own recovery reader refuses.
-    if data.len() as u64 > MAX_JSON {
-        return Err(invalid("installation manifest is too large"));
-    }
-    let tmp = format!(".write-{:032x}.tmp", fastrand::u128(..));
-    let result = (|| {
-        let mut file = dir.open_with(&tmp, OpenOptions::new().write(true).create_new(true))?;
-        file.write_all(&data)?;
-        file.sync_all()?;
-        drop(file);
-        dir.rename(&tmp, dir, name)?;
-        sync_dir(dir)
-    })();
-    if result.is_err() {
-        let _ = dir.remove_file(tmp);
-    }
-    result
+    Ok(crate::inventory::write_json(dir, name, value)?)
 }
 pub(super) fn sync_dir(dir: &Dir) -> Result<()> {
-    #[cfg(unix)]
-    // On Linux, Dir may hold an O_PATH descriptor, which fsync rejects with
-    // EBADF. Reopen "." for reading while retaining the directory capability.
-    dir.open(".")?.sync_all()?;
-    #[cfg(not(unix))]
-    let _ = dir;
-    Ok(())
+    Ok(crate::inventory::sync_dir(dir)?)
 }
 pub(super) fn app_metadata(dir: &Dir) -> Result<AppMetadata> {
     require_directory(dir, "sce_sys")?;
@@ -316,22 +283,7 @@ pub(super) fn validate_path(path: &str) -> Result<()> {
         return Err(invalid("package uses a reserved installation path"));
     }
     for part in path.split('/') {
-        let stem = part.split('.').next().unwrap().to_ascii_uppercase();
-        let device = ["CON", "PRN", "AUX", "NUL"].contains(&stem.as_str())
-            || (stem.len() == 4
-                && (stem.starts_with("COM") || stem.starts_with("LPT"))
-                && matches!(stem.as_bytes()[3], b'1'..=b'9'));
-        if part.is_empty()
-            || part.ends_with(['.', ' '])
-            || device
-            || part
-                .chars()
-                .any(|c| c.is_control() || "<>:\"\\|?*".contains(c))
-            || !matches!(
-                Path::new(part).components().next(),
-                Some(Component::Normal(_))
-            )
-        {
+        if !orbis_pkg::path::ComponentPolicy::Installation.accepts(part) {
             return Err(invalid(format!("unsupported installation path: {path}")));
         }
     }
@@ -420,13 +372,6 @@ pub(super) fn validate_manifest_metadata(
     Ok(())
 }
 
-pub(super) struct InventoryDiff {
-    pub matches: bool,
-    pub modified_files: Vec<String>,
-}
-
-/// Compare the complete record list as well as individual paths: duplicate or
-/// reordered manifest records must not silently pass diagnostics.
 pub(super) fn compare_inventory(
     dir: &Dir,
     manifest: &Manifest,
@@ -439,30 +384,7 @@ pub(super) fn compare_inventory(
         .ok_or_else(|| invalid("manifest size overflows"))?;
     progress.bytes_total(total);
     let actual = inventory(dir, progress)?;
-    let matches = actual == manifest.files;
-    if matches {
-        return Ok(InventoryDiff {
-            matches,
-            modified_files: Vec::new(),
-        });
-    }
-    let expected: std::collections::BTreeMap<_, _> = manifest
-        .files
-        .iter()
-        .map(|f| (f.path.as_str(), f))
-        .collect();
-    let actual: std::collections::BTreeMap<_, _> =
-        actual.iter().map(|f| (f.path.as_str(), f)).collect();
-    let paths: BTreeSet<_> = expected.keys().chain(actual.keys()).copied().collect();
-    let modified_files = paths
-        .into_iter()
-        .filter(|path| expected.get(path) != actual.get(path))
-        .map(str::to_owned)
-        .collect();
-    Ok(InventoryDiff {
-        matches,
-        modified_files,
-    })
+    Ok(compare_records(&manifest.files, &actual))
 }
 
 #[cfg(test)]
@@ -537,7 +459,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let dir = Dir::open_ambient_dir(temp.path(), ambient_authority()).unwrap();
         write_json(&dir, "state.json", &State::default()).unwrap();
-        let oversized = "x".repeat(MAX_JSON as usize);
+        let oversized = "x".repeat(crate::inventory::MAX_JSON as usize);
         assert!(write_json(&dir, "state.json", &oversized).is_err());
         let state: State = read_json(&dir, "state.json").unwrap();
         assert_eq!(state, State::default());

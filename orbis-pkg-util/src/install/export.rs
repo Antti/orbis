@@ -1,5 +1,6 @@
 //! Materialize the installed base/update overlay as an independent directory.
-use super::{Result, invalid, inventory::FileRecord, storage};
+use super::{Result, invalid, storage};
+use crate::inventory::FileRecord;
 use crate::{
     ExtractError, ExtractProgress,
     fs_output::{copy_new_directory, directory_identity, publish_new, unsupported_publication},
@@ -285,7 +286,7 @@ fn scan(
             let path = format!("{prefix}{name}");
             if path == storage::MANIFEST
                 || path == super::directory::MANIFEST
-                || super::directory::apple_double(&dir, &name)?
+                || crate::inventory::apple_double(&dir, &name)?
             {
                 continue;
             }

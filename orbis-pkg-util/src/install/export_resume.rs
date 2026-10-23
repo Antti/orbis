@@ -1,6 +1,6 @@
 use super::super::directory::{self, DirectoryIssueKind};
-use super::super::inventory::hash_file;
 use super::*;
+use crate::inventory::hash_file;
 
 pub(super) fn run(
     prepared: &PreparedExport,

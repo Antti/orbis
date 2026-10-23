@@ -5,7 +5,6 @@
 //! renames, not a cross-platform atomic directory exchange. Stop the emulator first.
 mod directory;
 mod export;
-mod inventory;
 pub use directory::{DirectoryIssue, DirectoryIssueKind, DirectoryReport, verify_directory};
 mod preflight;
 mod status;
@@ -20,7 +19,6 @@ use crate::{ExtractError, ExtractOptions, ExtractProgress, PkgExtractor, SilentP
 use cap_std::fs::Dir;
 use orbis_pkg::{
     Pkg,
-    entry::EntryId,
     header::ContentFlags,
     sfo::{AppMetadata, AppVersion},
 };
@@ -65,6 +63,20 @@ impl From<orbis_pkg::sfo::SfoError> for InstallError {
 impl From<serde_json::Error> for InstallError {
     fn from(source: serde_json::Error) -> Self {
         Self::State { source }
+    }
+}
+impl From<crate::inventory::InventoryError> for InstallError {
+    fn from(error: crate::inventory::InventoryError) -> Self {
+        use crate::inventory::InventoryError;
+        match error {
+            InventoryError::Invalid { message } => Self::Invalid { message },
+            InventoryError::Io { source } => Self::Io { source },
+            InventoryError::Json { source } => Self::State { source },
+            InventoryError::ManifestTooLarge => invalid("installation manifest is too large"),
+            InventoryError::Cancelled => Self::Extract {
+                source: ExtractError::Cancelled,
+            },
+        }
     }
 }
 pub(crate) fn invalid(message: impl Into<String>) -> InstallError {
@@ -143,18 +155,10 @@ pub fn update_metadata<R: AsRef<[u8]>>(pkg: &Pkg<R>) -> Result<AppMetadata> {
             "expected a PS4 full-file cumulative or first update package",
         ));
     }
-    let mut sfo = None;
-    for entry in pkg.entries() {
-        let (_, entry) = entry.map_err(|e| invalid(e.to_string()))?;
-        if entry.entry_id() == EntryId::ParamSfo {
-            if sfo.is_some() || entry.data_size() > 1024 * 1024 {
-                return Err(invalid("duplicate or oversized PARAM.SFO entry"));
-            }
-            sfo = Some(entry);
-        }
-    }
-    let entry = sfo.ok_or_else(|| invalid("update has no PARAM.SFO"))?;
-    let data = pkg.entry_data(&entry).map_err(|e| invalid(e.to_string()))?;
+    let data = pkg
+        .param_sfo_data()
+        .map_err(|e| invalid(e.to_string()))?
+        .ok_or_else(|| invalid("update has no PARAM.SFO"))?;
     let metadata = AppMetadata::parse(&data)?;
     if metadata.category != "gp" {
         return Err(invalid("update PARAM.SFO CATEGORY must be gp"));

@@ -261,6 +261,49 @@ fn richer_info_reports_app_version_and_typed_sfo_without_losing_header_access() 
 }
 
 #[test]
+fn sfo_lookup_keeps_inspection_optional_and_installation_strict() {
+    let dir = tempfile::tempdir().unwrap();
+    base_game(dir.path());
+    let original = update("01.12", "hello.txt", b"hello");
+    for defect in ["missing", "duplicate", "oversized"] {
+        let mut bytes = original.clone();
+        match defect {
+            "missing" => be32(&mut bytes, 0x1040, 0x1200),
+            "duplicate" => be32(&mut bytes, 0x1020, 0x1000),
+            "oversized" => be32(&mut bytes, 0x1054, 1024 * 1024 + 1),
+            _ => unreachable!(),
+        }
+        std::fs::write(dir.path().join("game.pkg"), bytes).unwrap();
+        let info = run(dir.path(), &["info", "game.pkg", "--json"]);
+        assert_code(&info, if defect == "missing" { 0 } else { 3 });
+        let value: serde_json::Value = serde_json::from_slice(&info.stdout).unwrap();
+        assert!(value["application"].is_null());
+        assert!(value["sfo"].is_null());
+        assert_eq!(value["metadata"]["title_id"], "CUSA00000");
+        let message = if defect == "missing" {
+            assert_eq!(value["warnings"], serde_json::json!([]));
+            "update has no PARAM.SFO"
+        } else {
+            assert_eq!(
+                value["warnings"],
+                serde_json::json!([
+                    "PARAM.SFO unavailable: duplicate or oversized PARAM.SFO entry; showing header metadata"
+                ])
+            );
+            "duplicate or oversized PARAM.SFO entry"
+        };
+        let install = run(
+            dir.path(),
+            &["install", "game.pkg", "--base", "CUSA00000", "--dry-run"],
+        );
+        assert_code(&install, 1);
+        assert!(String::from_utf8_lossy(&install.stderr).contains(message));
+        assert!(!dir.path().join(".CUSA00000.orbis-install").exists());
+        assert!(!dir.path().join("CUSA00000-UPDATE").exists());
+    }
+}
+
+#[test]
 fn info_keeps_integer_and_binary_types_and_escapes_terminal_text() {
     let fields: Vec<(&str, u16, Vec<u8>)> = vec![
         ("TITLE", 0x204, b"Demo\x1b[31m\0".to_vec()),
@@ -302,8 +345,20 @@ fn info_keeps_integer_and_binary_types_and_escapes_terminal_text() {
     let output = run(dir.path(), &["info", "game.pkg", "--json"]);
     assert_code(&output, 0);
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["application"]["required_system_version"], "9.03");
-    assert_eq!(value["application"]["build"]["sdk_ver"], "09030000");
+    assert_eq!(
+        value["application"],
+        serde_json::json!({
+            "app_version": "02.03",
+            "build": {"c_date": "20261020", "sdk_ver": "09030000"},
+            "category": null,
+            "content_id": null,
+            "package_version": null,
+            "region_from_content_id": "North America",
+            "required_system_version": "9.03",
+            "title": "Demo\u{1b}[31m",
+            "title_id": null,
+        })
+    );
     assert_eq!(
         value["sfo"]["SYSTEM_VER"],
         serde_json::json!({"type": "integer", "value": 0x09030000u32})
@@ -312,9 +367,32 @@ fn info_keeps_integer_and_binary_types_and_escapes_terminal_text() {
         value["sfo"]["BLOB"],
         serde_json::json!({"type": "binary", "hex": "00ff80"})
     );
+    // Preserve the existing sorted JSON order, including binary field keys.
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!("{}\n", serde_json::to_string_pretty(&value).unwrap())
+    );
     let output = run(dir.path(), &["info", "game.pkg", "--sfo"]);
     assert_code(&output, 0);
     assert!(!output.stdout.contains(&0x1b));
+    let text = String::from_utf8(output.stdout).unwrap();
+    let (_, application) = text.split_once("\nApplication:\n").unwrap();
+    assert_eq!(
+        application,
+        concat!(
+            "  app_version: 02.03\n",
+            "  build: {\"c_date\":\"20261020\",\"sdk_ver\":\"09030000\"}\n",
+            "  region_from_content_id: North America\n",
+            "  required_system_version: 9.03\n",
+            "  title: Demo\\u{1b}[31m\n",
+            "\nPARAM.SFO:\n",
+            "  APP_VER: {\"type\":\"string\",\"value\":\"02.03\"}\n",
+            "  BLOB: {\"hex\":\"00ff80\",\"type\":\"binary\"}\n",
+            "  PUBTOOLINFO: {\"type\":\"string\",\"value\":\"sdk_ver=09030000, c_date=20261020\"}\n",
+            "  SYSTEM_VER: {\"type\":\"integer\",\"value\":151191552}\n",
+            "  TITLE: {\"type\":\"string\",\"value\":\"Demo\\u001b[31m\"}\n",
+        )
+    );
 }
 
 fn named_pkg(name: &[u8]) -> Vec<u8> {

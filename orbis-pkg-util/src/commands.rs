@@ -13,6 +13,7 @@ use std::sync::{Arc, atomic::AtomicBool};
 
 mod directory;
 mod export;
+mod info;
 mod install;
 mod verify;
 
@@ -27,6 +28,21 @@ enum Error {
     OpenPkg {
         path: PathBuf,
         source: orbis_pkg_util::OpenPkgError,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum ExtractionMode {
+    Create,
+    Replace,
+    Resume,
+}
+
+enum Operation<'a> {
+    Verify,
+    Extract {
+        output: Option<&'a Path>,
+        mode: ExtractionMode,
     },
 }
 
@@ -59,7 +75,7 @@ pub(crate) fn run(cli: &Cli, out: &mut impl Write, cancelled: Arc<AtomicBool>) -
             json,
             header_only,
             sfo,
-        } => info(pkg_path, *json, *header_only, *sfo, cli, out),
+        } => info::run(pkg_path, *json, *header_only, *sfo, cli, out),
         Command::List {
             pkg_path,
             entries,
@@ -74,7 +90,16 @@ pub(crate) fn run(cli: &Cli, out: &mut impl Write, cancelled: Arc<AtomicBool>) -
             selection,
         } => process(
             pkg_path,
-            Some((output.as_deref(), *force, *resume)),
+            Operation::Extract {
+                output: output.as_deref(),
+                mode: if *resume {
+                    ExtractionMode::Resume
+                } else if *force {
+                    ExtractionMode::Replace
+                } else {
+                    ExtractionMode::Create
+                },
+            },
             selection,
             cli,
             cancelled,
@@ -94,7 +119,7 @@ pub(crate) fn run(cli: &Cli, out: &mut impl Write, cancelled: Arc<AtomicBool>) -
                     cancelled,
                 )
             } else {
-                process(pkg_path, None, selection, cli, cancelled)
+                process(pkg_path, Operation::Verify, selection, cli, cancelled)
             }
         }
         Command::VerifyDir { directory, json } => {
@@ -145,7 +170,7 @@ fn prepare_filesystem(pkg: &mut Package) -> Result<()> {
 
 fn process(
     path: &Path,
-    extraction: Option<(Option<&Path>, bool, bool)>,
+    operation: Operation<'_>,
     selection: &cli::Selection,
     cli: &Cli,
     cancelled: Arc<AtomicBool>,
@@ -164,45 +189,41 @@ fn process(
     }
     let progress = ConsoleProgress::with_options(quiet, cancelled);
     let start = std::time::Instant::now();
-    let report = if let Some((output, force, resume)) = extraction {
-        let destination = match output {
-            Some(path) => path.to_path_buf(),
-            None => {
-                let title_id = pkg.header().content_id().title_id();
-                validate_title_id(title_id)?;
-                std::env::current_dir()?.join(title_id)
+    let extracting = matches!(operation, Operation::Extract { .. });
+    let report = match operation {
+        Operation::Extract { output, mode } => {
+            let destination = match output {
+                Some(path) => path.to_path_buf(),
+                None => {
+                    let title_id = pkg.header().content_id().title_id();
+                    validate_title_id(title_id)?;
+                    std::env::current_dir()?.join(title_id)
+                }
+            };
+            if !quiet {
+                diagnostic(&format!(
+                    "Extracting {} to {}",
+                    escaped(path),
+                    escaped(&destination)
+                ));
             }
-        };
-        if !quiet {
-            diagnostic(&format!(
-                "Extracting {} to {}",
-                escaped(path),
-                escaped(&destination)
-            ));
+            PkgExtractor::new(&pkg, progress, matches!(mode, ExtractionMode::Replace))
+                .with_resume(matches!(mode, ExtractionMode::Resume))
+                .extract_with_options(&destination, &options)?
         }
-        PkgExtractor::new(&pkg, progress, force)
-            .with_resume(resume)
-            .extract_with_options(&destination, &options)?
-    } else {
-        if !quiet {
-            diagnostic(&format!("Checking {}", escaped(path)));
+        Operation::Verify => {
+            if !quiet {
+                diagnostic(&format!("Checking {}", escaped(path)));
+            }
+            PkgExtractor::new(&pkg, progress, false).verify(&options)?
         }
-        PkgExtractor::new(&pkg, progress, false).verify(&options)?
     };
-    let action = if extraction.is_some() {
-        "Extracted"
-    } else {
-        "Checked"
-    };
+    let action = if extracting { "Extracted" } else { "Checked" };
     if !report.skipped.is_empty() {
         diagnostic(&format!(
             "Incomplete: {} files {}; {} entries skipped.",
             report.files,
-            if extraction.is_some() {
-                "extracted"
-            } else {
-                "checked"
-            },
+            if extracting { "extracted" } else { "checked" },
             report.skipped.len()
         ));
         return Ok(3);
@@ -214,125 +235,11 @@ fn process(
             human_size(report.bytes),
             start.elapsed().as_secs_f64()
         ));
-        if extraction.is_none() {
+        if !extracting {
             diagnostic("Readability and decompression passed; authenticity was not checked.");
         }
     }
     Ok(0)
-}
-
-fn info(
-    path: &Path,
-    as_json: bool,
-    header_only: bool,
-    all_sfo: bool,
-    cli: &Cli,
-    out: &mut impl Write,
-) -> Result<u8> {
-    let mut pkg = open(
-        path,
-        if header_only {
-            None
-        } else {
-            cli.passcode_file.as_deref()
-        },
-    )?;
-    let (application, sfo, warnings) = if header_only {
-        (Value::Null, Value::Null, Vec::new())
-    } else {
-        let _ = pkg.load_entry_keys();
-        application_info(&pkg)
-    };
-    let header = pkg.header();
-    let id = header.content_id();
-    if as_json {
-        write_json(
-            out,
-            &json!({
-                "schema_version": 1,
-                "package": path.to_string_lossy(),
-                "application": application, "sfo": sfo, "warnings": warnings,
-                "metadata": {
-                    "content_id": id.as_str(), "service_id": id.service_id(),
-                    "publisher_code": id.publisher_code(), "title_id": id.title_id(),
-                    "content_version": id.version(), "label": id.label(),
-                    "content_type": header.content_type(), "content_type_name": header.content_type_name(),
-                    "content_flags": header.content_flags().bits(), "content_flags_name": header.content_flags().to_string(),
-                    "drm_type": header.drm_type(), "drm_type_name": header.drm_type_name(),
-                    "pkg_type": header.pkg_type(), "pkg_size": header.pkg_size(),
-                    "file_count": header.file_count(), "entry_count": header.entry_count(),
-                    "table_offset": header.table_offset(), "pfs_offset": header.pfs_offset(), "pfs_size": header.pfs_size(),
-                }
-            }),
-        )?;
-    } else {
-        writeln!(out, "PKG: {}\n", escaped(path))?;
-        writeln!(out, "Content ID:       {}", id.as_str().escape_debug())?;
-        writeln!(out, "  Service ID:     {}", id.service_id().escape_debug())?;
-        writeln!(
-            out,
-            "  Publisher:      {}",
-            id.publisher_code().escape_debug()
-        )?;
-        writeln!(out, "  Title ID:       {}", id.title_id().escape_debug())?;
-        writeln!(out, "  Content version: {}", id.version().escape_debug())?;
-        writeln!(out, "  Label:          {}", id.label().escape_debug())?;
-        writeln!(
-            out,
-            "Content Type:     0x{:02X} ({})",
-            header.content_type(),
-            header.content_type_name()
-        )?;
-        writeln!(out, "Content Flags:    {}", header.content_flags())?;
-        writeln!(
-            out,
-            "DRM Type:         0x{:02X} ({})",
-            header.drm_type(),
-            header.drm_type_name()
-        )?;
-        writeln!(out, "PKG Type:         0x{:08X}", header.pkg_type())?;
-        writeln!(
-            out,
-            "PKG Size:         {} ({} bytes)",
-            human_size(header.pkg_size()),
-            header.pkg_size()
-        )?;
-        writeln!(out, "File Count:       {}", header.file_count())?;
-        writeln!(out, "Entry Count:      {}", header.entry_count())?;
-        writeln!(out, "Table Offset:     0x{:X}", header.table_offset())?;
-        writeln!(out, "PFS Offset:       0x{:X}", header.pfs_offset())?;
-        writeln!(
-            out,
-            "PFS Size:         {} ({} bytes)",
-            human_size(header.pfs_size() as u64),
-            header.pfs_size()
-        )?;
-    }
-    if !as_json && !application.is_null() {
-        writeln!(out, "\nApplication:")?;
-        for (key, value) in application.as_object().unwrap() {
-            if !value.is_null() {
-                writeln!(
-                    out,
-                    "  {key}: {}",
-                    value
-                        .as_str()
-                        .map(|s| s.escape_debug().to_string())
-                        .unwrap_or_else(|| value.to_string())
-                )?;
-            }
-        }
-        if all_sfo {
-            writeln!(out, "\nPARAM.SFO:")?;
-            for (key, value) in sfo.as_object().unwrap() {
-                writeln!(out, "  {}: {}", key.escape_debug(), value)?;
-            }
-        }
-    }
-    for warning in &warnings {
-        diagnostic(&format!("warning: {warning}"));
-    }
-    Ok(if warnings.is_empty() { 0 } else { 3 })
 }
 
 fn list(
@@ -411,81 +318,6 @@ fn item_source(item: &ListedItem) -> &'static str {
         "metadata"
     } else {
         "filesystem"
-    }
-}
-
-fn application_info(pkg: &Package) -> (Value, Value, Vec<String>) {
-    use orbis_pkg::{
-        entry::EntryId,
-        sfo::{Sfo, Value as SfoValue},
-    };
-    let read = || -> Result<(Value, Value)> {
-        let mut found = None;
-        for result in pkg.entries() {
-            let (_, entry) = result?;
-            if entry.entry_id() == EntryId::ParamSfo {
-                if found.is_some() || entry.data_size() > 1024 * 1024 {
-                    return Err("duplicate or oversized PARAM.SFO entry".into());
-                }
-                found = Some(entry);
-            }
-        }
-        let Some(entry) = found else {
-            return Ok((Value::Null, Value::Null));
-        };
-        let data = pkg.entry_data(&entry)?;
-        let sfo = Sfo::parse(&data)?;
-        let fields: serde_json::Map<String, Value> = sfo.entries().map(|(key, value)| {
-            let value = match value {
-                SfoValue::String(s) => json!({"type": "string", "value": s}),
-                SfoValue::Integer(n) => json!({"type": "integer", "value": n}),
-                SfoValue::Binary(b) => json!({"type": "binary", "hex": b.iter().map(|v| format!("{v:02x}")).collect::<String>()}),
-            };
-            (key.to_owned(), value)
-        }).collect();
-        let firmware = match sfo.get("SYSTEM_VER") {
-            Some(SfoValue::Integer(n)) => Some(format!("{:x}.{:02x}", n >> 24, (n >> 16) & 0xff)),
-            _ => None,
-        };
-        let build: serde_json::Map<String, Value> = sfo
-            .string("PUBTOOLINFO")
-            .unwrap_or("")
-            .split(',')
-            .filter_map(|field| field.split_once('='))
-            .map(|(key, value)| (key.trim().to_owned(), json!(value.trim())))
-            .collect();
-        let region = match pkg.header().content_id().service_id() {
-            "UP" => Some("North America"),
-            "EP" => Some("Europe"),
-            "JP" => Some("Japan"),
-            "HP" => Some("Asia"),
-            _ => None,
-        };
-        Ok((
-            json!({
-                "title": sfo.string("TITLE").ok(),
-                "title_id": sfo.string("TITLE_ID").ok(),
-                "content_id": sfo.string("CONTENT_ID").ok(),
-                "app_version": sfo.string("APP_VER").ok(),
-                "package_version": sfo.string("VERSION").ok(),
-                "category": sfo.string("CATEGORY").ok(),
-                "required_system_version": firmware,
-                "region_from_content_id": region,
-                "build": build,
-            }),
-            Value::Object(fields),
-        ))
-    };
-    match read() {
-        Ok((application, sfo)) => (application, sfo, vec![]),
-        Err(error) => (
-            Value::Null,
-            Value::Null,
-            vec![format!(
-                "PARAM.SFO unavailable: {}; showing header metadata",
-                error_message(error.as_ref())
-            )],
-        ),
     }
 }
 

@@ -57,6 +57,7 @@ pub mod integrity;
 pub mod keys;
 mod names;
 pub mod passcode;
+pub mod path;
 pub mod sfo;
 pub use names::EntryNameError;
 
@@ -187,6 +188,27 @@ impl<R: AsRef<[u8]>> Pkg<R> {
             current: 0,
             total: self.header.entry_count(),
         }
+    }
+
+    /// Reads the optional `PARAM.SFO` payload without parsing its fields.
+    ///
+    /// Scans the entire entry table, rejecting duplicate SFO entries and payloads
+    /// larger than 1 MiB before reading data. Returns `None` when no SFO is present.
+    /// Encrypted entries require their decryption key to be loaded already.
+    pub fn param_sfo_data(&self) -> Result<Option<Vec<u8>>, ParamSfoError> {
+        let mut found = None;
+        for result in self.entries() {
+            let (_, entry) = result?;
+            if entry.entry_id() == EntryId::ParamSfo {
+                if found.is_some() || entry.data_size() > 1024 * 1024 {
+                    return Err(ParamSfoError::DuplicateOrOversized);
+                }
+                found = Some(entry);
+            }
+        }
+        found
+            .map(|entry| self.entry_data(&entry).map_err(ParamSfoError::from))
+            .transpose()
     }
 
     /// Gets the decrypted data for an entry.
@@ -550,4 +572,19 @@ pub enum EntryDataError {
         "encrypted entry data is not block-aligned (size {size} is not a multiple of 16)"
     ))]
     MisalignedData { size: usize },
+}
+
+/// Errors locating or reading the optional `PARAM.SFO` payload.
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+#[non_exhaustive]
+pub enum ParamSfoError {
+    #[snafu(transparent)]
+    ReadEntry { source: EntryReadError },
+
+    #[snafu(display("duplicate or oversized PARAM.SFO entry"))]
+    DuplicateOrOversized,
+
+    #[snafu(transparent)]
+    ReadData { source: EntryDataError },
 }

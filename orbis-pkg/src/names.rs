@@ -1,6 +1,7 @@
 use crate::{
     FindEntryError, Pkg,
     entry::{EntryId, PkgEntry},
+    path::ComponentPolicy,
 };
 use std::{fmt, path::PathBuf};
 
@@ -60,34 +61,12 @@ impl<R: AsRef<[u8]>> Pkg<R> {
             return Ok(fallback());
         }
         let name = std::str::from_utf8(&tail[..end]).map_err(|_| bad())?;
-        if !name.split('/').all(safe_component) {
+        if !name
+            .split('/')
+            .all(|part| ComponentPolicy::Metadata.accepts(part))
+        {
             return Err(bad());
         }
         Ok(name.split('/').collect())
     }
-}
-
-// Enforce the same portable rules on every host, including Windows aliases,
-// device names and alternate data streams.
-fn safe_component(name: &str) -> bool {
-    let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
-    !name.is_empty()
-        && name != "."
-        && name != ".."
-        && !name.ends_with(['.', ' '])
-        && !name
-            .chars()
-            .any(|c| c.is_control() || "\\:*?\"<>|".contains(c))
-        && !matches!(
-            stem.as_str(),
-            "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
-        )
-        && !(stem.starts_with("COM") || stem.starts_with("LPT"))
-            .then(|| &stem[3..])
-            .is_some_and(|n| {
-                matches!(
-                    n,
-                    "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
-                )
-            })
 }
