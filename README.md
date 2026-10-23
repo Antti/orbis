@@ -48,9 +48,10 @@ before installation. This example uses a synthetic sample package.
 
 ## Download and install
 
-For the graphical app, use an **orbis-desktop** archive from a release that includes
-desktop assets. Extract it and double-click `orbis-desktop.exe` (Windows), `Orbis.app`
-(macOS), or `orbis-desktop` (Linux). Choose **Open PKG**, then extract files or
+The desktop app, merge mode, and renamed CLI downloads require **v0.4.0 or later**.
+For the graphical app, extract an **orbis-desktop** archive and double-click
+`orbis-desktop.exe` (Windows), `Orbis.app` (macOS), or `orbis-desktop` (Linux).
+Choose **Open PKG**, then extract files or
 preview and install a supported update. See the [desktop guide](orbis-desktop/README.md)
 for platform requirements and source builds (`cargo run -p orbis-desktop --locked`).
 CLI downloads use the **orbis-cli** prefix and contain the `orbis` command.

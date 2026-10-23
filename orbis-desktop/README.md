@@ -8,7 +8,7 @@ See the [desktop screenshots](../README.md#desktop-screenshots) for package insp
 
 ## Open the app
 
-Use an **orbis-desktop** archive from a release that includes desktop assets.
+Use an **orbis-desktop** archive from v0.4.0 or later.
 Extract the archive, then open `orbis-desktop.exe` on Windows, `Orbis.app` on macOS, or
 `orbis-desktop` on Linux. On macOS, move the app to Applications first.
 The separate **orbis-cli** downloads provide the `orbis` command-line tool.
@@ -86,7 +86,7 @@ The packaging script requires Python 3.11 or later.
 
 ```sh
 # Use x86_64-apple-darwin on an Intel Mac.
-python3 scripts/release/package-desktop.py 0.3.0 aarch64-apple-darwin \
+python3 scripts/release/package-desktop.py 0.4.0 aarch64-apple-darwin \
   target/release/orbis-desktop dist
 ```
 

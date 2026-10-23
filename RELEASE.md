@@ -33,8 +33,8 @@ Flatpak bundles are unsigned and distributed through GitHub, not Flathub.
 Flathub supplies only the runtime. There is no automatic update repository for
 the application.
 
-CLI download filenames now start with `orbis-cli-`; the command inside is
-`orbis` (`orbis.exe` on Windows). Packages retain `orbis-pkg-util` as a
+Starting with v0.4.0, CLI download filenames start with `orbis-cli-`; the command
+inside is `orbis` (`orbis.exe` on Windows). Packages retain `orbis-pkg-util` as a
 compatibility executable or symlink. Update automated download filename patterns
 to the new prefix. Previously published releases keep their original assets.
 The Cargo package and source directory are `orbis-cli`. Rust consumers use
