@@ -39,15 +39,16 @@ chmod +x "$work_dir/appimagetool"
 
 app_dir="$work_dir/Orbis.AppDir"
 mkdir -p "$app_dir/usr/bin" "$app_dir/usr/share/licenses/orbis"
-install -m755 "$binary" "$app_dir/usr/bin/orbis-pkg-util"
+install -m755 "$binary" "$app_dir/usr/bin/orbis"
+ln -s orbis "$app_dir/usr/bin/orbis-pkg-util"
 install -m755 packaging/AppRun "$app_dir/AppRun"
 cp packaging/orbis.desktop "$app_dir/orbis.desktop"
 cp "packaging/$app_id.svg" "$app_dir/$app_id.svg"
 cp LICENSE-MIT LICENSE-APACHE "$app_dir/usr/share/licenses/orbis/"
 ARCH="$arch" VERSION="$version" "$work_dir/appimagetool" --appimage-extract-and-run \
   --no-appstream --runtime-file "$work_dir/runtime" "$app_dir" \
-  "$output/orbis-pkg-util-$version-linux-$arch.AppImage"
-"$output/orbis-pkg-util-$version-linux-$arch.AppImage" --appimage-extract-and-run --help
+  "$output/orbis-cli-$version-linux-$arch.AppImage"
+"$output/orbis-cli-$version-linux-$arch.AppImage" --appimage-extract-and-run --help
 
 # Rust is built outside Flatpak. The SDK is needed only to initialize its metadata.
 runtime_version=25.08
@@ -59,14 +60,15 @@ flatpak build-init --arch="$arch" "$work_dir/flatpak" "$app_id" \
   org.freedesktop.Sdk org.freedesktop.Platform "$runtime_version"
 files="$work_dir/flatpak/files"
 mkdir -p "$files/bin" "$files/share/metainfo" "$files/share/licenses/orbis"
-install -m755 "$binary" "$files/bin/orbis-pkg-util"
+install -m755 "$binary" "$files/bin/orbis"
+ln -s orbis "$files/bin/orbis-pkg-util"
 cp LICENSE-MIT LICENSE-APACHE "$files/share/licenses/orbis/"
 release_date=$(date -u +%Y-%m-%d)
 sed -e "s/@VERSION@/$version/g" -e "s/@DATE@/$release_date/g" \
   "packaging/$app_id.metainfo.xml" > "$files/share/metainfo/$app_id.metainfo.xml"
-flatpak build-finish --no-inherit-permissions --command=orbis-pkg-util "$work_dir/flatpak"
+flatpak build-finish --no-inherit-permissions --command=orbis "$work_dir/flatpak"
 flatpak build-export "$work_dir/repo" "$work_dir/flatpak" stable
-bundle="$output/orbis-pkg-util-$version-linux-$arch.flatpak"
+bundle="$output/orbis-cli-$version-linux-$arch.flatpak"
 flatpak build-bundle --arch="$arch" \
   --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
   "$work_dir/repo" "$bundle" "$app_id" stable

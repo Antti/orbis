@@ -54,6 +54,6 @@ jobs:
           python-version: '3.13'
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build -p orbis-pkg-util --locked
+      - run: cargo build -p orbis-cli --locked
       - shell: bash
-        run: python scripts/validation/public_package.py target/debug/orbis-pkg-util${{ runner.os == 'Windows' && '.exe' || '' }}
+        run: python scripts/validation/public_package.py target/debug/orbis${{ runner.os == 'Windows' && '.exe' || '' }}

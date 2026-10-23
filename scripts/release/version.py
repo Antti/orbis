@@ -8,7 +8,8 @@ import re
 import subprocess
 import tomllib
 
-MANIFEST = "orbis-pkg-util/Cargo.toml"
+MANIFEST = "orbis-cli/Cargo.toml"
+LEGACY_MANIFEST = "orbis-pkg-util/Cargo.toml"
 STABLE_VERSION = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 
 
@@ -19,10 +20,10 @@ def parse_version(version: str) -> tuple[int, int, int]:
     return tuple(int(part) for part in match.groups())
 
 
-def manifest_version(contents: str) -> str:
+def manifest_version(contents: str, *, package_name: str = "orbis-cli") -> str:
     package = tomllib.loads(contents)["package"]
-    if package["name"] != "orbis-pkg-util":
-        raise ValueError("Release version must come from orbis-pkg-util")
+    if package["name"] != package_name:
+        raise ValueError(f"Release version must come from {package_name}")
     version = package["version"]
     parse_version(version)
     return version
@@ -35,6 +36,25 @@ def is_increase(previous: str, current: str) -> bool:
     return new > old
 
 
+def previous_version(root: Path, commit: str) -> str:
+    # The push/PR boundary can precede the package rename. Prefer the new path
+    # when present, and never conceal a malformed new manifest with a fallback.
+    paths = subprocess.check_output(
+        ["git", "ls-tree", "--name-only", commit, "--", MANIFEST, LEGACY_MANIFEST],
+        cwd=root, text=True,
+    ).splitlines()
+    if MANIFEST in paths:
+        manifest, package_name = MANIFEST, "orbis-cli"
+    elif LEGACY_MANIFEST in paths:
+        manifest, package_name = LEGACY_MANIFEST, "orbis-pkg-util"
+    else:
+        raise ValueError(f"Previous commit {commit} has no CLI manifest")
+    contents = subprocess.check_output(
+        ["git", "show", f"{commit}:{manifest}"], cwd=root, text=True
+    )
+    return manifest_version(contents, package_name=package_name)
+
+
 def plan(event: str, ref: str, before: str, root: Path) -> dict[str, str]:
     current = manifest_version((root / MANIFEST).read_text())
     publish = False
@@ -44,10 +64,7 @@ def plan(event: str, ref: str, before: str, root: Path) -> dict[str, str]:
         if before and before != "0" * 40:
             if not re.fullmatch(r"[0-9a-f]{40}", before):
                 raise ValueError("Invalid previous commit SHA")
-            previous = subprocess.check_output(
-                ["git", "show", f"{before}:{MANIFEST}"], cwd=root, text=True
-            )
-            increased = is_increase(manifest_version(previous), current)
+            increased = is_increase(previous_version(root, before), current)
             publish = event == "push" and increased
     return {
         "version": current,

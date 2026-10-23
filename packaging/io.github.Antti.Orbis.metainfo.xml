@@ -3,7 +3,7 @@
   <id>io.github.Antti.Orbis</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT OR Apache-2.0</project_license>
-  <name>Orbis PKG Utility</name>
+  <name>Orbis CLI</name>
   <summary>Inspect and extract PlayStation 4 PKG files</summary>
   <description>
     <p>A command line utility for inspecting package metadata, listing entries,
@@ -11,6 +11,7 @@
   </description>
   <url type="homepage">https://github.com/Antti/orbis</url>
   <provides>
+    <binary>orbis</binary>
     <binary>orbis-pkg-util</binary>
   </provides>
   <releases>

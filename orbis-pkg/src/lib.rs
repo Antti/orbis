@@ -366,6 +366,12 @@ impl<R: AsRef<[u8]>> Pkg<R> {
         out
     }
 
+    /// Whether a metadata key slot is loaded, without decrypting or allocating
+    /// entry data. Call [`Self::load_entry_keys`] first to attempt key loading.
+    pub fn has_entry_key(&self, index: usize) -> bool {
+        self.entry_key(index).is_some()
+    }
+
     fn entry_key(&self, index: usize) -> Option<&[u8]> {
         if let Some(keys) = &self.passcode_keys {
             keys.get(index).map(|key| key.as_slice())
