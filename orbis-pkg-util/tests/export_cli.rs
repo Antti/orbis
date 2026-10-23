@@ -194,6 +194,65 @@ fn refuses_unsafe_or_ambiguous_manifest_paths() {
     }
 }
 
+// Linux permits non-UTF-8 filenames; macOS filesystems can reject
+// the invalid UTF-8 fixture before verification gets a chance to inspect it.
+#[cfg(target_os = "linux")]
+#[test]
+fn verification_and_resume_reject_lossy_filename_collisions() {
+    use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let base = base_game(root);
+    let tracked = "\u{fffd}.bin";
+    fs::write(base.join(tracked), b"TRACKED").unwrap();
+    let resume = [
+        "export",
+        "--base",
+        "CUSA00000",
+        "-o",
+        "merged",
+        "--resume",
+        "-q",
+    ];
+    success(&run(root, &resume));
+    assert!(
+        run(root, &["verify-dir", "merged", "--json"])
+            .status
+            .success()
+    );
+
+    let merged = root.join("merged");
+    let manifest = merged.join(".orbis-export.json");
+    let original_manifest = fs::read(&manifest).unwrap();
+    // Both names become "\u{fffd}.bin" under to_string_lossy(), which used to
+    // make verification hash the tracked file twice and overlook the extra file.
+    let unexpected = merged.join(OsStr::from_bytes(b"\xff.bin"));
+    fs::write(&unexpected, b"UNEXPECTED").unwrap();
+    for output in [
+        run(root, &["verify-dir", "merged", "--json", "-q"]),
+        run(root, &resume),
+    ] {
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("non-UTF8 export filename"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert_eq!(fs::read(&manifest).unwrap(), original_manifest);
+    assert_eq!(fs::read(merged.join(tracked)).unwrap(), b"TRACKED");
+    assert_eq!(fs::read(&unexpected).unwrap(), b"UNEXPECTED");
+    fs::remove_file(unexpected).unwrap();
+    success(&run(root, &resume));
+    assert!(
+        run(root, &["verify-dir", "merged", "--json"])
+            .status
+            .success()
+    );
+}
+
 #[test]
 fn resumes_missing_export_files_but_preserves_conflicts_and_refuses_changed_sources() {
     let temp = tempfile::tempdir().unwrap();
