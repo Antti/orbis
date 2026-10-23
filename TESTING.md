@@ -4,7 +4,7 @@ Run the same checks used by GitHub Actions:
 
 ```sh
 cargo test --workspace --all-features --locked
-cargo test -p orbis-pkg-util --no-default-features --locked
+cargo test -p orbis-cli --no-default-features --locked
 cargo test --workspace --all-features --release --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo fmt --all --check
@@ -25,7 +25,22 @@ selected extraction, verification, completion generation, and failure handling.
 They check exit codes and stdout/stderr separately, including warnings in quiet
 mode and closed-pipe handling on Unix. Library tests cover atomic replacement,
 concurrent destination creation, cancellation, and cleanup after corrupt input.
-The shared fixture builders live in `orbis-pkg-util/tests/common/`.
+The shared fixture builders live in `orbis-cli/tests/common/`.
+
+Desktop operation tests reuse these fixtures through the real library APIs.
+They cover inspection, extraction, resume conflicts, incomplete results,
+cancellation, update preview/install, and a changed update after preview.
+Packaging tests verify launchable executables, macOS bundle metadata and file
+permissions, and signing failures. See [desktop checks](orbis-desktop/README.md#development-checks)
+for the native UI smoke tests that also need a graphical session. Linux workspace
+builds now need `libxkbcommon-dev` and `libwayland-dev`; library/CLI-only builds do not.
+
+The desktop app was smoke-tested on macOS arm64 with native file/folder pickers,
+PS4Load inspection and extraction (20 files, one explicit missing-key omission),
+and a synthetic 01.00-to-01.01 update preview/install. The base files stayed
+unchanged and Show in folder opened the resulting update in Finder. Windows and
+Linux native UI checks and signed macOS distribution still need their respective
+environments; automated operation and packaging tests do not replace them.
 
 Installer tests encode SFO identity/version metadata independently of the parser
 and build synthetic base/update pairs. They cover read-only planning, delta and
@@ -113,10 +128,10 @@ homebrew IDs that do not use the `CUSA` convention:
 ```sh
 cargo build --release --locked
 # Replace sample.pkg with the downloaded package path.
-target/release/orbis-pkg-util info sample.pkg --json > info.json
-target/release/orbis-pkg-util verify sample.pkg --integrity --json > integrity.json
+target/release/orbis info sample.pkg --json > info.json
+target/release/orbis verify sample.pkg --integrity --json > integrity.json
 # Inspect status, errors, and skipped entries even if the command returns 3.
-target/release/orbis-pkg-util extract sample.pkg --output ./sample-extracted
+target/release/orbis extract sample.pkg --output ./sample-extracted
 ```
 
 Compare extracted files against published source assets or an independent known
@@ -132,3 +147,21 @@ exFAT images on macOS/Linux, APFS, ext4, and pinned PS4Load extraction/integrity
 on Linux/macOS/Windows. It checks output manifests and resume as well as copying.
 See [validation scripts](scripts/validation/README.md) for local runs and the
 opt-in matching base/update harness; incomplete real-package checks fail closed.
+
+### In-place update merging
+
+Synthetic merge tests exercise replacement and addition of files, exact restoration
+of original inventories, refusal of mixed modes and repeat merges, incomplete
+extraction, case/type conflicts, symlinks, altered backups, and tampered manifest
+paths. Injected crashes cover journal publication, original backup, patch
+publication, restoration, and commit. Recovery is repeated to check idempotence;
+changed files are preserved by refusing restoration. CLI tests cover `--merge`
+preview/install/status/rollback. Desktop operation tests cover mode selection and
+restore/recovery without the original PKG.
+
+For manual QA, merge into a disposable original base with the emulator closed.
+Check the preview destination and retained-original size, merge, reopen the app,
+then use Manage game and Restore base. Compare the restored directory to the
+original. Test on each supported OS; macOS exFAT should refuse merging before
+changing the game. These fixtures do not establish the semantics of omitted
+files in successive real patches or guarantee power-loss durability.

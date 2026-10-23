@@ -24,9 +24,13 @@ security import "$work_dir/certificate.p12" -P "$MACOS_CERTIFICATE_PASSWORD" -T 
 security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" >/dev/null
 codesign --force --keychain "$keychain" --sign "$MACOS_SIGNING_IDENTITY" --options runtime --timestamp "$binary"
 codesign --verify --strict --verbose=2 "$binary"
-# notarytool accepts ZIP, not tar.gz. Submit these exact signed executable bytes
-# before packaging them into the final release archive. Mach-O tools cannot staple.
-ditto -c -k "$binary" "$work_dir/submission.zip"
+# Preserve an app bundle's outer directory for notarization. CLI binaries have
+# no bundle to staple; desktop apps carry the ticket for offline Gatekeeper.
+if [[ -d $binary ]]; then
+  ditto -c -k --keepParent "$binary" "$work_dir/submission.zip"
+else
+  ditto -c -k "$binary" "$work_dir/submission.zip"
+fi
 xcrun notarytool submit "$work_dir/submission.zip" --apple-id "$APPLE_ID" \
   --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait --timeout 30m \
   --output-format json > "$work_dir/notarization.json"
@@ -38,3 +42,7 @@ if report.get("status") != "Accepted":
     raise SystemExit(f"Notarization failed: {report.get('id')} ({report.get('status')})")
 print(f"Notarization accepted: {report['id']}")
 PY
+if [[ -d $binary ]]; then
+  xcrun stapler staple "$binary"
+  xcrun stapler validate "$binary"
+fi

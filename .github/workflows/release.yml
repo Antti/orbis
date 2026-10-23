@@ -74,8 +74,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes musl-tools flatpak dbus-x11
-      - run: cargo test --workspace --all-features --release --locked --target ${{ matrix.target }}
-      - run: cargo build -p orbis-pkg-util --release --locked --target ${{ matrix.target }}
+      - run: cargo test --workspace --exclude orbis-desktop --all-features --release --locked --target ${{ matrix.target }}
+      - run: cargo build -p orbis-cli --release --locked --target ${{ matrix.target }}
       - name: Build and smoke-test both packages
         env:
           RELEASE_ARCH: ${{ matrix.arch }}
@@ -83,7 +83,7 @@ jobs:
           RELEASE_VERSION: ${{ needs.plan.outputs.version }}
         run: >-
           bash scripts/release/package-linux.sh "$RELEASE_VERSION"
-          "target/$RELEASE_TARGET/release/orbis-pkg-util" dist "$RELEASE_ARCH"
+          "target/$RELEASE_TARGET/release/orbis" dist "$RELEASE_ARCH"
       - uses: actions/upload-artifact@v4
         with:
           name: release-linux-${{ matrix.arch }}
@@ -117,7 +117,7 @@ jobs:
         with:
           key: release-${{ matrix.target }}
       - run: cargo test --workspace --all-features --release --locked --target ${{ matrix.target }}
-      - run: cargo build -p orbis-pkg-util --release --locked --target ${{ matrix.target }}
+      - run: cargo build -p orbis-cli --release --locked --target ${{ matrix.target }}
       - name: Sign and notarize trusted release builds
         if: github.event_name == 'push' && github.ref == 'refs/heads/master' && vars.MACOS_SIGNING_ENABLED == 'true'
         env:
@@ -128,7 +128,7 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
           RELEASE_TARGET: ${{ matrix.target }}
-        run: bash scripts/release/sign-macos.sh "target/$RELEASE_TARGET/release/orbis-pkg-util"
+        run: bash scripts/release/sign-macos.sh "target/$RELEASE_TARGET/release/orbis"
       - name: Archive and smoke-test the native binary
         env:
           RELEASE_VERSION: ${{ needs.plan.outputs.version }}
@@ -136,7 +136,7 @@ jobs:
           MACOS_NOTARIZED: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && vars.MACOS_SIGNING_ENABLED == 'true' && 'true' || 'false' }}
         run: >-
           bash scripts/release/package-macos.sh "$RELEASE_VERSION" "$RELEASE_TARGET"
-          "target/$RELEASE_TARGET/release/orbis-pkg-util" dist
+          "target/$RELEASE_TARGET/release/orbis" dist
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.target }}
@@ -163,11 +163,11 @@ jobs:
         with:
           key: release-windows-x86_64
       - run: cargo test --workspace --all-features --release --locked --target x86_64-pc-windows-msvc
-      - run: cargo build -p orbis-pkg-util --release --locked --target x86_64-pc-windows-msvc
+      - run: cargo build -p orbis-cli --release --locked --target x86_64-pc-windows-msvc
       - name: Archive and smoke-test Windows binary
         env:
           RELEASE_VERSION: ${{ needs.plan.outputs.version }}
-        run: python scripts/release/package-windows.py "$env:RELEASE_VERSION" target/x86_64-pc-windows-msvc/release/orbis-pkg-util.exe dist
+        run: python scripts/release/package-windows.py "$env:RELEASE_VERSION" target/x86_64-pc-windows-msvc/release/orbis.exe dist
       - uses: actions/upload-artifact@v4
         with:
           name: release-windows-x86_64
@@ -175,9 +175,73 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  desktop:
+    name: Desktop (${{ matrix.target }})
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            binary: orbis-desktop
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            binary: orbis-desktop
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: orbis-desktop.exe
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            binary: orbis-desktop
+          - os: macos-15
+            target: aarch64-apple-darwin
+            binary: orbis-desktop
+    runs-on: ${{ matrix.os }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop-${{ matrix.target }}
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes libxkbcommon-dev libwayland-dev
+      - run: cargo test -p orbis-desktop --release --locked --target ${{ matrix.target }}
+      - run: cargo build -p orbis-desktop --release --locked --target ${{ matrix.target }}
+      - name: Package desktop app
+        if: runner.os != 'macOS' || github.event_name != 'push' || github.ref != 'refs/heads/master' || vars.MACOS_SIGNING_ENABLED != 'true'
+        run: python scripts/release/package-desktop.py "${{ needs.plan.outputs.version }}" "${{ matrix.target }}" "target/${{ matrix.target }}/release/${{ matrix.binary }}" dist
+      - name: Sign, notarize, and package macOS desktop app
+        if: runner.os == 'macOS' && github.event_name == 'push' && github.ref == 'refs/heads/master' && vars.MACOS_SIGNING_ENABLED == 'true'
+        env:
+          MACOS_NOTARIZED: 'true'
+          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: python scripts/release/package-desktop.py "${{ needs.plan.outputs.version }}" "${{ matrix.target }}" "target/${{ matrix.target }}/release/${{ matrix.binary }}" dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-desktop-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
   publish:
     name: Publish versioned release
-    needs: [plan, linux, macos, windows]
+    needs: [plan, linux, macos, windows, desktop]
     if: >-
       github.event_name == 'push' &&
       github.ref == 'refs/heads/master' &&

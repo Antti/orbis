@@ -17,7 +17,7 @@ SCRIPT = Path(version.__file__).resolve()
 def write_manifest(root: Path, release_version: str) -> None:
     path = root / version.MANIFEST
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f'[package]\nname = "orbis-pkg-util"\nversion = "{release_version}"\n')
+    path.write_text(f'[package]\nname = "orbis-cli"\nversion = "{release_version}"\n')
 
 
 class GitFixture:
@@ -63,15 +63,16 @@ class VersionTests(unittest.TestCase):
 
     def test_manifest_requires_the_cli_package_and_a_valid_version(self):
         self.assertEqual(
-            version.manifest_version('[package]\nname="orbis-pkg-util"\nversion="2.3.4"'),
+            version.manifest_version('[package]\nname="orbis-cli"\nversion="2.3.4"'),
             "2.3.4",
         )
         for source in [
             '[package]\nname="orbis-pfs"\nversion="2.3.4"',
-            '[package]\nname="orbis-pkg-util"\nversion="2.3.4-rc.1"',
-            '[package]\nname="orbis-pkg-util"\nversion=23',
-            '[package]\nname="orbis-pkg-util"\nversion.workspace=true',
-            '[package]\nname="orbis-pkg-util"',
+            '[package]\nname="orbis-pkg-util"\nversion="2.3.4"',
+            '[package]\nname="orbis-cli"\nversion="2.3.4-rc.1"',
+            '[package]\nname="orbis-cli"\nversion=23',
+            '[package]\nname="orbis-cli"\nversion.workspace=true',
+            '[package]\nname="orbis-cli"',
             "[workspace]",
             "[broken",
         ]:
@@ -141,6 +142,51 @@ class VersionTests(unittest.TestCase):
             for event, ref in [("push", "refs/heads/master"), ("pull_request", "refs/pull/7/merge")]:
                 with self.assertRaisesRegex(ValueError, "decreased"):
                     version.plan(event, ref, before, root)
+
+    def test_package_rename_preserves_version_comparisons(self):
+        for current in ["1.2.3", "1.3.0", "1.2.2"]:
+            with self.subTest(current=current), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                fixture = GitFixture(root)
+                legacy = root / version.LEGACY_MANIFEST
+                legacy.parent.mkdir()
+                legacy.write_text('[package]\nname="orbis-pkg-util"\nversion="1.2.3"\n')
+                fixture.git("add", ".")
+                fixture.git("-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "Before rename")
+                before = fixture.git("rev-parse", "HEAD")
+                legacy.unlink()
+                fixture.commit(current, "Rename the package")
+                for event, ref in [("push", "refs/heads/master"), ("pull_request", "refs/pull/7/merge")]:
+                    if current == "1.2.2":
+                        with self.assertRaisesRegex(ValueError, "decreased"):
+                            version.plan(event, ref, before, root)
+                    else:
+                        plan = version.plan(event, ref, before, root)
+                        self.assertEqual(plan["publish"], str(event == "push" and current == "1.3.0").lower())
+                        self.assertEqual(plan["build"], str(event == "pull_request" or current == "1.3.0").lower())
+
+    def test_historical_manifest_fallback_does_not_hide_invalid_state(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fixture = GitFixture(root)
+            legacy = root / version.LEGACY_MANIFEST
+            legacy.parent.mkdir()
+            legacy.write_text('[package]\nname="orbis-pkg-util"\nversion="1.2.3"\n')
+            before = fixture.commit("1.3.0", "Both paths exist")
+            self.assertEqual(version.previous_version(root, before), "1.3.0")
+            (root / version.MANIFEST).write_text('[package]\nname="other"\nversion="1.3.0"\n')
+            fixture.git("add", ".")
+            fixture.git("-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "Invalid new manifest")
+            before = fixture.git("rev-parse", "HEAD")
+            with self.assertRaisesRegex(ValueError, "orbis-cli"):
+                version.previous_version(root, before)
+            (root / version.MANIFEST).unlink()
+            legacy.unlink()
+            fixture.git("add", ".")
+            fixture.git("-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "Missing manifests")
+            before = fixture.git("rev-parse", "HEAD")
+            with self.assertRaisesRegex(ValueError, "no CLI manifest"):
+                version.previous_version(root, before)
 
     def test_bad_or_unavailable_previous_commits_fail_closed(self):
         with tempfile.TemporaryDirectory() as temp:

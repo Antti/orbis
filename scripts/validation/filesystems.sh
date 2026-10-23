@@ -59,4 +59,4 @@ mounted=true
 touch "$mount_dir/.metadata_never_index"
 export ORBIS_TEST_EXTRACT_ROOT="$mount_dir" ORBIS_TEST_EXPORT_ROOT="$mount_dir"
 export ORBIS_TEST_FILESYSTEM="$expected_filesystem"
-cargo test -p orbis-pkg-util --lib --locked configured_external_filesystem -- --nocapture
+cargo test -p orbis-cli --lib --locked configured_external_filesystem -- --nocapture

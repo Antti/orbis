@@ -19,13 +19,18 @@ SHA = "a" * 40
 VERSION = "1.2.3"
 TAG = f"v{VERSION}"
 ASSETS = [
-    f"orbis-pkg-util-{VERSION}-linux-x86_64.AppImage",
-    f"orbis-pkg-util-{VERSION}-linux-x86_64.flatpak",
-    f"orbis-pkg-util-{VERSION}-linux-aarch64.AppImage",
-    f"orbis-pkg-util-{VERSION}-linux-aarch64.flatpak",
-    f"orbis-pkg-util-{VERSION}-x86_64-pc-windows-msvc.zip",
-    f"orbis-pkg-util-{VERSION}-x86_64-apple-darwin.tar.gz",
-    f"orbis-pkg-util-{VERSION}-aarch64-apple-darwin.tar.gz",
+    f"orbis-cli-{VERSION}-linux-x86_64.AppImage",
+    f"orbis-cli-{VERSION}-linux-x86_64.flatpak",
+    f"orbis-cli-{VERSION}-linux-aarch64.AppImage",
+    f"orbis-cli-{VERSION}-linux-aarch64.flatpak",
+    f"orbis-cli-{VERSION}-x86_64-pc-windows-msvc.zip",
+    f"orbis-cli-{VERSION}-x86_64-apple-darwin.tar.gz",
+    f"orbis-cli-{VERSION}-aarch64-apple-darwin.tar.gz",
+    f"orbis-desktop-{VERSION}-x86_64-unknown-linux-gnu.tar.gz",
+    f"orbis-desktop-{VERSION}-aarch64-unknown-linux-gnu.tar.gz",
+    f"orbis-desktop-{VERSION}-x86_64-pc-windows-msvc.zip",
+    f"orbis-desktop-{VERSION}-x86_64-apple-darwin.tar.gz",
+    f"orbis-desktop-{VERSION}-aarch64-apple-darwin.tar.gz",
 ]
 
 
@@ -96,7 +101,7 @@ class FakeGitHub:
                 "body": (
                     "-f",
                     f"Built from `{SHA}`. Includes Linux x86_64/ARM64 AppImage/Flatpak bundles, "
-                    "Windows x86_64 ZIP, and macOS Intel/Apple Silicon archives. "
+                    "Windows x86_64 ZIP, and macOS Intel/Apple Silicon archives. Choose orbis-cli-* for the orbis command or orbis-desktop-* for the graphical app. "
                     "Verify downloads with SHA256SUMS. Mac signing status is in BUILD-INFO.txt. See RELEASE.md for installation.",
                 ),
             }

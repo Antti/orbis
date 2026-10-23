@@ -21,13 +21,13 @@ checks resume on Linux, macOS, and Windows. It does not run the extracted softwa
 The PKG payload is not committed or uploaded as an artifact. To reuse a local copy:
 
 ```sh
-python3 scripts/validation/public_package.py target/debug/orbis-pkg-util --package /path/ps4load.pkg
+python3 scripts/validation/public_package.py target/debug/orbis --package /path/ps4load.pkg
 ```
 
 For a matching local base/update pair, use a new directory with enough free space:
 
 ```sh
-python3 scripts/validation/package_pair.py target/debug/orbis-pkg-util \
+python3 scripts/validation/package_pair.py target/debug/orbis \
   /path/base.pkg /path/update.pkg /path/new-validation-directory
 ```
 
