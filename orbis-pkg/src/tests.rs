@@ -197,3 +197,86 @@ fn param_sfo_data_preserves_payload_and_key_errors() {
         })
     ));
 }
+
+// The directory records 532 logical bytes, while encrypted storage includes
+// the entire 544-byte AES block range. No decryption keys are needed to hash it.
+fn pkg_with_entry_digest(encrypted: bool) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    let mut bytes = vec![0; 0x1080 + 544];
+    put_u32(&mut bytes, 0, 0x7f434e54);
+    put_u32(&mut bytes, 0x10, 2);
+    put_u32(&mut bytes, 0x18, 0x1000);
+    put_u32(&mut bytes, 0x1000, 1); // Digest table.
+    put_u32(&mut bytes, 0x1010, 0x1040);
+    put_u32(&mut bytes, 0x1014, 64);
+    put_u32(&mut bytes, 0x1020, 0x403); // npbind.dat.
+    put_u32(&mut bytes, 0x1028, if encrypted { 0x80000000 } else { 0 });
+    put_u32(&mut bytes, 0x1030, 0x1080);
+    put_u32(&mut bytes, 0x1034, 532);
+    bytes[0x1080..].fill(0xa5);
+    let stored_size = if encrypted { 544 } else { 532 };
+    let digest = Sha256::digest(&bytes[0x1080..0x1080 + stored_size]);
+    bytes[0x1060..0x1080].copy_from_slice(&digest);
+    bytes
+}
+
+#[test]
+fn integrity_hashes_encrypted_entry_padding_without_keys() {
+    let bytes = pkg_with_entry_digest(true);
+    let report = Pkg::parse(bytes.clone())
+        .unwrap()
+        .verify_integrity(false, || false)
+        .unwrap();
+    assert_eq!(report.checked, 1);
+
+    let mut corrupt = bytes;
+    *corrupt.last_mut().unwrap() ^= 1;
+    let error = Pkg::parse(corrupt)
+        .unwrap()
+        .verify_integrity(false, || false)
+        .unwrap_err();
+    assert_eq!(error.to_string(), "SHA-256 mismatch: entry 0x00000403");
+}
+
+#[test]
+fn integrity_does_not_hash_plaintext_entry_alignment_bytes() {
+    let mut bytes = pkg_with_entry_digest(false);
+    *bytes.last_mut().unwrap() ^= 1;
+    let report = Pkg::parse(bytes)
+        .unwrap()
+        .verify_integrity(false, || false)
+        .unwrap();
+    assert_eq!(report.checked, 1);
+}
+
+#[test]
+fn integrity_rejects_truncated_encrypted_padding_even_without_digest() {
+    for has_digest_table in [true, false] {
+        let mut bytes = pkg_with_entry_digest(true);
+        bytes[0x1060..0x1080].fill(0);
+        if !has_digest_table {
+            // Expose only npbind.dat, omitting the digest-table entry entirely.
+            put_u32(&mut bytes, 0x10, 1);
+            put_u32(&mut bytes, 0x18, 0x1020);
+        }
+        bytes.pop();
+        let error = Pkg::parse(bytes)
+            .unwrap()
+            .verify_integrity(false, || false)
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(error.to_string(), "PKG integrity range outside file");
+    }
+}
+
+#[test]
+fn integrity_checks_encrypted_length_rounding_without_overflow() {
+    let mut bytes = pkg_with_entry_digest(true);
+    put_u32(&mut bytes, 0x1034, u32::MAX);
+    assert!(
+        Pkg::parse(bytes)
+            .unwrap()
+            .verify_integrity(false, || false)
+            .is_err()
+    );
+}
