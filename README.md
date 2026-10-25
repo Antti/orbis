@@ -54,6 +54,8 @@ For the graphical app, extract an **orbis-desktop** archive and double-click
 Choose **Open PKG**, then extract files or
 preview and install a supported update. See the [desktop guide](orbis-desktop/README.md)
 for platform requirements and source builds (`cargo run -p orbis-desktop --locked`).
+Starting with **v0.5.0**, the desktop app also verifies packages, accepts known
+package passcodes, and exports merged games with resume and manifest verification.
 CLI downloads use the **orbis-cli** prefix and contain the `orbis` command.
 
 Download binaries from [GitHub Releases](https://github.com/Antti/orbis/releases/latest).
@@ -233,6 +235,11 @@ See [TESTING.md](TESTING.md) for regression coverage and real-filesystem tests,
 and [RELEASE.md](RELEASE.md) for the version-bump release process.
 
 ## Performance
+
+Starting with v0.5.0, macOS/Linux ARM64 builds enable hardware AES and SHA-256
+when supported, with software fallback on other CPUs. x86 acceleration is
+unchanged. See [TESTING.md](TESTING.md) for build flags, fallback tests, and
+local verification measurements.
 
 The original project reported the following timings for a roughly 30 GB
 Bloodborne PKG (`CUSA03173_01`) on an Intel W-3175X, Samsung 990 Pro NVMe, and
