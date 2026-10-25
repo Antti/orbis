@@ -3,14 +3,433 @@ use crate::worker::Progress;
 use orbis_cli::{ExtractProgress, SilentProgress};
 use std::{fs, sync::atomic::Ordering};
 
-#[allow(dead_code)]
-#[path = "../../../orbis-cli/tests/common/mod.rs"]
-mod common;
+use crate::{common, features};
 
 fn package(root: &Path) -> PathBuf {
     let path = root.join("game.pkg");
     fs::write(&path, common::update("01.01", "new.txt", b"NEW DATA")).unwrap();
     path
+}
+
+fn verify_report(
+    path: &Path,
+    metadata_only: bool,
+    progress: &impl ExtractProgress,
+) -> Box<VerificationReport> {
+    let Outcome::Verified(report) =
+        run(path, Operation::Verify { metadata_only }, progress).unwrap()
+    else {
+        panic!()
+    };
+    report
+}
+
+#[test]
+fn skipped_readability_makes_a_report_incomplete_even_when_all_hashes_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("locked.pkg");
+    fs::write(&path, features::signed_pkg_with_metadata(true)).unwrap();
+    for metadata_only in [true, false] {
+        let report = verify_report(&path, metadata_only, &SilentProgress);
+        assert_eq!(report.status, "incomplete");
+        assert_eq!(report.summary.unavailable, 0);
+        assert_eq!(report.summary.failed, 0);
+        assert!(report.summary.digests > 0);
+        assert!(report.error.is_none());
+        let json = serde_json::to_value(&report).unwrap();
+        let skipped = json["readability"]["skipped"].as_array().unwrap();
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0]["path"], "sce_sys/param.sfo");
+        assert!(skipped[0]["reason"].as_str().unwrap().contains("slot 2"));
+    }
+}
+
+#[test]
+fn desktop_verification_distinguishes_complete_incomplete_failed_and_cancelled() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("signed.pkg");
+    let bytes = features::signed_pkg();
+    fs::write(&path, &bytes).unwrap();
+    for metadata_only in [true, false] {
+        let report = verify_report(&path, metadata_only, &SilentProgress);
+        assert_eq!(report.status, "complete");
+        assert!(report.summary.digests > 0);
+        assert_eq!(report.summary.unavailable, 0);
+        assert!(report.readability.as_ref().unwrap().skipped.is_empty());
+        assert_eq!(report.metadata_only, metadata_only);
+        assert!(!report.authenticity_checked);
+    }
+    let mut missing = bytes.clone();
+    missing[0x100..0x180].fill(0);
+    missing[0xfe0..0x1000].fill(0);
+    fs::write(&path, missing).unwrap();
+    let report = verify_report(&path, false, &SilentProgress);
+    assert_eq!(report.status, "incomplete");
+    assert!(report.summary.unavailable > 0);
+    assert!(!report.unavailable_reasons.is_empty());
+
+    let mut corrupt = bytes;
+    corrupt[0x1a50] ^= 1;
+    fs::write(&path, corrupt).unwrap();
+    let report = verify_report(&path, false, &SilentProgress);
+    assert_eq!(report.status, "failed");
+    assert_eq!(report.summary.failed, 1);
+    assert!(report.error.as_ref().unwrap().contains("SHA-256 mismatch"));
+    let progress = Progress::default();
+    progress.cancelled.store(true, Ordering::Relaxed);
+    assert_eq!(verify_report(&path, false, &progress).status, "interrupted");
+    assert_eq!(
+        verify_report(&dir.path().join("absent.pkg"), false, &SilentProgress).status,
+        "failed"
+    );
+}
+
+#[test]
+fn metadata_verification_excludes_game_data_and_reports_save_without_overwriting() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("game.pkg");
+    let mut bytes = features::signed_pkg();
+    *bytes.last_mut().unwrap() ^= 1;
+    fs::write(&path, &bytes).unwrap();
+    let report = verify_report(&path, true, &SilentProgress);
+    assert_eq!(report.status, "complete");
+    assert_eq!(
+        verify_report(&path, false, &SilentProgress).status,
+        "failed"
+    );
+    assert!(report.save(&path).is_err());
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    let destination = dir.path().join("report.json");
+    report.save(&destination).unwrap();
+    assert!(report.save(&destination).is_err());
+    let json: serde_json::Value = serde_json::from_slice(&fs::read(destination).unwrap()).unwrap();
+    assert_eq!(json["status"], "complete");
+    assert_eq!(json["metadata_only"], true);
+    assert!(json.get("checks").is_none());
+}
+
+#[test]
+fn passcode_unlocks_inspection_and_extraction_and_wrong_values_never_fall_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("locked.pkg");
+    fs::write(&path, features::passcoded_pkg(2)).unwrap();
+    let Outcome::Inspected(locked) = run(&path, Operation::Inspect, &SilentProgress).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(locked.missing_keys, 1);
+    let passcode = Passcode::new(
+        String::from_utf8(features::PASSCODE.to_vec())
+            .unwrap()
+            .into(),
+    )
+    .unwrap();
+    assert!(!format!("{passcode:?}").contains("0123456789abcdef"));
+    let Outcome::Inspected(unlocked) =
+        run_with_passcode(&path, Operation::Inspect, Some(&passcode), &SilentProgress).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(unlocked.missing_keys, 0);
+    assert_eq!(unlocked.version.as_deref(), Some("01.12"));
+    let output = dir.path().join("output");
+    let result = run_with_passcode(
+        &path,
+        Operation::Extract {
+            output: output.clone(),
+            resume: false,
+        },
+        Some(&passcode),
+        &SilentProgress,
+    )
+    .unwrap();
+    assert!(matches!(
+        result,
+        Outcome::Finished {
+            incomplete: false,
+            ..
+        }
+    ));
+    assert!(output.join("sce_sys/param.sfo").is_file());
+    let bad = Passcode::new("x".repeat(32).into()).unwrap();
+    let untouched = dir.path().join("bad-output");
+    let error = run_with_passcode(
+        &path,
+        Operation::Extract {
+            output: untouched.clone(),
+            resume: false,
+        },
+        Some(&bad),
+        &SilentProgress,
+    )
+    .unwrap_err();
+    assert!(error.details.contains("passcode"));
+    assert!(!error.details.contains(&"x".repeat(32)));
+    assert!(!untouched.exists());
+    let Outcome::Verified(report) = run_with_passcode(
+        &path,
+        Operation::Verify {
+            metadata_only: true,
+        },
+        Some(&passcode),
+        &SilentProgress,
+    )
+    .unwrap() else {
+        panic!()
+    };
+    assert!(report.readability.as_ref().unwrap().skipped.is_empty());
+    assert!(
+        !serde_json::to_string(&report)
+            .unwrap()
+            .contains("0123456789abcdef")
+    );
+    for bad in ["short".to_owned(), "é".repeat(16), "\n".repeat(32)] {
+        assert!(Passcode::new(bad.into()).is_err());
+    }
+}
+
+fn export_preview(base: &Path, output: &Path, resume: bool) -> Box<install::ExportPlan> {
+    let Outcome::ExportPreview(plan) = run(
+        Path::new(""),
+        Operation::PreviewExport {
+            base: base.into(),
+            output: output.into(),
+            resume,
+        },
+        &SilentProgress,
+    )
+    .unwrap() else {
+        panic!()
+    };
+    plan
+}
+
+#[test]
+fn export_previews_resumes_and_verifies_without_a_package_or_source_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = common::base_game(dir.path());
+    let pkg = orbis_pkg::Pkg::parse(common::update("01.12", "base.txt", b"UPDATED")).unwrap();
+    install::install(&pkg, &base, SilentProgress).unwrap();
+    let output = dir.path().join("merged");
+    let preview = export_preview(&base, &output, true);
+    assert!(!output.exists());
+    assert_eq!(preview.update_version.as_deref(), Some("01.12"));
+    let required = preview.filesystem.required_free_bytes;
+    let result = run(
+        Path::new(""),
+        Operation::Export {
+            base: base.clone(),
+            preview,
+            resume: true,
+        },
+        &SilentProgress,
+    )
+    .unwrap();
+    assert!(matches!(
+        result,
+        Outcome::Finished {
+            incomplete: false,
+            ..
+        }
+    ));
+    assert_eq!(fs::read(output.join("base.txt")).unwrap(), b"UPDATED");
+    assert_eq!(fs::read(base.join("base.txt")).unwrap(), b"BASE");
+    let original_manifest = fs::read(output.join(".orbis-export.json")).unwrap();
+    let preview = export_preview(&base, &output, true);
+    assert!(preview.filesystem.required_free_bytes < required);
+    assert_eq!(
+        fs::read(output.join(".orbis-export.json")).unwrap(),
+        original_manifest
+    );
+    fs::remove_file(output.join("base.txt")).unwrap();
+    run(
+        Path::new(""),
+        Operation::Export {
+            base: base.clone(),
+            preview,
+            resume: true,
+        },
+        &SilentProgress,
+    )
+    .unwrap();
+    assert_eq!(fs::read(output.join("base.txt")).unwrap(), b"UPDATED");
+    fs::write(output.join("base.txt"), b"USER CONTENT").unwrap();
+    assert!(
+        run(
+            Path::new(""),
+            Operation::PreviewExport {
+                base,
+                output: output.clone(),
+                resume: true
+            },
+            &SilentProgress
+        )
+        .is_err()
+    );
+    assert_eq!(fs::read(output.join("base.txt")).unwrap(), b"USER CONTENT");
+}
+
+#[test]
+fn export_rejects_changed_previews_and_cancellation_never_creates_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = common::base_game(dir.path());
+    let output = dir.path().join("merged");
+    let preview = export_preview(&base, &output, false);
+    fs::write(base.join("added.txt"), b"new file").unwrap();
+    let error = run(
+        Path::new(""),
+        Operation::Export {
+            base: base.clone(),
+            preview,
+            resume: false,
+        },
+        &SilentProgress,
+    )
+    .unwrap_err();
+    assert!(error.details.contains("changed after the preview"));
+    assert!(!output.exists());
+    let preview = export_preview(&base, &output, false);
+    let progress = Progress::default();
+    progress.cancelled.store(true, Ordering::Relaxed);
+    assert!(
+        run(
+            Path::new(""),
+            Operation::Export {
+                base,
+                preview,
+                resume: false
+            },
+            &progress
+        )
+        .unwrap_err()
+        .cancelled
+    );
+    assert!(!output.exists());
+}
+
+#[test]
+fn cancellation_during_export_verification_preserves_the_copy_and_reports_cancellation() {
+    struct CancelVerification(std::sync::atomic::AtomicBool);
+    impl ExtractProgress for CancelVerification {
+        fn phase(&self, name: &str) {
+            if name == "Verifying exported files" {
+                self.0.store(true, Ordering::Relaxed);
+            }
+        }
+        fn is_cancelled(&self) -> bool {
+            self.0.load(Ordering::Relaxed)
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let base = common::base_game(dir.path());
+    let output = dir.path().join("merged");
+    let preview = export_preview(&base, &output, false);
+    let error = run(
+        Path::new(""),
+        Operation::Export {
+            base,
+            preview,
+            resume: false,
+        },
+        &CancelVerification(Default::default()),
+    )
+    .unwrap_err();
+    assert!(error.cancelled);
+    assert!(error.details.contains("Export created"));
+    assert!(output.join("base.txt").is_file());
+    assert!(
+        install::verify_directory(&output, SilentProgress)
+            .unwrap()
+            .issues
+            .is_empty()
+    );
+}
+
+#[test]
+fn automatic_export_verification_reports_corrupt_output_without_changing_sources() {
+    struct Corrupt(PathBuf);
+    impl ExtractProgress for Corrupt {
+        fn phase(&self, name: &str) {
+            if name == "Verifying exported files" {
+                fs::write(self.0.join("base.txt"), b"FAIL").unwrap();
+            }
+        }
+    }
+    for resume in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let base = common::base_game(dir.path());
+        let output = dir.path().join("merged");
+        let preview = export_preview(&base, &output, resume);
+        let Outcome::Finished {
+            title, incomplete, ..
+        } = run(
+            Path::new(""),
+            Operation::Export {
+                base: base.clone(),
+                preview,
+                resume,
+            },
+            &Corrupt(output.clone()),
+        )
+        .unwrap()
+        else {
+            panic!()
+        };
+        assert!(incomplete);
+        assert_eq!(title, "Export verification failed");
+        assert_eq!(fs::read(output.join("base.txt")).unwrap(), b"FAIL");
+        assert_eq!(fs::read(base.join("base.txt")).unwrap(), b"BASE");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn automatic_export_verification_rejects_a_directory_replaced_while_copying() {
+    struct Replace {
+        output: PathBuf,
+        moved: PathBuf,
+        replacement: PathBuf,
+    }
+    impl ExtractProgress for Replace {
+        fn phase(&self, name: &str) {
+            if name == "Resuming merged export" {
+                fs::rename(&self.output, &self.moved).unwrap();
+                fs::rename(&self.replacement, &self.output).unwrap();
+            }
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let base = common::base_game(dir.path());
+    let progress = Replace {
+        output: dir.path().join("merged"),
+        moved: dir.path().join("moved"),
+        replacement: dir.path().join("replacement"),
+    };
+    fs::write(base.join("base.txt"), b"EVIL").unwrap();
+    install::export_merged(&base, &progress.replacement, SilentProgress).unwrap();
+    fs::write(base.join("base.txt"), b"BASE").unwrap();
+    let preview = export_preview(&base, &progress.output, true);
+    let error = run(
+        Path::new(""),
+        Operation::Export {
+            base: base.clone(),
+            preview,
+            resume: true,
+        },
+        &progress,
+    )
+    .unwrap_err();
+    assert!(error.details.contains("Export created"));
+    assert!(error.details.contains("export destination changed"));
+    assert_eq!(fs::read(progress.moved.join("base.txt")).unwrap(), b"BASE");
+    assert_eq!(fs::read(progress.output.join("base.txt")).unwrap(), b"EVIL");
+    assert!(
+        install::verify_directory(&progress.output, SilentProgress)
+            .unwrap()
+            .issues
+            .is_empty()
+    );
+    assert_eq!(fs::read(base.join("base.txt")).unwrap(), b"BASE");
 }
 
 #[test]

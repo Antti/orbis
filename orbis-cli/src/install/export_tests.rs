@@ -32,6 +32,92 @@ fn no_staging(parent: &Path) {
     }));
 }
 
+#[test]
+fn export_verification_rejects_a_rewritten_manifest_and_payload() {
+    for resume in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let base = base_game(temp.path());
+        let output = temp.path().join("merged");
+        let exported = export_for_verification(&base, &output, resume, SilentProgress).unwrap();
+        assert!(exported.verify(SilentProgress).unwrap().issues.is_empty());
+        fs::write(output.join("base.txt"), b"EVIL").unwrap();
+        let manifest_path = output.join(install::directory::MANIFEST);
+        let mut manifest: install::directory::ExportManifest =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        let file = manifest
+            .files
+            .iter_mut()
+            .find(|file| file.path == "base.txt")
+            .unwrap();
+        file.sha256 = format!("{:x}", Sha256::digest(b"EVIL"));
+        fs::write(manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        // A self-consistent replacement inventory passes standalone verify-dir,
+        // but cannot redefine the expected contents of this export.
+        assert!(
+            install::verify_directory(&output, SilentProgress)
+                .unwrap()
+                .issues
+                .is_empty()
+        );
+        assert!(
+            exported
+                .verify(SilentProgress)
+                .unwrap_err()
+                .to_string()
+                .contains("export manifest changed")
+        );
+        assert_eq!(fs::read(base.join("base.txt")).unwrap(), b"BASE");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn export_verification_rejects_directory_replacement_before_and_during_verification() {
+    struct Replace {
+        output: PathBuf,
+        moved: PathBuf,
+        replacement: PathBuf,
+    }
+    impl Replace {
+        fn swap(&self) {
+            fs::rename(&self.output, &self.moved).unwrap();
+            fs::rename(&self.replacement, &self.output).unwrap();
+        }
+    }
+    impl ExtractProgress for Replace {
+        fn phase(&self, name: &str) {
+            if name == "Verifying exported files" {
+                self.swap();
+            }
+        }
+    }
+    for resume in [false, true] {
+        for during in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let base = base_game(temp.path());
+            let progress = Replace {
+                output: temp.path().join("merged"),
+                moved: temp.path().join("moved"),
+                replacement: temp.path().join("replacement"),
+            };
+            // Even identical contents must not let another directory impersonate
+            // the one whose identity was retained by the export.
+            export_merged(&base, &progress.replacement, SilentProgress).unwrap();
+            let exported =
+                export_for_verification(&base, &progress.output, resume, SilentProgress).unwrap();
+            let error = if during {
+                exported.verify(&progress).unwrap_err()
+            } else {
+                progress.swap();
+                exported.verify(SilentProgress).unwrap_err()
+            };
+            assert!(error.to_string().contains("export destination changed"));
+            assert_eq!(fs::read(progress.moved.join("base.txt")).unwrap(), b"BASE");
+            assert_eq!(fs::read(progress.output.join("base.txt")).unwrap(), b"BASE");
+        }
+    }
+}
+
 fn publication_fixture() -> (tempfile::TempDir, Stage, BTreeMap<String, Entry>) {
     let temp = tempfile::tempdir().unwrap();
     let parent = Dir::open_ambient_dir(temp.path(), cap_std::ambient_authority()).unwrap();

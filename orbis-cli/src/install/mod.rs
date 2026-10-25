@@ -14,7 +14,10 @@ mod storage;
 mod transaction;
 pub use status::{InstallationStatus, status};
 
-pub use export::{ExportPlan, ExportReport, export_merged, plan_export, resume_export};
+pub use export::{
+    ExportPlan, ExportReport, ExportedDirectory, export_for_verification, export_merged,
+    plan_export, plan_export_with_resume, resume_export,
+};
 pub use preflight::FilesystemPlan;
 
 use crate::{ExtractError, ExtractOptions, ExtractProgress, PkgExtractor, SilentProgress};

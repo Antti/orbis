@@ -107,7 +107,7 @@ pub(crate) fn copy_new_directory<'a>(
     destination: &Path,
     entries: impl IntoIterator<Item = (&'a Path, bool)>,
     mut checkpoint: impl FnMut(u64) -> io::Result<()>,
-) -> io::Result<()> {
+) -> io::Result<Dir> {
     checkpoint(0)?;
     let source = parent.open_dir(temporary)?;
     parent.create_dir(destination)?; // Fails even for an existing empty directory.
@@ -188,7 +188,7 @@ pub(crate) fn copy_new_directory<'a>(
         ));
     }
     copy.complete = true;
-    Ok(())
+    Ok(copy.dir.take().unwrap())
 }
 
 struct DirectoryCopy<'a> {
@@ -381,6 +381,7 @@ mod tests {
             ],
             checkpoint,
         )
+        .map(drop)
     }
 
     #[test]

@@ -86,6 +86,7 @@ impl Job {
         path: PathBuf,
         operation: Operation,
         ctx: eframe::egui::Context,
+        passcode: Option<Arc<operations::Passcode>>,
     ) -> std::io::Result<Self> {
         let label = operation.label();
         let help = operation.failure_help();
@@ -95,7 +96,12 @@ impl Job {
         let thread = thread::Builder::new()
             .name("orbis-operation".into())
             .spawn(move || {
-                let result = operations::run(&path, operation, worker_progress.as_ref());
+                let result = operations::run_with_passcode(
+                    &path,
+                    operation,
+                    passcode.as_deref(),
+                    worker_progress.as_ref(),
+                );
                 // A modal native picker can outlast the frame's repaint timer.
                 // Wake the event loop explicitly when background work finishes.
                 ctx.request_repaint();

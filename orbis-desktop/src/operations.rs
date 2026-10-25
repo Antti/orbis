@@ -9,6 +9,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod passcode;
+mod verification;
+pub use passcode::Passcode;
+pub use verification::VerificationReport;
+
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
 #[derive(Debug)]
@@ -34,6 +39,19 @@ pub struct PackageInfo {
 #[derive(Debug)]
 pub enum Operation {
     Inspect,
+    Verify {
+        metadata_only: bool,
+    },
+    PreviewExport {
+        base: PathBuf,
+        output: PathBuf,
+        resume: bool,
+    },
+    Export {
+        base: PathBuf,
+        preview: Box<install::ExportPlan>,
+        resume: bool,
+    },
     Extract {
         output: PathBuf,
         resume: bool,
@@ -61,6 +79,9 @@ impl Operation {
     pub fn label(&self) -> &'static str {
         match self {
             Self::Inspect => "Reading package",
+            Self::Verify { .. } => "Verifying package",
+            Self::PreviewExport { .. } => "Checking export",
+            Self::Export { .. } => "Exporting merged game",
             Self::Extract { .. } => "Extracting package",
             Self::PreviewUpdate { .. } => "Checking update",
             Self::InstallUpdate { .. } => "Installing update",
@@ -72,6 +93,12 @@ impl Operation {
 
     pub fn failure_help(&self) -> &'static str {
         match self {
+            Self::Verify { .. } => {
+                "Review the report for failed or unavailable checks. Metadata checks do not verify game data."
+            }
+            Self::PreviewExport { .. } | Self::Export { .. } => {
+                "Choose an original base with a managed separate update, or the base alone. Close the emulator. Resume checks existing files and preserves conflicts. Do not use an export until verification succeeds."
+            }
             Self::Inspect => {
                 "Choose a PlayStation 4 PKG file. Other .pkg formats are not supported."
             }
@@ -94,6 +121,8 @@ impl Operation {
 #[derive(Debug)]
 pub enum Outcome {
     Inspected(PackageInfo),
+    Verified(Box<VerificationReport>),
+    ExportPreview(Box<install::ExportPlan>),
     Preview(install::InstallPlan),
     GameState(install::MergeStatus),
     Merged {
@@ -114,12 +143,37 @@ pub struct Failure {
     pub details: String,
 }
 
+#[derive(Debug)]
+struct ExportVerificationError {
+    output: PathBuf,
+    source: install::InstallError,
+}
+
+impl std::fmt::Display for ExportVerificationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Export created at {}, but verification did not finish. Resume and verify before using it.",
+            self.output.display()
+        )
+    }
+}
+
+impl Error for ExportVerificationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
 impl Failure {
     pub fn from_error(error: &(dyn Error + 'static)) -> Self {
         let mut parts = Vec::new();
         let mut current = Some(error);
         let mut cancelled = false;
         while let Some(error) = current {
+            cancelled |= error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::Interrupted);
             cancelled |= matches!(
                 error.downcast_ref::<ExtractError>(),
                 Some(ExtractError::Cancelled)
@@ -137,20 +191,100 @@ impl Failure {
     }
 }
 
+#[cfg(test)]
 pub fn run(
     path: &Path,
     operation: Operation,
     progress: &impl ExtractProgress,
 ) -> std::result::Result<Outcome, Failure> {
-    execute(path, operation, progress).map_err(|e| Failure::from_error(e.as_ref()))
+    run_with_passcode(path, operation, None, progress)
 }
 
-fn execute(path: &Path, operation: Operation, progress: &impl ExtractProgress) -> Result<Outcome> {
+pub fn run_with_passcode(
+    path: &Path,
+    operation: Operation,
+    passcode: Option<&Passcode>,
+    progress: &impl ExtractProgress,
+) -> std::result::Result<Outcome, Failure> {
+    if let Operation::Verify { metadata_only } = operation {
+        return Ok(Outcome::Verified(Box::new(verification::verify(
+            path,
+            metadata_only,
+            passcode,
+            progress,
+        ))));
+    }
+    execute(path, operation, passcode, progress).map_err(|e| Failure::from_error(e.as_ref()))
+}
+
+fn execute(
+    path: &Path,
+    operation: Operation,
+    passcode: Option<&Passcode>,
+    progress: &impl ExtractProgress,
+) -> Result<Outcome> {
     if progress.is_cancelled() {
         return Err(ExtractError::Cancelled.into());
     }
     // Restoring and recovering a game never require the original package.
     match &operation {
+        Operation::PreviewExport {
+            base,
+            output,
+            resume,
+        } => {
+            return Ok(Outcome::ExportPreview(Box::new(
+                install::plan_export_with_resume(base, output, *resume, progress)?,
+            )));
+        }
+        Operation::Export {
+            base,
+            preview,
+            resume,
+        } => {
+            let fresh =
+                install::plan_export_with_resume(base, &preview.destination, *resume, progress)?;
+            if !same_export(preview, &fresh) {
+                return Err(
+                    "The game or destination changed after the preview. Check the export again."
+                        .into(),
+                );
+            }
+            let exported =
+                install::export_for_verification(base, &preview.destination, *resume, progress)?;
+            let checked = exported
+                .verify(progress)
+                .map_err(|source| ExportVerificationError {
+                    output: exported.report().destination.clone(),
+                    source,
+                })?;
+            let exported = exported.into_report();
+            let incomplete = !checked.complete || !checked.issues.is_empty();
+            return Ok(Outcome::Finished {
+                title: if incomplete {
+                    "Export verification failed"
+                } else {
+                    "Export complete and verified"
+                }
+                .into(),
+                message: if incomplete {
+                    format!(
+                        "The exported directory has {} verification issues. Preserve it and review it with verify-dir before use.",
+                        checked.issues.len()
+                    )
+                } else {
+                    format!(
+                        "{} version {}: {} files ({}), verified against the export manifest. The base and installed update were preserved.",
+                        exported.title_id,
+                        exported.app_version,
+                        checked.checked_files,
+                        human_size(exported.bytes)
+                    )
+                },
+                output: exported.destination,
+                incomplete,
+            });
+        }
         Operation::CheckGame { base } | Operation::PreviewUpdate { base, .. } => {
             if let Some(state) = install::merge_status(base)? {
                 return Ok(Outcome::GameState(state));
@@ -183,6 +317,9 @@ fn execute(path: &Path, operation: Operation, progress: &impl ExtractProgress) -
     // Same mmap contract as the CLI: the selected input must remain unchanged
     // during an operation. The GUI never writes to the input package.
     let mut pkg = unsafe { orbis_cli::inspect_pkg(path)? };
+    if let Some(passcode) = passcode {
+        pkg.load_passcode(passcode.bytes())?;
+    }
     let _ = pkg.load_entry_keys();
     if matches!(operation, Operation::Inspect) {
         let header = pkg.header();
@@ -260,6 +397,9 @@ fn execute(path: &Path, operation: Operation, progress: &impl ExtractProgress) -
     }
     match operation {
         Operation::Inspect
+        | Operation::Verify { .. }
+        | Operation::PreviewExport { .. }
+        | Operation::Export { .. }
         | Operation::CheckGame { .. }
         | Operation::RestoreBase { .. }
         | Operation::RecoverBase { .. } => unreachable!(),
@@ -375,6 +515,16 @@ fn decode_artwork(bytes: &[u8]) -> Option<eframe::egui::ColorImage> {
         [image.width() as usize, image.height() as usize],
         image.as_raw(),
     ))
+}
+
+fn same_export(a: &install::ExportPlan, b: &install::ExportPlan) -> bool {
+    a.title_id == b.title_id
+        && a.base_version == b.base_version
+        && a.update_version == b.update_version
+        && a.destination == b.destination
+        && a.files == b.files
+        && a.update_files == b.update_files
+        && a.bytes == b.bytes
 }
 
 fn same_update(a: &install::InstallPlan, b: &install::InstallPlan) -> bool {
