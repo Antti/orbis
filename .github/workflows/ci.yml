@@ -23,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14, windows-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -34,6 +34,10 @@ jobs:
       - run: cargo test -p orbis-cli --no-default-features --locked
       - if: runner.os == 'Linux'
         run: cargo test --workspace --all-features --release --locked
+      - name: Test software crypto fallback
+        env:
+          RUSTFLAGS: --cfg aes_armv8 --cfg aes_force_soft
+        run: cargo test --workspace --all-features --features sha2/force-soft --locked
 
   clippy:
     name: Clippy

@@ -22,3 +22,7 @@ rsa = "0.9"
 sha2.workspace = true
 snafu.workspace = true
 zerocopy = { workspace = true, features = ["derive", "simd"] }
+
+# SHA-256 runtime detection with software fallback; leave x86 backends unchanged.
+[target.'cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux")))'.dependencies]
+sha2 = { workspace = true, features = ["asm"] }

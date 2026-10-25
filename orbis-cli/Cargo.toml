@@ -39,6 +39,10 @@ rustix = { version = "1", features = ["fs"] }
 winx = "0.36.4"
 windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
 
+# SHA-256 runtime detection with software fallback; leave x86 backends unchanged.
+[target.'cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux")))'.dependencies]
+sha2 = { workspace = true, features = ["asm"] }
+
 [dependencies.clap]
 version = "4.5"
 features = ["derive"]
