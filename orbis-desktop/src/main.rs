@@ -5,6 +5,15 @@ mod operations;
 mod theme;
 mod worker;
 
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../orbis-cli/tests/common/mod.rs"]
+mod common;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../orbis-cli/tests/common/features.rs"]
+mod features;
+
 fn main() -> eframe::Result {
     let path = std::env::args_os()
         .skip(1)

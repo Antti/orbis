@@ -20,6 +20,14 @@ impl OrbisApp {
                     {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui
+                                .add_enabled(self.job.is_none(), egui::Button::new("Export game…"))
+                                .clicked()
+                            {
+                                self.export = Some(super::tools::ExportState::default());
+                                self.merged = None;
+                                self.notice = None;
+                            }
+                            if ui
                                 .add_enabled(self.job.is_none(), egui::Button::new("Manage game…"))
                                 .clicked()
                             {
@@ -35,7 +43,8 @@ impl OrbisApp {
                     }
                 });
             });
-        if self.package.is_some()
+        if self.export.is_some()
+            || self.package.is_some()
             || self.job.is_some()
             || self.notice.is_some()
             || self.merged.is_some()
@@ -58,7 +67,14 @@ impl OrbisApp {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        if self.merged.is_some() {
+                        if self.export.is_some() {
+                            if self.notice.is_none() {
+                                ui.add_enabled_ui(
+                                    self.job.is_none() && !self.close_after_job,
+                                    |ui| self.export_settings(ui, frame),
+                                );
+                            }
+                        } else if self.merged.is_some() {
                             self.merge_details(ui);
                         } else if self.package.is_none() {
                             self.empty_view(ui, frame);
@@ -67,11 +83,17 @@ impl OrbisApp {
                             if self.notice.is_none() {
                                 ui.add_enabled_ui(
                                     self.job.is_none() && !self.close_after_job,
-                                    |ui| self.settings(ui, frame),
+                                    |ui| {
+                                        self.passcode_settings(ui);
+                                        self.settings(ui, frame);
+                                    },
                                 );
                             }
                         }
                         self.result_details(ui);
+                        if self.export.is_none() && self.package.is_some() {
+                            self.verification_details(ui, frame);
+                        }
                     });
             });
     }
@@ -95,7 +117,7 @@ impl OrbisApp {
                 self.choose_package(frame);
             }
             ui.add_space(20.0);
-            ui.label(muted(ui, "Extract files  ·  Install full-file updates").size(13.0));
+            ui.label(muted(ui, "Extract files  ·  Verify packages  ·  Install updates").size(13.0));
         });
     }
 
@@ -153,7 +175,7 @@ impl OrbisApp {
             detail(ui, "Package version", info.package_version.as_deref().unwrap_or("Unavailable"));
             detail(ui, "Region from ID", info.region.unwrap_or("Unknown"));
             detail(ui, "Metadata entries", &info.metadata_entries.to_string());
-            detail(ui, "Integrity", "Not checked");
+            detail(ui, "Integrity", self.verification.as_ref().map_or("Not checked", |r| r.title()));
             detail(ui, "Package file", &info.path.display().to_string());
             ui.label(muted(ui, "Region is inferred from the content ID. The system version is declared by the package; neither establishes emulator compatibility.").size(12.0));
             if !info.update_supported { ui.label(muted(ui, format!("Update installation: {}", info.update_note)).size(12.0)); }
@@ -183,7 +205,7 @@ impl OrbisApp {
     fn settings(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
         let info = self.package.as_ref().unwrap();
         let old_action = self.action;
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.selectable_value(
                 &mut self.action,
                 Action::Extract,
@@ -197,12 +219,26 @@ impl OrbisApp {
                 )
                 .on_disabled_hover_text(&info.update_note);
             });
+            ui.selectable_value(
+                &mut self.action,
+                Action::Verify,
+                heading("Verify package", 14.0),
+            );
         });
         if old_action != self.action {
             self.preview = None;
         }
         ui.add_space(8.0);
         match self.action {
+            Action::Verify => {
+                ui.radio_value(
+                    &mut self.metadata_only,
+                    false,
+                    "Full integrity and readability",
+                );
+                ui.radio_value(&mut self.metadata_only, true, "Metadata only (quicker)");
+                ui.label(muted(ui, "Full verification reads the package and checks stored hashes, supported HMACs, and file readability. Metadata only excludes game data. Missing checks produce an incomplete result.").size(13.0));
+            }
             Action::Extract => {
                 if folder_picker(ui, frame, "Destination", &mut self.parent) {
                     self.notice = None;
@@ -372,6 +408,10 @@ impl OrbisApp {
             }
             return;
         }
+        if self.export.is_some() {
+            self.export_footer(ui);
+            return;
+        }
         if let Some(state) = &self.merged {
             let pending = state.pending_recovery;
             ui.horizontal(|ui| {
@@ -405,6 +445,7 @@ impl OrbisApp {
         let path = package.path.clone();
         ui.horizontal(|ui| {
             let caption = match self.action {
+                Action::Verify => "Verification does not write package data.",
                 Action::Extract => "Existing files are preserved.",
                 Action::Update if self.preview.is_some() => "Close the emulator before installing.",
                 Action::Update => "Check compatibility before installing.",
@@ -413,6 +454,16 @@ impl OrbisApp {
             ui.with_layout(
                 egui::Layout::right_to_left(egui::Align::Center),
                 |ui| match self.action {
+                    Action::Verify => {
+                        if ui.add(theme::primary("Verify package")).clicked() {
+                            self.start(
+                                path,
+                                Operation::Verify {
+                                    metadata_only: self.metadata_only,
+                                },
+                            );
+                        }
+                    }
                     Action::Extract => {
                         let output = self
                             .parent
@@ -569,13 +620,13 @@ fn detail(ui: &mut egui::Ui, label: &str, value: &str) {
     });
 }
 
-fn path_label(ui: &mut egui::Ui, path: &Path, prefix: &str) {
+pub(super) fn path_label(ui: &mut egui::Ui, path: &Path, prefix: &str) {
     let full = format!("{prefix}{}", path.display());
     ui.add(egui::Label::new(muted(ui, &full).size(12.0)).truncate())
         .on_hover_text(&full);
 }
 
-fn folder_picker(
+pub(super) fn folder_picker(
     ui: &mut egui::Ui,
     frame: &eframe::Frame,
     label: &str,
@@ -608,7 +659,7 @@ fn folder_picker(
     changed
 }
 
-fn warning(ui: &mut egui::Ui, message: &str) {
+pub(super) fn warning(ui: &mut egui::Ui, message: &str) {
     let fill = if ui.visuals().dark_mode {
         Color32::from_rgb(58, 44, 28)
     } else {

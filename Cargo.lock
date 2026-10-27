@@ -2494,7 +2494,7 @@ dependencies = [
 
 [[package]]
 name = "orbis-cli"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "aes",
  "cap-std",
@@ -2529,16 +2529,23 @@ dependencies = [
 name = "orbis-desktop"
 version = "0.1.0"
 dependencies = [
+ "aes",
+ "cbc",
  "eframe",
  "image",
  "open",
  "orbis-cli",
+ "orbis-integrity",
  "orbis-pfs",
  "orbis-pkg",
  "rand",
  "rfd",
  "rsa",
+ "serde",
+ "serde_json",
+ "sha2",
  "tempfile",
+ "zeroize",
 ]
 
 [[package]]
@@ -3219,6 +3226,16 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "digest",
+ "sha2-asm",
+]
+
+[[package]]
+name = "sha2-asm"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b845214d6175804686b2bd482bcffe96651bb2d1200742b712003504a2dac1ab"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

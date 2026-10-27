@@ -72,6 +72,11 @@ def package(version: str, target: str, binary: Path, output: Path) -> Path:
         (root / "START-HERE.txt").write_text(
             f"Orbis {version}\n\n{launch}\n\n"
             "Use Open PKG or drop a PlayStation 4 PKG onto the window.\n"
+            "Verify package checks full integrity/readability or metadata only.\n"
+            "Save verification report writes a summary to a new JSON file.\n"
+            "Package passcode validates a known passcode for the open package only.\n"
+            "Export game previews and copies a base plus its separate update, with\n"
+            "resume and automatic verification of the completed export.\n\n"
             "For extraction, choose a destination and click Extract files.\n"
             "For an update, choose the extracted base game, check the update,\n"
             "close the emulator, and click Install update.\n\n"

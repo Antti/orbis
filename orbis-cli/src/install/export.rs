@@ -21,6 +21,10 @@ use plan::PreparedExport;
 #[path = "export_resume.rs"]
 mod resume;
 
+#[path = "export_receipt.rs"]
+mod receipt;
+pub use receipt::ExportedDirectory;
+
 /// The exported version and the bytes actually copied (overridden base files are skipped).
 #[derive(Debug, serde::Serialize)]
 pub struct ExportReport {
@@ -51,9 +55,27 @@ pub fn plan_export(
     output: &Path,
     progress: impl ExtractProgress,
 ) -> Result<ExportPlan> {
+    plan_export_with_resume(base, output, false, progress)
+}
+
+/// Read-only export preview, including validation and remaining-space estimation
+/// for an existing resumable export. Sources and destinations are checked again
+/// by export/resume before writing.
+pub fn plan_export_with_resume(
+    base: &Path,
+    output: &Path,
+    resume: bool,
+    progress: impl ExtractProgress,
+) -> Result<ExportPlan> {
+    check_cancelled(&progress)?;
     let location = storage::Layout::open(base, false)?;
-    let destination = destination(&location, output, false)?;
-    PreparedExport::new(&location, destination.path(), &progress)?.preview(&destination.parent_path)
+    let destination = destination(&location, output, resume)?;
+    let prepared = PreparedExport::new(&location, destination.path(), &progress)?;
+    let mut plan = prepared.preview(&destination.parent_path)?;
+    if resume {
+        plan.filesystem = self::resume::preview(&prepared, &destination, &progress)?;
+    }
+    Ok(plan)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -88,7 +110,7 @@ pub fn export_merged<P: ExtractProgress>(
     output: &Path,
     progress: P,
 ) -> Result<ExportReport> {
-    export_impl(base, output, progress, false)
+    export_impl(base, output, progress, false).map(|exported| exported.into_report())
 }
 
 /// Export directly into a resumable directory. The output is visible while
@@ -98,7 +120,19 @@ pub fn resume_export<P: ExtractProgress>(
     output: &Path,
     progress: P,
 ) -> Result<ExportReport> {
-    export_impl(base, output, progress, true)
+    export_impl(base, output, progress, true).map(|exported| exported.into_report())
+}
+
+/// Export while retaining the directory handle and expected manifest for an
+/// immediate verification of this copy. Uses the same rules as `export_merged`
+/// or `resume_export`, selected by `resume`.
+pub fn export_for_verification(
+    base: &Path,
+    output: &Path,
+    resume: bool,
+    progress: impl ExtractProgress,
+) -> Result<ExportedDirectory> {
+    export_impl(base, output, progress, resume)
 }
 
 fn export_impl<P: ExtractProgress>(
@@ -106,7 +140,7 @@ fn export_impl<P: ExtractProgress>(
     output: &Path,
     progress: P,
     resume: bool,
-) -> Result<ExportReport> {
+) -> Result<ExportedDirectory> {
     check_cancelled(&progress)?;
     // Validate the destination before creating the state directory/lock.
     let preview = storage::Layout::open(base, false)?;
@@ -115,8 +149,8 @@ fn export_impl<P: ExtractProgress>(
     let location = storage::Layout::open(base, true)?;
     let mut prepared = PreparedExport::new(&location, destination.path(), &progress)?;
     if resume {
-        resume::run(&prepared, &destination, &progress)?;
-        return Ok(prepared.report);
+        let (dir, manifest) = resume::run(&prepared, &destination, &progress)?;
+        return Ok(ExportedDirectory::new(prepared.report, dir, manifest));
     }
     prepared
         .filesystem_plan(&destination.parent_path)?
@@ -167,9 +201,13 @@ fn export_impl<P: ExtractProgress>(
         storage::sync_dir(&stage.dir.as_ref().unwrap().open_dir(&entry.path)?)?;
     }
     check_cancelled(&progress)?;
-    stage.publish(&prepared.entries, prepared.report.bytes, &progress)?;
+    let dir = stage.publish(&prepared.entries, prepared.report.bytes, &progress)?;
     progress.pfs_completed();
-    Ok(prepared.report)
+    Ok(ExportedDirectory::new(
+        prepared.report,
+        dir,
+        export_manifest,
+    ))
 }
 
 fn check_cancelled(progress: &impl ExtractProgress) -> Result<()> {
@@ -423,7 +461,7 @@ impl Stage {
         entries: &BTreeMap<String, Entry>,
         bytes: u64,
         progress: &impl ExtractProgress,
-    ) -> Result<()> {
+    ) -> Result<Dir> {
         self.publish_with(entries, bytes, progress, publish_new)
     }
 
@@ -433,11 +471,11 @@ impl Stage {
         bytes: u64,
         progress: &impl ExtractProgress,
         rename: impl FnOnce(&Dir, &str, &Path) -> std::io::Result<()>,
-    ) -> Result<()> {
+    ) -> Result<Dir> {
         storage::sync_dir(self.dir.as_ref().unwrap())?;
         // Windows cannot rename a directory while it has an open directory handle.
         self.dir.take();
-        match rename(&self.parent, &self.temporary, Path::new(&self.destination)) {
+        let dir = match rename(&self.parent, &self.temporary, Path::new(&self.destination)) {
             Err(error) if unsupported_publication(&error) => {
                 progress.phase("Publishing export on this filesystem");
                 progress.bytes_total(bytes);
@@ -462,16 +500,26 @@ impl Stage {
                     } else {
                         error.into()
                     }
-                })?;
+                })?
             }
-            result => result?,
-        }
+            result => {
+                result?;
+                let dir = self.parent.open_dir(&self.destination)?;
+                if self
+                    .identity
+                    .is_some_and(|identity| directory_identity(&dir).ok() != Some(identity))
+                {
+                    return Err(invalid("export destination changed during publication"));
+                }
+                dir
+            }
+        };
         if let Err(error) = storage::sync_dir(&self.parent) {
             progress.warning(&format!(
                 "Export completed, but syncing its parent directory failed: {error}"
             ));
         }
-        Ok(())
+        Ok(dir)
     }
 }
 

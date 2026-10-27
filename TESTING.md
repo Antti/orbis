@@ -10,9 +10,32 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo fmt --all --check
 ```
 
-CI runs the debug tests on Linux, macOS, and Windows, and release tests on Linux.
+CI runs the debug tests on Linux (x86-64 and ARM64), macOS, and Windows, and
+release tests on Linux.
 Release tests matter because integer overflow behaves differently between debug
 and optimized builds.
+
+The same CI matrix repeats the workspace tests with software AES and SHA-2:
+
+```sh
+RUSTFLAGS="--cfg aes_armv8 --cfg aes_force_soft" \
+  cargo test --workspace --all-features --features sha2/force-soft --locked
+```
+
+This forces software even on accelerated hardware. Fixed AES, SHA-256, and
+HMAC-SHA-256 vectors also check results independently of the synthetic package
+encoders. Normal ARM64 macOS/Linux builds enable the dependencies' CPU detection
+and software fallback; no `target-cpu=native` or global crypto target features
+are required. x86 backends retain their existing runtime detection.
+
+Repository builds enable ARM AES through `.cargo/config.toml`; custom
+[`RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS`](https://doc.rust-lang.org/cargo/reference/config.html#buildrustflags)
+override that setting. Include
+`--cfg aes_armv8` in custom flags to retain acceleration. Cargo installations
+from outside the checkout, such as `cargo install --git`, also need that flag
+for ARM AES. SHA-256 selection is declared in the package manifests. The ARM
+SHA feature adds the `sha2-asm` build dependency and needs a C/assembly compiler
+for the target; official release builders already provide one.
 
 The tests construct small synthetic PKG, PFS, and PFSC images. They cover malformed
 headers, block reads, decompression, extraction boundaries, and overwrite policy
@@ -140,6 +163,70 @@ good extraction. Record package hashes, tool revision, exit status and omissions
 do not treat an incomplete result as a full pass. Use `--passcode-file` only when
 the correct package passcode is known. Broader compatibility still requires more
 representative packages and platforms.
+
+## Desktop 0.5.0 regressions
+
+Desktop 0.5.0 regression tests additionally exercise verification scopes and
+complete/incomplete/failed/cancelled reports, report saving without overwrites,
+validated passcodes and their per-package lifetime, export source changes after
+preview, resume conflicts, automatic directory verification, and cancellation
+after an export has been copied. These use the same independent synthetic PKG
+encoders as the CLI feature tests.
+
+Review regressions exercise the password widget's real paste/undo/redo history
+after validation, clearing, and opening another package. Export tests replace
+the destination during copying or verification and rewrite both payload and
+manifest; verification must remain bound to the copied directory and expected
+hashes. Other tests confirm corrupt copies report failure and skipped readability
+entries alone produce incomplete JSON even when every available hash passes.
+These fixes were checked after the native real-package runs described below;
+those large native runs were not repeated for the review fixes.
+The final local runs passed 216 tests each in debug, release, and forced-software
+release profiles, plus 89 CLI tests without default features. Clippy, formatting,
+the optimized workspace build, and macOS archive packaging also passed.
+
+A local macOS arm64 native-app check on 2026-10-24 exercised the file pickers,
+full verification and JSON report saving, passcode validation that unlocked
+metadata, merged export and resume, and a deliberately corrupted package. All
+exported file hashes were independently compared with the generated manifest;
+base and update files remained unchanged. This used disposable synthetic
+packages. The USB was unavailable and the user chose to finish without another
+real-package check. Native Windows/Linux interaction was not tested locally.
+
+On 2026-10-25, the native macOS 0.5.0 release build also verified the real
+Bloodborne base/update pair below. The base passcode unlocked its remaining
+metadata entry, and cancellation produced a saveable interrupted report. Full
+verification then passed for a SHA-256-matched APFS copy of the base and for the
+update directly on USB. Both saved JSON reports matched the earlier CLI check
+counts and readable byte totals, with no unavailable checks, failures, or skips.
+The local base check took about 18.5 minutes; this was a functional check, not an
+isolated benchmark. Profiling confirmed software SHA-256 and AES backends in
+that ARM release build; the dependencies' optional ARM acceleration was disabled.
+
+After enabling ARM acceleration, all 207 workspace tests passed locally in
+debug and release builds and in a forced-software release build. The real
+181,338,112-byte update was checked with the old, accelerated, and forced-software
+CLI release binaries on the same M1 Max. Each used one warm-up followed by three
+measured runs on the same APFS copy, alternating binary order with no concurrent
+builds or package jobs. Median full integrity/readability times were 6.120 s,
+0.348 s, and 6.134 s respectively: a 17.6× improvement for this warm-cache sample.
+All twelve JSON reports were identical, including every individual check.
+This is not a USB throughput benchmark or a general speedup guarantee.
+
+The rebuilt native app also passed full base/update verification on checksum-
+matched APFS copies, with exactly the earlier GUI check counts and readable
+byte totals. Base completion was observed within five minutes; this functional
+check was not an isolated timing comparison with the earlier 18.5-minute run.
+Temporary PKG copies were removed after the saved reports were compared;
+the USB originals retained their sizes and modification times.
+
+The real-game GUI export preview blocked insufficient disk space, then enabled
+export after the temporary PKG copy was removed. Export and automatic manifest
+verification completed for version `01.09`: 28,850 files and 31,438,466,019 bytes.
+Independent Python hashes and path comparisons matched the prior validated
+export manifest, and all original base/update payload files retained their
+recorded hashes. This real export used resume mode; interruption and missing-file
+resume in the GUI were covered by the synthetic run above.
 
 ## Real base/update validation (2026-10-23)
 

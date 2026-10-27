@@ -20,4 +20,4 @@ zerocopy = { version = "0.8.38" }
 
 orbis-pfs = { version = "0.1.0", path = "orbis-pfs" }
 orbis-pkg = { version = "0.1.0", path = "orbis-pkg" }
-orbis-cli = { version = "0.4.0", path = "orbis-cli" }
+orbis-cli = { version = "0.5.0", path = "orbis-cli" }

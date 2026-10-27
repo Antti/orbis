@@ -4,15 +4,23 @@ use crate::{
 };
 use eframe::egui;
 
+#[cfg(test)]
+mod tests;
+mod tools;
 mod view;
 use orbis_cli::install::{InstallMode, InstallPlan, MergeStatus};
-use std::{path::PathBuf, sync::atomic::Ordering, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::{Arc, atomic::Ordering},
+    time::Duration,
+};
 
 #[derive(Default, PartialEq, Eq, Clone, Copy)]
 enum Action {
     #[default]
     Extract,
     Update,
+    Verify,
 }
 
 struct Notice {
@@ -39,6 +47,13 @@ pub struct OrbisApp {
     job: Option<Job>,
     notice: Option<Notice>,
     warnings: Details,
+    metadata_only: bool,
+    verification: Option<Box<operations::VerificationReport>>,
+    passcode_input: zeroize::Zeroizing<String>,
+    passcode: Option<Arc<operations::Passcode>>,
+    pending_passcode: Option<Arc<operations::Passcode>>,
+    refreshing_package: bool,
+    export: Option<tools::ExportState>,
     close_prompt: bool,
     close_after_job: bool,
 }
@@ -57,6 +72,12 @@ impl OrbisApp {
     }
 
     fn open(&mut self, path: PathBuf) {
+        self.passcode = None;
+        self.pending_passcode = None;
+        self.reset_passcode_input();
+        self.verification = None;
+        self.refreshing_package = false;
+        self.export = None;
         self.package = None;
         self.artwork = None;
         self.parent = None;
@@ -73,11 +94,25 @@ impl OrbisApp {
         if self.job.is_some() {
             return;
         }
+        if matches!(operation, Operation::Verify { .. }) {
+            self.verification = None;
+        }
         self.notice = None;
         self.warnings = Details::default();
-        match Job::start(path, operation, self.ctx.clone()) {
+        match Job::start(
+            path,
+            operation,
+            self.ctx.clone(),
+            self.pending_passcode
+                .clone()
+                .or_else(|| self.passcode.clone()),
+        ) {
             Ok(job) => self.job = Some(job),
-            Err(e) => self.local_error("Could not start the operation", e.to_string()),
+            Err(e) => {
+                self.pending_passcode = None;
+                self.refreshing_package = false;
+                self.local_error("Could not start the operation", e.to_string());
+            }
         }
         self.ctx.request_repaint();
     }
@@ -107,14 +142,35 @@ impl OrbisApp {
                     self.ctx
                         .load_texture("package-artwork", image, egui::TextureOptions::LINEAR)
                 });
-                self.action = if info.update_supported {
-                    Action::Update
-                } else {
-                    Action::Extract
-                };
-                self.folder_name = operations::suggested_folder(&info);
-                self.parent = info.path.parent().map(PathBuf::from);
+                if let Some(passcode) = self.pending_passcode.take() {
+                    self.passcode = Some(passcode);
+                }
+                if !self.refreshing_package {
+                    self.action = if info.update_supported {
+                        Action::Update
+                    } else {
+                        Action::Extract
+                    };
+                    self.folder_name = operations::suggested_folder(&info);
+                    self.parent = info.path.parent().map(PathBuf::from);
+                }
+                self.refreshing_package = false;
                 self.package = Some(info);
+            }
+            Ok(Outcome::Verified(report)) => {
+                self.notice = Some(Notice {
+                    title: report.title().into(),
+                    message: String::new(),
+                    details: report.error.clone().unwrap_or_default(),
+                    output: None,
+                    attention: report.status != "complete",
+                });
+                self.verification = Some(report);
+            }
+            Ok(Outcome::ExportPreview(plan)) => {
+                if let Some(export) = &mut self.export {
+                    export.preview = Some(plan);
+                }
             }
             Ok(Outcome::Preview(plan)) => self.preview = Some(plan),
             Ok(Outcome::GameState(state)) => {
@@ -152,6 +208,11 @@ impl OrbisApp {
                 });
             }
             Err(failure) => {
+                self.pending_passcode = None;
+                self.refreshing_package = false;
+                if let Some(export) = &mut self.export {
+                    export.preview = None;
+                }
                 self.preview = None;
                 self.notice = Some(Notice {
                     title: if failure.cancelled {
@@ -174,6 +235,7 @@ impl OrbisApp {
             .set_title("Manage game folder")
             .pick_folder()
         {
+            self.export = None;
             self.base = Some(base.clone());
             self.preview = None;
             self.merged = None;

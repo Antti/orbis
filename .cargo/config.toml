@@ -1,0 +1,4 @@
+# Enable runtime AES detection, not a CPU requirement. The crate falls back to
+# software on CPUs without AES instructions. Other targets keep their defaults.
+[target.'cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux")))']
+rustflags = ["--cfg", "aes_armv8"]

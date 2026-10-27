@@ -1,6 +1,6 @@
 [package]
 name = "orbis-cli"
-version = "0.4.1"
+version = "0.5.0"
 default-run = "orbis"
 edition = "2024"
 description = "PS4 PKG extractor, integrity checker, and update installer for Windows, Linux, and macOS"
@@ -38,6 +38,10 @@ rustix = { version = "1", features = ["fs"] }
 [target.'cfg(windows)'.dependencies]
 winx = "0.36.4"
 windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
+
+# SHA-256 runtime detection with software fallback; leave x86 backends unchanged.
+[target.'cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux")))'.dependencies]
+sha2 = { workspace = true, features = ["asm"] }
 
 [dependencies.clap]
 version = "4.5"
