@@ -1,5 +1,5 @@
 //! Materialize the installed base/update overlay as an independent directory.
-use super::{Result, invalid, storage};
+use super::{Result, directory::ExportManifest, invalid, storage};
 use crate::inventory::FileRecord;
 use crate::{
     ExtractError, ExtractProgress,
@@ -67,15 +67,72 @@ pub fn plan_export_with_resume(
     resume: bool,
     progress: impl ExtractProgress,
 ) -> Result<ExportPlan> {
-    check_cancelled(&progress)?;
+    if resume {
+        return Ok(ExportPreview::new(base, output, true, progress)?.plan);
+    }
+    let (destination, prepared) = prepare_preview(base, output, false, &progress)?;
+    Ok(prepared.preview(prepared.filesystem_plan(&destination.parent_path)?))
+}
+
+fn prepare_preview(
+    base: &Path,
+    output: &Path,
+    resume: bool,
+    progress: &impl ExtractProgress,
+) -> Result<(ExportDestination, PreparedExport)> {
+    check_cancelled(progress)?;
     let location = storage::Layout::open(base, false)?;
     let destination = destination(&location, output, resume)?;
-    let prepared = PreparedExport::new(&location, destination.path(), &progress)?;
-    let mut plan = prepared.preview(&destination.parent_path)?;
-    if resume {
-        plan.filesystem = self::resume::preview(&prepared, &destination, &progress)?;
+    let prepared = PreparedExport::new(&location, destination.path(), progress)?;
+    Ok((destination, prepared))
+}
+
+/// An export awaiting confirmation. Keeps the approved versions, paths and hashes
+/// together with the destination and publication mode selected by the caller.
+#[derive(Debug)]
+pub struct ExportPreview {
+    base: PathBuf,
+    resume: bool,
+    plan: ExportPlan,
+    manifest: ExportManifest,
+}
+
+impl ExportPreview {
+    pub fn new(
+        base: &Path,
+        output: &Path,
+        resume: bool,
+        progress: impl ExtractProgress,
+    ) -> Result<Self> {
+        let (destination, prepared) = prepare_preview(base, output, resume, &progress)?;
+        let manifest = prepared.source_manifest(&progress)?;
+        let filesystem = if resume {
+            resume::inspect_remaining(&manifest, &destination, &progress)?.filesystem
+        } else {
+            prepared.filesystem_plan(&destination.parent_path)?
+        };
+        Ok(Self {
+            base: base.to_owned(),
+            resume,
+            plan: prepared.preview(filesystem),
+            manifest,
+        })
     }
-    Ok(plan)
+
+    pub fn plan(&self) -> &ExportPlan {
+        &self.plan
+    }
+
+    /// Revalidate under the install lock, then copy the approved content.
+    pub fn export(&self, progress: impl ExtractProgress) -> Result<ExportedDirectory> {
+        export_impl(
+            &self.base,
+            &self.plan.destination,
+            progress,
+            self.resume,
+            Some(self),
+        )
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -110,7 +167,7 @@ pub fn export_merged<P: ExtractProgress>(
     output: &Path,
     progress: P,
 ) -> Result<ExportReport> {
-    export_impl(base, output, progress, false).map(|exported| exported.into_report())
+    export_impl(base, output, progress, false, None).map(|exported| exported.into_report())
 }
 
 /// Export directly into a resumable directory. The output is visible while
@@ -120,7 +177,7 @@ pub fn resume_export<P: ExtractProgress>(
     output: &Path,
     progress: P,
 ) -> Result<ExportReport> {
-    export_impl(base, output, progress, true).map(|exported| exported.into_report())
+    export_impl(base, output, progress, true, None).map(|exported| exported.into_report())
 }
 
 /// Export while retaining the directory handle and expected manifest for an
@@ -132,7 +189,7 @@ pub fn export_for_verification(
     resume: bool,
     progress: impl ExtractProgress,
 ) -> Result<ExportedDirectory> {
-    export_impl(base, output, progress, resume)
+    export_impl(base, output, progress, resume, None)
 }
 
 fn export_impl<P: ExtractProgress>(
@@ -140,6 +197,7 @@ fn export_impl<P: ExtractProgress>(
     output: &Path,
     progress: P,
     resume: bool,
+    approved: Option<&ExportPreview>,
 ) -> Result<ExportedDirectory> {
     check_cancelled(&progress)?;
     // Validate the destination before creating the state directory/lock.
@@ -148,9 +206,21 @@ fn export_impl<P: ExtractProgress>(
     drop(preview);
     let location = storage::Layout::open(base, true)?;
     let mut prepared = PreparedExport::new(&location, destination.path(), &progress)?;
-    if resume {
-        let (dir, manifest) = resume::run(&prepared, &destination, &progress)?;
-        return Ok(ExportedDirectory::new(prepared.report, dir, manifest));
+    if resume || approved.is_some() {
+        let manifest = prepared.source_manifest(&progress)?;
+        if let Some(preview) = approved
+            && (manifest != preview.manifest
+                || prepared.report.update_files != preview.plan.update_files
+                || prepared.report.destination != preview.plan.destination)
+        {
+            return Err(invalid(
+                "The game or destination changed after the preview. Check the export again.",
+            ));
+        }
+        if resume {
+            let (dir, manifest) = resume::run(&prepared, &destination, manifest, &progress)?;
+            return Ok(ExportedDirectory::new(prepared.report, dir, manifest));
+        }
     }
     prepared
         .filesystem_plan(&destination.parent_path)?
@@ -174,6 +244,13 @@ fn export_impl<P: ExtractProgress>(
             &entry.path,
             &progress,
         )?);
+    }
+    // A base file can also change during the staged copy. Check the bytes
+    // actually copied before publishing the directory.
+    if let Some(preview) = approved
+        && records != preview.manifest.files
+    {
+        return Err(invalid("source changed during export"));
     }
     let export_manifest = prepared.manifest(records, true);
     storage::write_json(

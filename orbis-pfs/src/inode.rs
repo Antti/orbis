@@ -230,14 +230,9 @@ impl Inode {
         }
 
         // Load direct pointers.
-        for i in 0..12 {
-            ensure!(
-                u64::from(self.direct_blocks[i]) < available,
-                NotExistsSnafu {
-                    block: self.direct_blocks[i]
-                }
-            );
-            blocks.push(self.direct_blocks[i]);
+        for &block in &self.direct_blocks {
+            ensure!(u64::from(block) < available, NotExistsSnafu { block });
+            blocks.push(block);
             if blocks.len() == block_count {
                 return Ok(blocks);
             }

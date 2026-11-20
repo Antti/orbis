@@ -1,7 +1,7 @@
 use super::*;
 use orbis_integrity::Status;
 use serde::Serialize;
-use std::{collections::BTreeMap, io::Write, time::SystemTime};
+use std::{collections::BTreeMap, time::SystemTime};
 
 #[derive(Debug, Default, Serialize)]
 pub struct CheckSummary {
@@ -51,18 +51,9 @@ impl VerificationReport {
         }
     }
 
-    /// Publish a new report atomically; never overwrite a PKG or existing file.
+    /// Save the summary to a new file, including on removable media.
     pub fn save(&self, destination: &Path) -> Result<()> {
-        let parent = destination
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        let mut file = tempfile::NamedTempFile::new_in(parent)?;
-        serde_json::to_writer_pretty(&mut file, self)?;
-        file.write_all(b"\n")?;
-        file.as_file().sync_all()?;
-        file.persist_noclobber(destination)?;
-        Ok(())
+        Ok(orbis_cli::save_new_json(destination, self)?)
     }
 }
 

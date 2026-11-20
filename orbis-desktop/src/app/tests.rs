@@ -55,8 +55,12 @@ fn passcodes_are_accepted_only_after_validation_and_cleared_for_another_package(
             .skipped
             .is_empty()
     );
+    assert!(app.package.as_ref().unwrap().update_supported);
+    app.action = Action::Update;
     app.clear_passcode();
     finish(&mut app);
+    assert!(!app.package.as_ref().unwrap().update_supported);
+    assert!(app.action == Action::Extract);
     assert!(app.passcode.is_none());
     assert!(app.verification.is_none());
     assert_eq!(app.package.as_ref().unwrap().missing_keys, 1);

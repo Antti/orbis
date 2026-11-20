@@ -47,11 +47,7 @@ pub enum Operation {
         output: PathBuf,
         resume: bool,
     },
-    Export {
-        base: PathBuf,
-        preview: Box<install::ExportPlan>,
-        resume: bool,
-    },
+    Export(Box<install::ExportPreview>),
     Extract {
         output: PathBuf,
         resume: bool,
@@ -81,7 +77,7 @@ impl Operation {
             Self::Inspect => "Reading package",
             Self::Verify { .. } => "Verifying package",
             Self::PreviewExport { .. } => "Checking export",
-            Self::Export { .. } => "Exporting merged game",
+            Self::Export(_) => "Exporting merged game",
             Self::Extract { .. } => "Extracting package",
             Self::PreviewUpdate { .. } => "Checking update",
             Self::InstallUpdate { .. } => "Installing update",
@@ -96,7 +92,7 @@ impl Operation {
             Self::Verify { .. } => {
                 "Review the report for failed or unavailable checks. Metadata checks do not verify game data."
             }
-            Self::PreviewExport { .. } | Self::Export { .. } => {
+            Self::PreviewExport { .. } | Self::Export(_) => {
                 "Choose an original base with a managed separate update, or the base alone. Close the emulator. Resume checks existing files and preserves conflicts. Do not use an export until verification succeeds."
             }
             Self::Inspect => {
@@ -122,7 +118,7 @@ impl Operation {
 pub enum Outcome {
     Inspected(PackageInfo),
     Verified(Box<VerificationReport>),
-    ExportPreview(Box<install::ExportPlan>),
+    ExportPreview(Box<install::ExportPreview>),
     Preview(install::InstallPlan),
     GameState(install::MergeStatus),
     Merged {
@@ -234,24 +230,11 @@ fn execute(
             resume,
         } => {
             return Ok(Outcome::ExportPreview(Box::new(
-                install::plan_export_with_resume(base, output, *resume, progress)?,
+                install::ExportPreview::new(base, output, *resume, progress)?,
             )));
         }
-        Operation::Export {
-            base,
-            preview,
-            resume,
-        } => {
-            let fresh =
-                install::plan_export_with_resume(base, &preview.destination, *resume, progress)?;
-            if !same_export(preview, &fresh) {
-                return Err(
-                    "The game or destination changed after the preview. Check the export again."
-                        .into(),
-                );
-            }
-            let exported =
-                install::export_for_verification(base, &preview.destination, *resume, progress)?;
+        Operation::Export(preview) => {
+            let exported = preview.export(progress)?;
             let checked = exported
                 .verify(progress)
                 .map_err(|source| ExportVerificationError {
@@ -399,7 +382,7 @@ fn execute(
         Operation::Inspect
         | Operation::Verify { .. }
         | Operation::PreviewExport { .. }
-        | Operation::Export { .. }
+        | Operation::Export(_)
         | Operation::CheckGame { .. }
         | Operation::RestoreBase { .. }
         | Operation::RecoverBase { .. } => unreachable!(),
@@ -515,16 +498,6 @@ fn decode_artwork(bytes: &[u8]) -> Option<eframe::egui::ColorImage> {
         [image.width() as usize, image.height() as usize],
         image.as_raw(),
     ))
-}
-
-fn same_export(a: &install::ExportPlan, b: &install::ExportPlan) -> bool {
-    a.title_id == b.title_id
-        && a.base_version == b.base_version
-        && a.update_version == b.update_version
-        && a.destination == b.destination
-        && a.files == b.files
-        && a.update_files == b.update_files
-        && a.bytes == b.bytes
 }
 
 fn same_update(a: &install::InstallPlan, b: &install::InstallPlan) -> bool {

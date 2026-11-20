@@ -7,8 +7,11 @@ work_dir=$(mktemp -d "${TMPDIR:-/tmp}/orbis-filesystem.XXXXXX")
 mount_dir="$work_dir/mount"
 mkdir "$mount_dir"
 mounted=false
+resume_mount="$work_dir/resume-volume"
+resume_mounted=false
 loop_device=''
 cleanup() {
+  if [[ $resume_mounted == true ]]; then sudo umount "$resume_mount" || return; fi
   if [[ $mounted == true ]]; then
     if [[ $(uname -s) == Darwin ]]; then
       # Spotlight/volume services can briefly keep a newly mounted APFS image
@@ -59,4 +62,12 @@ mounted=true
 touch "$mount_dir/.metadata_never_index"
 export ORBIS_TEST_EXTRACT_ROOT="$mount_dir" ORBIS_TEST_EXPORT_ROOT="$mount_dir"
 export ORBIS_TEST_FILESYSTEM="$expected_filesystem"
+# An existing export can itself be a mount point. Bind an empty directory so
+# the volume root's filesystem metadata is outside the exported game.
+if [[ $(uname -s) == Linux ]]; then
+  mkdir "$mount_dir/empty-export" "$resume_mount"
+  sudo mount --bind "$mount_dir/empty-export" "$resume_mount"
+  resume_mounted=true
+  export ORBIS_TEST_RESUME_MOUNT="$resume_mount"
+fi
 cargo test -p orbis-cli --lib --locked configured_external_filesystem -- --nocapture

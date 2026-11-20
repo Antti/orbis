@@ -41,6 +41,7 @@ pub use self::extract::{
     ExtractError, ExtractOptions, ExtractionReport, IntegrityReport, ListedItem, PkgExtractor,
     SkippedEntry,
 };
+pub use self::fs_output::save_new_json;
 pub use self::progress::{ExtractProgress, SilentProgress};
 
 #[cfg(feature = "cli")]
