@@ -61,8 +61,13 @@ impl FilesystemPlan {
                 "Fallback publication is visible while copying; use the output only after export succeeds.".into()],
         })
     }
+    pub fn shortfall_bytes(&self) -> u64 {
+        self.required_free_bytes
+            .saturating_sub(self.available_bytes)
+    }
+
     pub(super) fn require_space(&self) -> Result<()> {
-        if self.available_bytes < self.required_free_bytes {
+        if self.shortfall_bytes() > 0 {
             return Err(invalid(format!(
                 "insufficient export space: reserve {} bytes, {} available",
                 self.required_free_bytes, self.available_bytes

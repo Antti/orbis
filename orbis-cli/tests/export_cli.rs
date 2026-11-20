@@ -134,6 +134,75 @@ fn dry_run_reports_overlay_and_space_without_creating_state_or_output() {
 }
 
 #[test]
+fn resume_dry_run_counts_verified_files_and_preserves_partial_output() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let base = base_game(root);
+    let sfo = "sce_sys/param.sfo";
+    let bytes = fs::metadata(base.join(sfo)).unwrap().len();
+    let args = ["export", "--base", "CUSA00000", "-o", "merged", "--resume"];
+    let dry_run = |json: bool| {
+        let mut command = args.to_vec();
+        command.push("--dry-run");
+        if json {
+            command.push("--json");
+        }
+        run(root, &command)
+    };
+    let read_plan = || {
+        let output = dry_run(true);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let initial = read_plan();
+    assert_eq!(
+        initial["resume"],
+        serde_json::json!({"reusable_files":0,"remaining_files":2,"remaining_bytes":bytes+4})
+    );
+    assert!(!root.join("merged").exists());
+    assert!(!root.join(".CUSA00000.orbis-install").exists());
+    success(&run(root, &args));
+    let complete = read_plan();
+    assert_eq!(
+        complete["resume"],
+        serde_json::json!({"reusable_files":2,"remaining_files":0,"remaining_bytes":0})
+    );
+
+    let merged = root.join("merged");
+    let manifest = merged.join(".orbis-export.json");
+    let original = fs::read(&manifest).unwrap();
+    fs::remove_file(merged.join(sfo)).unwrap();
+    fs::remove_dir(merged.join("sce_sys")).unwrap();
+    let partial = read_plan();
+    assert_eq!(
+        partial["resume"],
+        serde_json::json!({"reusable_files":1,"remaining_files":1,"remaining_bytes":bytes})
+    );
+    assert!(
+        partial["filesystem"]["required_free_bytes"]
+            .as_u64()
+            .unwrap()
+            < initial["filesystem"]["required_free_bytes"]
+                .as_u64()
+                .unwrap()
+    );
+    let human = dry_run(false);
+    assert!(human.status.success());
+    assert!(
+        String::from_utf8_lossy(&human.stdout).contains("Reusable files: 1. Remaining files: 1")
+    );
+    assert!(!merged.join("sce_sys").exists());
+    fs::write(merged.join("base.txt"), b"EDIT").unwrap();
+    assert_eq!(dry_run(true).status.code(), Some(1));
+    assert_eq!(fs::read(merged.join("base.txt")).unwrap(), b"EDIT");
+    assert_eq!(fs::read(manifest).unwrap(), original);
+}
+
+#[test]
 fn verifies_export_and_reports_changed_missing_and_unexpected_files() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();

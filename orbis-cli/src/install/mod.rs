@@ -17,8 +17,8 @@ pub use rollback::{SeparateRollback, rollback, rollback_with_progress};
 pub use status::{InstallationStatus, status, status_with_rollback};
 
 pub use export::{
-    ExportPlan, ExportPreview, ExportReport, ExportedDirectory, export_for_verification,
-    export_merged, plan_export, plan_export_with_resume, resume_export,
+    ExportEstimate, ExportPlan, ExportPreview, ExportReport, ExportedDirectory, ResumePlan,
+    export_for_verification, export_merged, plan_export, plan_export_with_resume, resume_export,
 };
 pub use preflight::FilesystemPlan;
 

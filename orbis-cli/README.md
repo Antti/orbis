@@ -479,12 +479,20 @@ Preview a merged export without creating output or installation state:
 ```sh
 orbis export --base ./CUSA12345 -o /Volumes/GAMES/game --dry-run
 orbis export --base ./CUSA12345 -o /Volumes/GAMES/game --dry-run --json
+orbis export --base ./CUSA12345 -o /Volumes/GAMES/game --resume --dry-run
 ```
 
 The plan reports versions, file counts, bytes, filesystem type, and available space.
 The reserve allows for two copies, allocation rounding, and metadata. It is conservative;
 quotas and concurrent writes can still exhaust space. FAT32 files over 4 GiB minus one
 byte are refused. Dry-run returns exit 3 when available space is below the reserve.
+
+For a new destination, Orbis checks the reserve before hashing game files.
+For an existing destination, `--resume --dry-run` verifies the export manifest
+and files, then reports the reusable file count, remaining files and bytes, and
+space needed to finish. Add `--json` for the `resume.reusable_files`,
+`resume.remaining_files`, and `resume.remaining_bytes` fields. A conflict exits
+with code 1 and preserves the partial export.
 
 Every new export includes `.orbis-export.json`, with the base/update versions and
 SHA-256 of every game file. Check a copied or moved export with:

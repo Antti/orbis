@@ -80,12 +80,15 @@ This does not decrypt arbitrary retail filesystems.
 **Export game…** works without opening a PKG. Choose the original extracted base,
 the destination parent, and an output folder name. Orbis includes its managed
 separate update automatically; with none installed, it exports the base alone.
-Restore an in-place merge before exporting. **Check export** hashes the source
-files and previews versions, file counts, destination, and a free-space reserve.
+Restore an in-place merge before exporting. For a new destination, **Check
+export** compares the free-space reserve with available space before hashing
+game files. If the drive is short on space, Orbis shows how much more it needs.
+**Choose another drive…** keeps the output folder name and rechecks the new destination.
 
 Resume is enabled by default. It checks source hashes, the existing export
 manifest, and completed files before reusing them; conflicting files remain
-untouched. The preview estimates space for missing files, including filesystem
+untouched. The preview shows how many files can be reused, how much data remains
+to copy, and the space reserve for missing files, including filesystem
 overhead. **Export and verify** rechecks the source paths, versions, and hashes
 under the install lock before copying. If they have changed, check the export
 again. Orbis verifies the copied files before reporting success.

@@ -79,6 +79,24 @@ pub(super) struct RemainingExport {
     missing: BTreeSet<String>,
 }
 
+impl RemainingExport {
+    pub fn work(&self, manifest: &directory::ExportManifest) -> ResumePlan {
+        let mut remaining_files = 0;
+        let mut remaining_bytes = 0;
+        for file in &manifest.files {
+            if self.missing.contains(&file.path) {
+                remaining_files += 1;
+                remaining_bytes += file.bytes;
+            }
+        }
+        ResumePlan {
+            reusable_files: manifest.files.len() - remaining_files,
+            remaining_files,
+            remaining_bytes,
+        }
+    }
+}
+
 pub(super) fn inspect_remaining(
     manifest: &directory::ExportManifest,
     destination: &ExportDestination,

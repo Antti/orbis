@@ -63,7 +63,7 @@ impl OrbisApp {
                         .fill(ui.visuals().panel_fill)
                         .inner_margin(egui::Margin::symmetric(20, 12)),
                 )
-                .show(ui, |ui| self.footer(ui));
+                .show(ui, |ui| self.footer(ui, frame));
         }
         egui::CentralPanel::default()
             .frame(
@@ -328,7 +328,7 @@ impl OrbisApp {
         }
     }
 
-    fn footer(&mut self, ui: &mut egui::Ui) {
+    fn footer(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
         if let Some(job) = &self.job {
             let details = job.progress.snapshot();
             let cancelling = job.progress.cancelled.load(Ordering::Relaxed);
@@ -406,7 +406,7 @@ impl OrbisApp {
             return;
         }
         if self.export.is_some() {
-            self.export_footer(ui);
+            self.export_footer(ui, frame);
             return;
         }
         if self.game.is_some() {
