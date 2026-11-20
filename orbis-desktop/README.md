@@ -35,10 +35,14 @@ flagged before extraction. macOS installer `.pkg` files cannot be read by Orbis.
   the base. **Merge into game folder** writes update files directly into the base;
   review the preview, close the emulator, then click **Merge update**. Replaced
   originals are moved to a backup beside the game; unchanged files stay in place.
-- **Manage game:** choose a game folder to find a merged update. **Restore base**
-  restores replaced originals and removes update-only files. It works without the
-  PKG. An interrupted merge offers **Recover base**. Both check files before
-  restoring; local changes must be resolved first.
+- **Open game folder…** Choose the extracted base or drop its folder onto the
+  window. Orbis shows the base and active versions, how the update is installed,
+  the available rollback target, and any installation issues. Checking managed
+  files can take time. **Refresh** repeats the check after changes on disk.
+  For a base game or separate update, **Export this game…** opens the export
+  form with that base selected. For a merged update, **Restore base** restores
+  replaced originals and removes update-only files. An interrupted merge offers
+  **Recover base**. Both actions work without the PKG.
 - **Cancel:** stops cooperatively between work chunks. Completed extraction files
   remain. Closing during work offers to cancel and waits for cleanup before exit.
 - **Show in folder:** opens the output directory after extraction or installation.

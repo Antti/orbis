@@ -104,11 +104,11 @@ impl Operation {
             Self::PreviewUpdate { .. } => {
                 "Select the extracted base game's folder containing sce_sys/param.sfo and a matching full-file update PKG."
             }
-            Self::InstallUpdate { .. }
-            | Self::RestoreBase { .. }
-            | Self::RecoverBase { .. }
-            | Self::CheckGame { .. } => {
-                "Keep the emulator closed and retain the backup folder beside your game. Use Manage game to check for a merged update or recover an interrupted merge. Review the error details before retrying."
+            Self::CheckGame { .. } => {
+                "Choose the extracted base game folder containing sce_sys/param.sfo. For an interrupted merge, choose the original game folder."
+            }
+            Self::InstallUpdate { .. } | Self::RestoreBase { .. } | Self::RecoverBase { .. } => {
+                "Keep the emulator closed and retain the backup folder beside your game. Open the game folder to check its status or recover an interrupted merge."
             }
         }
     }
@@ -120,10 +120,14 @@ pub enum Outcome {
     Verified(Box<VerificationReport>),
     ExportPreview(Box<install::ExportPreview>),
     Preview(install::InstallPlan),
-    GameState(install::MergeStatus),
-    Merged {
-        state: install::MergeStatus,
-        output: PathBuf,
+    GameStatus {
+        base: PathBuf,
+        status: Box<install::InstallationStatus>,
+    },
+    GameChanged {
+        base: PathBuf,
+        title: &'static str,
+        message: String,
     },
     Finished {
         title: String,
@@ -268,31 +272,28 @@ fn execute(
                 incomplete,
             });
         }
-        Operation::CheckGame { base } | Operation::PreviewUpdate { base, .. } => {
-            if let Some(state) = install::merge_status(base)? {
-                return Ok(Outcome::GameState(state));
-            }
-            if matches!(operation, Operation::CheckGame { .. }) {
-                return Ok(Outcome::Finished {
-                    title: "No merged update".into(),
-                    message: "This folder has no managed merge to restore. Open an update PKG to install one.".into(),
-                    output: base.clone(), incomplete: false,
-                });
-            }
+        Operation::CheckGame { base } => return game_status(base, progress),
+        Operation::PreviewUpdate { base, .. } if install::merge_status(base)?.is_some() => {
+            return game_status(base, progress);
         }
         Operation::RestoreBase { base } | Operation::RecoverBase { base } => {
-            if matches!(operation, Operation::RestoreBase { .. }) {
+            let (title, message) = if matches!(operation, Operation::RestoreBase { .. }) {
                 install::restore_merged(base, progress)?;
+                (
+                    "Base restored",
+                    "The original game files have been restored.",
+                )
             } else {
                 install::recover_with_progress(base, progress)?;
-                if let Some(state) = install::merge_status(base)? {
-                    return Ok(Outcome::GameState(state));
-                }
-            }
-            return Ok(Outcome::Finished {
-                title: "Game folder ready".into(),
-                message: "The original base files have been restored, or no pending restoration was needed. You can now install another update.".into(),
-                output: base.clone(), incomplete: false,
+                (
+                    "Recovery complete",
+                    "Recovery finished for this game folder.",
+                )
+            };
+            return Ok(Outcome::GameChanged {
+                base: base.clone(),
+                title,
+                message: message.into(),
             });
         }
         _ => {}
@@ -426,14 +427,13 @@ fn execute(
             }
             let plan = install::install_with_mode(&pkg, &base, preview.mode, progress)?;
             if plan.mode == install::InstallMode::Merge {
-                return Ok(Outcome::Merged {
-                    state: install::MergeStatus {
-                        title_id: plan.title_id,
-                        base_version: plan.current_version,
-                        update_version: plan.update_version,
-                        pending_recovery: false,
-                    },
-                    output: plan.destination,
+                return Ok(Outcome::GameChanged {
+                    base: plan.destination,
+                    title: "Update merged",
+                    message: format!(
+                        "{} is now at version {} in the game folder. Keep the adjacent backup folder.",
+                        plan.title_id, plan.update_version
+                    ),
                 });
             }
             Ok(Outcome::Finished {
@@ -447,6 +447,13 @@ fn execute(
             })
         }
     }
+}
+
+fn game_status(base: &Path, progress: &impl ExtractProgress) -> Result<Outcome> {
+    Ok(Outcome::GameStatus {
+        base: base.to_owned(),
+        status: Box::new(install::status(base, progress)?),
+    })
 }
 
 fn apply_sfo(info: &mut PackageInfo, sfo: &Sfo<'_>) {

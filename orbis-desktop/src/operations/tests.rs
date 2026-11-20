@@ -737,7 +737,7 @@ fn merge_preview_install_and_restore_work_without_the_original_package() {
     };
     assert_eq!(preview.mode, install::InstallMode::Merge);
     assert_eq!(preview.destination, fs::canonicalize(&base).unwrap());
-    let Outcome::Merged { state, output } = run(
+    let Outcome::GameChanged { base: output, .. } = run(
         &path,
         Operation::InstallUpdate {
             base: base.clone(),
@@ -748,18 +748,19 @@ fn merge_preview_install_and_restore_work_without_the_original_package() {
     .unwrap() else {
         panic!()
     };
-    assert_eq!(state.base_version, "01.00");
     assert_eq!(fs::read(output.join("new.txt")).unwrap(), b"NEW DATA");
     fs::remove_file(&path).unwrap();
-    assert!(matches!(
-        run(
-            &path,
-            Operation::CheckGame { base: base.clone() },
-            &SilentProgress
-        )
-        .unwrap(),
-        Outcome::GameState(_)
-    ));
+    let Outcome::GameStatus { status, .. } = run(
+        &path,
+        Operation::CheckGame { base: base.clone() },
+        &SilentProgress,
+    )
+    .unwrap() else {
+        panic!("expected a game folder report")
+    };
+    assert_eq!(status.mode, install::InstallMode::Merge);
+    assert_eq!(status.base_version, "01.00");
+    assert_eq!(status.active_version.as_deref(), Some("01.01"));
     assert!(matches!(
         run(
             &path,
@@ -767,10 +768,7 @@ fn merge_preview_install_and_restore_work_without_the_original_package() {
             &SilentProgress
         )
         .unwrap(),
-        Outcome::Finished {
-            incomplete: false,
-            ..
-        }
+        Outcome::GameChanged { .. }
     ));
     assert_eq!(
         fs::read(base.join("sce_sys/param.sfo")).unwrap(),
@@ -794,7 +792,7 @@ fn checking_an_existing_merge_needs_no_package_and_offers_recovery() {
     )
     .unwrap();
     let path = dir.path().join("missing.pkg");
-    let Outcome::GameState(state) = run(
+    let Outcome::GameStatus { status, .. } = run(
         &path,
         Operation::PreviewUpdate {
             base: base.clone(),
@@ -805,7 +803,7 @@ fn checking_an_existing_merge_needs_no_package_and_offers_recovery() {
     .unwrap() else {
         panic!()
     };
-    assert!(state.pending_recovery);
+    assert!(status.pending_recovery);
     run(
         &path,
         Operation::RecoverBase { base: base.clone() },

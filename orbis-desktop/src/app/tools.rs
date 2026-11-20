@@ -23,6 +23,13 @@ impl Default for ExportState {
 }
 
 impl ExportState {
+    pub(super) fn from_base(base: PathBuf) -> Self {
+        Self {
+            base: Some(base),
+            ..Self::default()
+        }
+    }
+
     fn output(&self) -> Option<PathBuf> {
         self.parent
             .as_ref()
@@ -263,9 +270,84 @@ impl OrbisApp {
 
 #[cfg(test)]
 mod tests {
+    use super::super::tests::{DroppedPath, click, finish, frame};
     use super::*;
-    use egui::accesskit::{Action, ActionRequest, TreeId};
     use orbis_cli::{SilentProgress, install::ExportPreview};
+    use std::fs;
+
+    #[test]
+    fn open_game_and_export_the_installed_separate_update() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = crate::common::base_game(temp.path());
+        let mut app = OrbisApp::default();
+        app.open(base.clone());
+        finish(&mut app);
+        let view = frame(&mut app, Default::default());
+        assert!(
+            view.nodes
+                .iter()
+                .any(|(_, node)| node.value() == Some("Base game only"))
+        );
+        assert!(!temp.path().join(".CUSA00000.orbis-install").exists());
+
+        let path = temp.path().join("update.pkg");
+        fs::write(&path, crate::common::update("01.12", "base.txt", b"PATCH")).unwrap();
+        app.open(path);
+        finish(&mut app);
+        assert!(app.game.is_none());
+        app.base = Some(base.clone());
+        click(&mut app, "Check update");
+        finish(&mut app);
+        click(&mut app, "Install update");
+        finish(&mut app);
+        assert_eq!(app.notice.as_ref().unwrap().title, "Update installed");
+
+        frame(
+            &mut app,
+            egui::RawInput {
+                dropped_files: vec![Arc::new(DroppedPath(base.clone()))],
+                ..Default::default()
+            },
+        );
+        finish(&mut app);
+        let view = frame(&mut app, Default::default());
+        for label in [
+            "Separate update",
+            "01.00",
+            "Active version",
+            "01.12",
+            "Rollback target: Base 01.00",
+        ] {
+            assert!(
+                view.nodes
+                    .iter()
+                    .any(|(_, node)| node.value() == Some(label)),
+                "missing {label}"
+            );
+        }
+        click(&mut app, "Export this game…");
+        let export = app.export.as_mut().unwrap();
+        assert_eq!(export.base.as_ref(), Some(&base));
+        assert!(export.parent.is_none() && export.preview.is_none());
+        export.parent = Some(temp.path().to_owned());
+        click(&mut app, "Check export");
+        finish(&mut app);
+        click(&mut app, "Export and verify");
+        finish(&mut app);
+        assert_eq!(
+            app.notice.as_ref().unwrap().title,
+            "Export complete and verified"
+        );
+        assert_eq!(
+            fs::read(temp.path().join("merged-game/base.txt")).unwrap(),
+            b"PATCH"
+        );
+        assert_eq!(fs::read(base.join("base.txt")).unwrap(), b"BASE");
+        click(&mut app, "Done");
+        click(&mut app, "Back");
+        assert!(app.export.is_none());
+        assert_eq!(app.game.as_ref().unwrap().base, base);
+    }
 
     #[test]
     fn check_again_starts_a_new_preview_with_one_click() {
@@ -287,30 +369,7 @@ mod tests {
             }),
             ..OrbisApp::default()
         };
-        let ctx = app.ctx.clone();
-        ctx.enable_accesskit();
-        let mut initial = ctx.run_ui(Default::default(), |ui| app.export_footer(ui));
-        initial.textures_delta.clear();
-        let tree = initial.platform_output.accesskit_update.unwrap();
-        let (button, _) = tree
-            .nodes
-            .iter()
-            .find(|(_, node)| node.label() == Some("Check again"))
-            .unwrap();
-        let click = egui::Event::AccessKitActionRequest(ActionRequest {
-            action: Action::Click,
-            target_tree: TreeId::ROOT,
-            target_node: *button,
-            data: None,
-        });
-        let mut output = ctx.run_ui(
-            egui::RawInput {
-                events: vec![click],
-                ..Default::default()
-            },
-            |ui| app.export_footer(ui),
-        );
-        output.textures_delta.clear();
+        click(&mut app, "Check again");
         let job = app
             .job
             .take()

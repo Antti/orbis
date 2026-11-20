@@ -19,16 +19,23 @@ impl OrbisApp {
                     ui.label(heading("Orbis", 18.0));
                     {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui
-                                .add_enabled(self.job.is_none(), egui::Button::new("Export game…"))
-                                .clicked()
+                            if self.game.is_none()
+                                && self.export.is_none()
+                                && ui
+                                    .add_enabled(
+                                        self.job.is_none(),
+                                        egui::Button::new("Export game…"),
+                                    )
+                                    .clicked()
                             {
                                 self.export = Some(super::tools::ExportState::default());
-                                self.merged = None;
                                 self.notice = None;
                             }
                             if ui
-                                .add_enabled(self.job.is_none(), egui::Button::new("Manage game…"))
+                                .add_enabled(
+                                    self.job.is_none(),
+                                    egui::Button::new("Open game folder…"),
+                                )
                                 .clicked()
                             {
                                 self.choose_game(frame);
@@ -47,7 +54,7 @@ impl OrbisApp {
             || self.package.is_some()
             || self.job.is_some()
             || self.notice.is_some()
-            || self.merged.is_some()
+            || self.game.is_some()
         {
             egui::Panel::bottom("operation-bar")
                 .resizable(false)
@@ -74,8 +81,8 @@ impl OrbisApp {
                                     |ui| self.export_settings(ui, frame),
                                 );
                             }
-                        } else if self.merged.is_some() {
-                            self.merge_details(ui);
+                        } else if let Some(game) = &self.game {
+                            game.show(ui);
                         } else if self.package.is_none() {
                             self.empty_view(ui, frame);
                         } else {
@@ -91,7 +98,7 @@ impl OrbisApp {
                             }
                         }
                         self.result_details(ui);
-                        if self.export.is_none() && self.package.is_some() {
+                        if self.export.is_none() && self.game.is_none() && self.package.is_some() {
                             self.verification_details(ui, frame);
                         }
                     });
@@ -103,11 +110,11 @@ impl OrbisApp {
         ui.vertical_centered(|ui| {
             theme::package_mark(ui, 64.0);
             ui.add_space(12.0);
-            ui.label(heading("Open a PlayStation 4 package", 21.0));
+            ui.label(heading("Open a package or game folder", 21.0));
             ui.add_space(2.0);
             ui.label(muted(
                 ui,
-                "Drop a .pkg file here, or choose one to get started.",
+                "Drop a PlayStation 4 PKG or an extracted base game folder here.",
             ));
             ui.add_space(16.0);
             if ui
@@ -116,8 +123,12 @@ impl OrbisApp {
             {
                 self.choose_package(frame);
             }
-            ui.add_space(20.0);
-            ui.label(muted(ui, "Extract files  ·  Verify packages  ·  Install updates").size(13.0));
+            if ui
+                .add_enabled(self.job.is_none(), egui::Button::new("Open game folder…"))
+                .clicked()
+            {
+                self.choose_game(frame);
+            }
         });
     }
 
@@ -282,7 +293,6 @@ impl OrbisApp {
                 ui.add_space(5.0);
                 if folder_picker(ui, frame, "Extracted base game", &mut self.base) {
                     self.preview = None;
-                    self.merged = None;
                 }
                 if let Some(plan) = &self.preview {
                     ui.add_space(4.0);
@@ -400,8 +410,15 @@ impl OrbisApp {
                 });
             });
             if done {
+                let refresh = !notice.attention && self.export.is_none();
                 self.notice = None;
                 self.warnings = Details::default();
+                if refresh
+                    && let Some(game) = &self.game
+                    && game.status.is_none()
+                {
+                    self.open_game(game.base.clone());
+                }
             }
             if let Some(error) = reveal_error {
                 self.local_error("Could not open the folder", error);
@@ -412,31 +429,8 @@ impl OrbisApp {
             self.export_footer(ui);
             return;
         }
-        if let Some(state) = &self.merged {
-            let pending = state.pending_recovery;
-            ui.horizontal(|ui| {
-                ui.label(muted(ui, "Close the emulator before restoring.").size(12.0));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add(theme::primary(if pending {
-                            "Recover base"
-                        } else {
-                            "Restore base"
-                        }))
-                        .clicked()
-                    {
-                        let base = self.base.clone().unwrap();
-                        self.start(
-                            PathBuf::new(),
-                            if pending {
-                                Operation::RecoverBase { base }
-                            } else {
-                                Operation::RestoreBase { base }
-                            },
-                        );
-                    }
-                });
-            });
+        if self.game.is_some() {
+            self.game_footer(ui);
             return;
         }
         let Some(package) = &self.package else {
@@ -531,36 +525,6 @@ impl OrbisApp {
         });
     }
 
-    fn merge_details(&self, ui: &mut egui::Ui) {
-        let state = self.merged.as_ref().unwrap();
-        ui.add_space(12.0);
-        ui.label(heading(
-            if state.pending_recovery {
-                "Merge needs recovery"
-            } else {
-                "Merged game"
-            },
-            21.0,
-        ));
-        ui.label(muted(ui, &state.title_id));
-        ui.add_space(12.0);
-        ui.columns(2, |columns| {
-            metric(&mut columns[0], "Original base", &state.base_version);
-            metric(&mut columns[1], "Merged update", &state.update_version);
-        });
-        if let Some(base) = &self.base {
-            path_label(ui, base, "Game folder: ");
-        }
-        ui.add_space(12.0);
-        ui.label(if state.pending_recovery {
-            "The merge or restoration was interrupted. Recover base restores the original game files before you use this folder."
-        } else {
-            "Update files are installed directly in this game folder. Restore base removes the merged update and puts the original files back. Restore before installing a different update."
-        });
-        ui.add_space(8.0);
-        ui.label(muted(ui, "Keep the adjacent .<game>.orbis-install backup folder with your game. Orbis checks changed files and backups before restoring.").size(13.0));
-    }
-
     fn result_details(&self, ui: &mut egui::Ui) {
         if let Some(notice) = &self.notice {
             ui.add_space(8.0);
@@ -595,7 +559,7 @@ impl OrbisApp {
     }
 }
 
-fn metric(ui: &mut egui::Ui, label: &str, value: &str) {
+pub(super) fn metric(ui: &mut egui::Ui, label: &str, value: &str) {
     ui.label(muted(ui, label).size(12.0));
     ui.label(heading(value, 15.0));
 }

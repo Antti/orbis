@@ -1,9 +1,11 @@
 use super::*;
+use eframe::App;
+use egui::accesskit::{Action as AccessibilityAction, ActionRequest, TreeId, TreeUpdate};
 use std::{fs, time::Instant};
 
 use crate::features;
 
-fn finish(app: &mut OrbisApp) {
+pub(super) fn finish(app: &mut OrbisApp) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while app.job.is_some() {
         assert!(Instant::now() < deadline, "desktop worker did not finish");
@@ -213,4 +215,101 @@ fn passcode_editor_forgets_history_after_open() {
     assert_passcode_editor_reset("0123456789abcdef0123456789abcdef", |app| {
         app.open(path);
     });
+}
+
+pub(super) fn frame(app: &mut OrbisApp, mut input: egui::RawInput) -> TreeUpdate {
+    let ctx = app.ctx.clone();
+    ctx.enable_accesskit();
+    input.screen_rect = Some(egui::Rect::from_min_size(
+        egui::Pos2::ZERO,
+        egui::vec2(640.0, 560.0),
+    ));
+    let mut output = ctx.run_ui(input, |ui| app.ui(ui, &mut eframe::Frame::_new_kittest()));
+    output.textures_delta.clear();
+    output.platform_output.accesskit_update.unwrap()
+}
+
+pub(super) fn click(app: &mut OrbisApp, label: &str) {
+    let tree = frame(app, Default::default());
+    let (button, _) = tree
+        .nodes
+        .iter()
+        .find(|(_, node)| node.label() == Some(label))
+        .unwrap_or_else(|| panic!("missing button {label}"));
+    let event = egui::Event::AccessKitActionRequest(ActionRequest {
+        action: AccessibilityAction::Click,
+        target_tree: TreeId::ROOT,
+        target_node: *button,
+        data: None,
+    });
+    frame(
+        app,
+        egui::RawInput {
+            events: vec![event],
+            ..Default::default()
+        },
+    );
+}
+
+#[derive(Debug)]
+pub(super) struct DroppedPath(pub PathBuf);
+
+impl egui::DroppedFile for DroppedPath {
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+
+    fn bytes(&self) -> Result<Vec<u8>, String> {
+        panic!("a dropped native folder should be opened by path")
+    }
+}
+
+#[test]
+fn interrupted_merge_offers_recovery_and_refreshes_the_restored_base() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = crate::common::base_game(temp.path());
+    let pkg = orbis_pkg::Pkg::new(crate::common::update("01.12", "new.txt", b"PATCH")).unwrap();
+    orbis_cli::install::install_with_mode(
+        &pkg,
+        &base,
+        InstallMode::Merge,
+        orbis_cli::SilentProgress,
+    )
+    .unwrap();
+    let mut app = OrbisApp::default();
+    app.open(base.clone());
+    finish(&mut app);
+    let view = frame(&mut app, Default::default());
+    assert!(
+        view.nodes
+            .iter()
+            .any(|(_, node)| node.label() == Some("Restore base"))
+    );
+    assert!(
+        !view
+            .nodes
+            .iter()
+            .any(|(_, node)| node.label() == Some("Export this game…"))
+    );
+
+    fs::write(
+        temp.path()
+            .join(".CUSA00000.orbis-install/merge/pending.json"),
+        br#""restore""#,
+    )
+    .unwrap();
+    click(&mut app, "Refresh");
+    finish(&mut app);
+    click(&mut app, "Recover base");
+    finish(&mut app);
+    assert_eq!(app.notice.as_ref().unwrap().title, "Recovery complete");
+    click(&mut app, "Done");
+    finish(&mut app);
+    let view = frame(&mut app, Default::default());
+    assert!(
+        view.nodes
+            .iter()
+            .any(|(_, node)| node.value() == Some("Base game only"))
+    );
+    assert!(!base.join("new.txt").exists());
 }

@@ -295,7 +295,7 @@ restore/recovery without the original PKG.
 
 For manual QA, merge into a disposable original base with the emulator closed.
 Check the preview destination and retained-original size, merge, reopen the app,
-then use Manage game and Restore base. Compare the restored directory to the
+then use Open game folder… and Restore base. Compare the restored directory to the
 original. Test on each supported OS; macOS exFAT should refuse merging before
 changing the game. These fixtures do not establish the semantics of omitted
 files in successive real patches or guarantee power-loss durability.

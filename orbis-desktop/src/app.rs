@@ -4,11 +4,12 @@ use crate::{
 };
 use eframe::egui;
 
+mod game;
 #[cfg(test)]
 mod tests;
 mod tools;
 mod view;
-use orbis_cli::install::{InstallMode, InstallPlan, MergeStatus};
+use orbis_cli::install::{InstallMode, InstallPlan};
 use std::{
     path::PathBuf,
     sync::{Arc, atomic::Ordering},
@@ -43,7 +44,7 @@ pub struct OrbisApp {
     base: Option<PathBuf>,
     preview: Option<InstallPlan>,
     mode: InstallMode,
-    merged: Option<MergeStatus>,
+    game: Option<game::GameFolder>,
     job: Option<Job>,
     notice: Option<Notice>,
     warnings: Details,
@@ -72,6 +73,10 @@ impl OrbisApp {
     }
 
     fn open(&mut self, path: PathBuf) {
+        if path.is_dir() {
+            self.open_game(path);
+            return;
+        }
         self.passcode = None;
         self.pending_passcode = None;
         self.reset_passcode_input();
@@ -82,7 +87,7 @@ impl OrbisApp {
         self.artwork = None;
         self.parent = None;
         self.base = None;
-        self.merged = None;
+        self.game = None;
         self.mode = InstallMode::Separate;
         self.folder_name.clear();
         self.resume = false;
@@ -175,23 +180,30 @@ impl OrbisApp {
                 }
             }
             Ok(Outcome::Preview(plan)) => self.preview = Some(plan),
-            Ok(Outcome::GameState(state)) => {
+            Ok(Outcome::GameStatus { base, status }) => {
                 self.preview = None;
-                self.merged = Some(state);
+                self.game = Some(game::GameFolder {
+                    base,
+                    status: Some(status),
+                });
             }
-            Ok(Outcome::Merged { state, output }) => {
+            Ok(Outcome::GameChanged {
+                base,
+                title,
+                message,
+            }) => {
                 self.preview = None;
+                self.game = Some(game::GameFolder {
+                    base: base.clone(),
+                    status: None,
+                });
                 self.notice = Some(Notice {
-                    title: "Update merged".into(),
-                    message: format!(
-                        "{} is now at version {} in the game folder. Keep the adjacent backup folder. Choose Done to restore the base or manage this merge.",
-                        state.title_id, state.update_version
-                    ),
-                    output: Some(output),
+                    title: title.into(),
+                    message,
+                    output: Some(base),
                     details: String::new(),
                     attention: false,
                 });
-                self.merged = Some(state);
             }
             Ok(Outcome::Finished {
                 title,
@@ -199,7 +211,6 @@ impl OrbisApp {
                 output,
                 incomplete,
             }) => {
-                self.merged = None;
                 self.preview = None;
                 self.notice = Some(Notice {
                     title,
@@ -234,14 +245,10 @@ impl OrbisApp {
     fn choose_game(&mut self, frame: &eframe::Frame) {
         if let Some(base) = rfd::FileDialog::new()
             .set_parent(frame)
-            .set_title("Manage game folder")
+            .set_title("Open extracted base game folder")
             .pick_folder()
         {
-            self.export = None;
-            self.base = Some(base.clone());
-            self.preview = None;
-            self.merged = None;
-            self.start(PathBuf::new(), Operation::CheckGame { base });
+            self.open_game(base);
         }
     }
 
@@ -279,8 +286,8 @@ impl eframe::App for OrbisApp {
             let dropped = ctx.input_mut(|i| std::mem::take(&mut i.raw.dropped_files));
             if dropped.len() > 1 {
                 self.local_error(
-                    "Open one package at a time",
-                    "Drop a single PKG file onto the window.".into(),
+                    "Open one item at a time",
+                    "Drop a PKG file or an extracted game folder onto the window.".into(),
                 );
             } else if let Some(file) = dropped.first() {
                 self.open(file.path().to_owned());
