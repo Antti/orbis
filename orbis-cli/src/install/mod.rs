@@ -15,8 +15,8 @@ mod transaction;
 pub use status::{InstallationStatus, status};
 
 pub use export::{
-    ExportPlan, ExportReport, ExportedDirectory, export_for_verification, export_merged,
-    plan_export, plan_export_with_resume, resume_export,
+    ExportPlan, ExportPreview, ExportReport, ExportedDirectory, export_for_verification,
+    export_merged, plan_export, plan_export_with_resume, resume_export,
 };
 pub use preflight::FilesystemPlan;
 

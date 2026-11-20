@@ -7,7 +7,7 @@ pub(super) struct ExportState {
     parent: Option<PathBuf>,
     name: String,
     resume: bool,
-    pub preview: Option<Box<orbis_cli::install::ExportPlan>>,
+    pub preview: Option<Box<orbis_cli::install::ExportPreview>>,
 }
 
 impl Default for ExportState {
@@ -190,7 +190,7 @@ impl OrbisApp {
             path_label(ui, &output, "Output: ");
         }
         ui.label(muted(ui, "Close the emulator and keep the source files unchanged. An in-place merge must be restored before export. Existing conflicting files are never replaced.").size(12.0));
-        if let Some(plan) = &state.preview {
+        if let Some(plan) = state.preview.as_ref().map(|preview| preview.plan()) {
             ui.separator();
             ui.label(heading(&plan.title_id, 16.0));
             ui.label(format!(
@@ -224,28 +224,29 @@ impl OrbisApp {
         let state = self.export.as_mut().unwrap();
         let mut operation = None;
         ui.horizontal_wrapped(|ui| {
-            if let Some(plan) = &state.preview {
+            if let Some(plan) = state.preview.as_ref().map(|preview| preview.plan()) {
                 let enough = plan.filesystem.available_bytes >= plan.filesystem.required_free_bytes;
                 if ui
                     .add_enabled(enough, theme::primary("Export and verify"))
                     .clicked()
                 {
-                    operation = Some(Operation::Export {
-                        base: state.base.clone().unwrap(),
-                        preview: state.preview.take().unwrap(),
-                        resume: state.resume,
-                    });
+                    operation = state.preview.take().map(Operation::Export);
                 }
-                if ui.button("Check again").clicked() {
-                    state.preview = None;
-                }
-            } else if ui
-                .add_enabled(
-                    state.base.is_some() && state.output().is_some(),
-                    theme::primary("Check export"),
-                )
-                .clicked()
+            }
+            let check_button = if state.preview.is_some() {
+                egui::Button::new("Check again")
+            } else {
+                theme::primary("Check export")
+            };
+            if operation.is_none()
+                && ui
+                    .add_enabled(
+                        state.base.is_some() && state.output().is_some(),
+                        check_button,
+                    )
+                    .clicked()
             {
+                state.preview = None;
                 operation = Some(Operation::PreviewExport {
                     base: state.base.clone().unwrap(),
                     output: state.output().unwrap(),
@@ -257,5 +258,63 @@ impl OrbisApp {
         if let Some(operation) = operation {
             self.start(PathBuf::new(), operation);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::accesskit::{Action, ActionRequest, TreeId};
+    use orbis_cli::{SilentProgress, install::ExportPreview};
+
+    #[test]
+    fn check_again_starts_a_new_preview_with_one_click() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = crate::common::base_game(temp.path());
+        let preview = ExportPreview::new(
+            &base,
+            &temp.path().join("merged-game"),
+            true,
+            SilentProgress,
+        )
+        .unwrap();
+        let mut app = OrbisApp {
+            export: Some(ExportState {
+                base: Some(base),
+                parent: Some(temp.path().to_owned()),
+                preview: Some(Box::new(preview)),
+                ..ExportState::default()
+            }),
+            ..OrbisApp::default()
+        };
+        let ctx = app.ctx.clone();
+        ctx.enable_accesskit();
+        let mut initial = ctx.run_ui(Default::default(), |ui| app.export_footer(ui));
+        initial.textures_delta.clear();
+        let tree = initial.platform_output.accesskit_update.unwrap();
+        let (button, _) = tree
+            .nodes
+            .iter()
+            .find(|(_, node)| node.label() == Some("Check again"))
+            .unwrap();
+        let click = egui::Event::AccessKitActionRequest(ActionRequest {
+            action: Action::Click,
+            target_tree: TreeId::ROOT,
+            target_node: *button,
+            data: None,
+        });
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                events: vec![click],
+                ..Default::default()
+            },
+            |ui| app.export_footer(ui),
+        );
+        output.textures_delta.clear();
+        let job = app
+            .job
+            .take()
+            .expect("Check again should dispatch the preview");
+        assert!(matches!(job.finish().unwrap(), Outcome::ExportPreview(_)));
     }
 }

@@ -6,6 +6,37 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Write a new JSON report beside its temporary file. Prefer exclusive rename
+/// and fall back to an exclusive copy on filesystems such as macOS exFAT.
+pub fn save_new_json(destination: &Path, report: &impl serde::Serialize) -> io::Result<()> {
+    let name = destination
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "expected a report filename"))?;
+    let parent = destination
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let dir = Dir::open_ambient_dir(parent, cap_std::ambient_authority())?;
+    let temporary = format!(".orbis-report-{:032x}.tmp", fastrand::u128(..));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    cap_std::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = dir.open_with(&temporary, &options)?;
+    let result = (|| {
+        let mut writer = io::BufWriter::new(&mut file);
+        serde_json::to_writer_pretty(&mut writer, report)?;
+        writer.write_all(b"\n")?;
+        writer.flush()?;
+        drop(writer);
+        file.sync_all()?;
+        drop(file);
+        publish_new_file(&dir, &temporary, Path::new(name), || Ok(()))
+    })();
+    let _ = dir.remove_file(&temporary);
+    result
+}
+
 /// Prefer atomic publication. Filesystems such as macOS exFAT reject exclusive
 /// rename and hard links, but still support exclusive file creation. On those
 /// filesystems copy the completed staging file into a newly created destination.
@@ -42,10 +73,15 @@ fn publish_file_with(
     }
     // O_EXCL/create_new refuses existing files, directories, and symlinks. Never
     // emulate NOREPLACE with an existence check followed by ordinary rename.
-    let mut output = parent.open_with(
-        destination,
-        OpenOptions::new().read(true).write(true).create_new(true),
-    )?;
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    // Keep a private staging file private when rename requires a fallback copy.
+    #[cfg(unix)]
+    cap_std::fs::OpenOptionsExt::mode(
+        &mut options,
+        cap_std::fs::PermissionsExt::mode(&metadata.permissions()) & 0o666,
+    );
+    let mut output = parent.open_with(destination, &options)?;
     let result = (|| {
         let mut buffer = vec![0; 1024 * 1024];
         let mut copied = 0;
@@ -352,6 +388,16 @@ mod tests {
         let dir = Dir::open_ambient_dir(temp.path(), ambient_authority()).unwrap();
         dir.write("staged", b"COMPLETE").unwrap();
         (temp, dir)
+    }
+
+    #[test]
+    fn saves_new_reports_on_a_configured_external_filesystem() {
+        let (tmp, _) = setup();
+        let report = tmp.path().join("report.json");
+        save_new_json(&report, &["first"]).unwrap();
+        assert!(save_new_json(&report, &["second"]).is_err());
+        let saved: Vec<String> = serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+        assert_eq!(saved, ["first"]);
     }
 
     fn directory_setup() -> (tempfile::TempDir, Dir) {

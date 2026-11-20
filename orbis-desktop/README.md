@@ -56,7 +56,8 @@ without extracting it and supports Cancel.
 reasons, skipped entries, scope, time, and any error. It uses
 `report_type: "orbis-desktop-verification-summary"` and `schema_version: 1`.
 Individual block checks are not retained; use the CLI for the streamed full
-check report. Choose a new filename: saving never replaces an existing file.
+check report. Choose a new filename to preserve existing files. On macOS
+exFAT, the report can be visible while Orbis copies it into place.
 Stored-data consistency does not establish publisher authenticity.
 
 Expand **Package passcode** to enter a known 32-character printable ASCII
@@ -72,14 +73,15 @@ This does not decrypt arbitrary retail filesystems.
 **Export game…** works without opening a PKG. Choose the original extracted base,
 the destination parent, and an output folder name. Orbis includes its managed
 separate update automatically; with none installed, it exports the base alone.
-Restore an in-place merge before exporting. **Check export** previews versions,
-file counts, destination, and a conservative free-space reserve.
+Restore an in-place merge before exporting. **Check export** hashes the source
+files and previews versions, file counts, destination, and a free-space reserve.
 
 Resume is enabled by default. It checks source hashes, the existing export
 manifest, and completed files before reusing them; conflicting files remain
 untouched. The preview estimates space for missing files, including filesystem
-overhead. **Export and verify** rechecks the preview, copies the files, and then
-verifies the copied directory against the manifest produced by that export.
+overhead. **Export and verify** rechecks the source paths, versions, and hashes
+under the install lock before copying. If they have changed, check the export
+again. Orbis verifies the copied files before reporting success.
 Replacing the destination or rewriting its manifest makes verification fail.
 Keep the emulator stopped and source files unchanged. A cancelled resumable copy retains completed files;
 repeat the same selection to continue. If verification is cancelled after the

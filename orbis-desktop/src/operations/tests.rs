@@ -188,7 +188,7 @@ fn passcode_unlocks_inspection_and_extraction_and_wrong_values_never_fall_back()
     }
 }
 
-fn export_preview(base: &Path, output: &Path, resume: bool) -> Box<install::ExportPlan> {
+fn export_preview(base: &Path, output: &Path, resume: bool) -> Box<install::ExportPreview> {
     let Outcome::ExportPreview(plan) = run(
         Path::new(""),
         Operation::PreviewExport {
@@ -205,6 +205,43 @@ fn export_preview(base: &Path, output: &Path, resume: bool) -> Box<install::Expo
 }
 
 #[test]
+fn resume_confirmation_hashes_sources_once_under_the_install_lock() {
+    struct DuringConfirmation {
+        base: PathBuf,
+        passes: std::sync::atomic::AtomicUsize,
+    }
+    impl ExtractProgress for DuringConfirmation {
+        fn phase(&self, name: &str) {
+            if name == "Hashing export sources" {
+                self.passes.fetch_add(1, Ordering::SeqCst);
+                let pkg =
+                    orbis_pkg::Pkg::parse(common::update("01.12", "base.txt", b"PATCH")).unwrap();
+                let error = install::install(&pkg, &self.base, SilentProgress).unwrap_err();
+                assert!(error.to_string().contains("holds the lock"));
+            }
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let base = common::base_game(dir.path());
+    let output = dir.path().join("merged");
+    let preview = export_preview(&base, &output, true);
+    let progress = DuringConfirmation {
+        base,
+        passes: Default::default(),
+    };
+    let result = run(Path::new(""), Operation::Export(preview), &progress).unwrap();
+    assert!(matches!(
+        result,
+        Outcome::Finished {
+            incomplete: false,
+            ..
+        }
+    ));
+    assert_eq!(progress.passes.load(Ordering::SeqCst), 1);
+    assert_eq!(fs::read(output.join("base.txt")).unwrap(), b"BASE");
+}
+
+#[test]
 fn export_previews_resumes_and_verifies_without_a_package_or_source_changes() {
     let dir = tempfile::tempdir().unwrap();
     let base = common::base_game(dir.path());
@@ -213,18 +250,9 @@ fn export_previews_resumes_and_verifies_without_a_package_or_source_changes() {
     let output = dir.path().join("merged");
     let preview = export_preview(&base, &output, true);
     assert!(!output.exists());
-    assert_eq!(preview.update_version.as_deref(), Some("01.12"));
-    let required = preview.filesystem.required_free_bytes;
-    let result = run(
-        Path::new(""),
-        Operation::Export {
-            base: base.clone(),
-            preview,
-            resume: true,
-        },
-        &SilentProgress,
-    )
-    .unwrap();
+    assert_eq!(preview.plan().update_version.as_deref(), Some("01.12"));
+    let required = preview.plan().filesystem.required_free_bytes;
+    let result = run(Path::new(""), Operation::Export(preview), &SilentProgress).unwrap();
     assert!(matches!(
         result,
         Outcome::Finished {
@@ -236,22 +264,13 @@ fn export_previews_resumes_and_verifies_without_a_package_or_source_changes() {
     assert_eq!(fs::read(base.join("base.txt")).unwrap(), b"BASE");
     let original_manifest = fs::read(output.join(".orbis-export.json")).unwrap();
     let preview = export_preview(&base, &output, true);
-    assert!(preview.filesystem.required_free_bytes < required);
+    assert!(preview.plan().filesystem.required_free_bytes < required);
     assert_eq!(
         fs::read(output.join(".orbis-export.json")).unwrap(),
         original_manifest
     );
     fs::remove_file(output.join("base.txt")).unwrap();
-    run(
-        Path::new(""),
-        Operation::Export {
-            base: base.clone(),
-            preview,
-            resume: true,
-        },
-        &SilentProgress,
-    )
-    .unwrap();
+    run(Path::new(""), Operation::Export(preview), &SilentProgress).unwrap();
     assert_eq!(fs::read(output.join("base.txt")).unwrap(), b"UPDATED");
     fs::write(output.join("base.txt"), b"USER CONTENT").unwrap();
     assert!(
@@ -276,33 +295,16 @@ fn export_rejects_changed_previews_and_cancellation_never_creates_output() {
     let output = dir.path().join("merged");
     let preview = export_preview(&base, &output, false);
     fs::write(base.join("added.txt"), b"new file").unwrap();
-    let error = run(
-        Path::new(""),
-        Operation::Export {
-            base: base.clone(),
-            preview,
-            resume: false,
-        },
-        &SilentProgress,
-    )
-    .unwrap_err();
+    let error = run(Path::new(""), Operation::Export(preview), &SilentProgress).unwrap_err();
     assert!(error.details.contains("changed after the preview"));
     assert!(!output.exists());
     let preview = export_preview(&base, &output, false);
     let progress = Progress::default();
     progress.cancelled.store(true, Ordering::Relaxed);
     assert!(
-        run(
-            Path::new(""),
-            Operation::Export {
-                base,
-                preview,
-                resume: false
-            },
-            &progress
-        )
-        .unwrap_err()
-        .cancelled
+        run(Path::new(""), Operation::Export(preview), &progress)
+            .unwrap_err()
+            .cancelled
     );
     assert!(!output.exists());
 }
@@ -326,11 +328,7 @@ fn cancellation_during_export_verification_preserves_the_copy_and_reports_cancel
     let preview = export_preview(&base, &output, false);
     let error = run(
         Path::new(""),
-        Operation::Export {
-            base,
-            preview,
-            resume: false,
-        },
+        Operation::Export(preview),
         &CancelVerification(Default::default()),
     )
     .unwrap_err();
@@ -364,11 +362,7 @@ fn automatic_export_verification_reports_corrupt_output_without_changing_sources
             title, incomplete, ..
         } = run(
             Path::new(""),
-            Operation::Export {
-                base: base.clone(),
-                preview,
-                resume,
-            },
+            Operation::Export(preview),
             &Corrupt(output.clone()),
         )
         .unwrap()
@@ -409,16 +403,7 @@ fn automatic_export_verification_rejects_a_directory_replaced_while_copying() {
     install::export_merged(&base, &progress.replacement, SilentProgress).unwrap();
     fs::write(base.join("base.txt"), b"BASE").unwrap();
     let preview = export_preview(&base, &progress.output, true);
-    let error = run(
-        Path::new(""),
-        Operation::Export {
-            base: base.clone(),
-            preview,
-            resume: true,
-        },
-        &progress,
-    )
-    .unwrap_err();
+    let error = run(Path::new(""), Operation::Export(preview), &progress).unwrap_err();
     assert!(error.details.contains("Export created"));
     assert!(error.details.contains("export destination changed"));
     assert_eq!(fs::read(progress.moved.join("base.txt")).unwrap(), b"BASE");

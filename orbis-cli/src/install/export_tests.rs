@@ -33,6 +33,35 @@ fn no_staging(parent: &Path) {
 }
 
 #[test]
+fn confirmation_rejects_source_edits_renames_and_new_updates_before_writing() {
+    for resume in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let base = base_game(temp.path());
+        let output = temp.path().join("merged");
+        let approved = ExportPreview::new(&base, &output, resume, SilentProgress).unwrap();
+        let assert_stale = || {
+            assert!(
+                approved
+                    .export(SilentProgress)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("changed after the preview")
+            );
+            assert!(!output.exists());
+            no_staging(temp.path());
+        };
+        fs::write(base.join("base.txt"), b"EDIT").unwrap();
+        assert_stale();
+        fs::write(base.join("base.txt"), b"BASE").unwrap();
+        fs::rename(base.join("base.txt"), base.join("renamed.txt")).unwrap();
+        assert_stale();
+        fs::rename(base.join("renamed.txt"), base.join("base.txt")).unwrap();
+        install_update(&base, "base.txt", b"PATCH");
+        assert_stale();
+    }
+}
+
+#[test]
 fn export_verification_rejects_a_rewritten_manifest_and_payload() {
     for resume in [false, true] {
         let temp = tempfile::tempdir().unwrap();
@@ -257,6 +286,33 @@ fn cancellation_during_fallback_cleans_both_output_and_staging() {
     ));
     assert!(!temp.path().join("merged").exists());
     no_staging(temp.path());
+}
+
+#[test]
+fn resumes_at_the_root_of_a_configured_external_filesystem() {
+    let Some(mount) = std::env::var_os("ORBIS_TEST_RESUME_MOUNT").map(PathBuf::from) else {
+        return;
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let base = base_game(temp.path());
+    let seed = temp.path().join("seed");
+    export_merged(&base, &seed, SilentProgress).unwrap();
+    // Seed just the manifest, as if copying were interrupted before the first file.
+    let manifest = install::directory::MANIFEST;
+    let mut input = fs::File::open(seed.join(manifest)).unwrap();
+    let mut output = fs::File::create_new(mount.join(manifest)).unwrap();
+    io::copy(&mut input, &mut output).unwrap();
+    drop(output);
+    let preview = ExportPreview::new(&base, &mount, true, SilentProgress).unwrap();
+    let available = preview.plan().filesystem.available_bytes;
+    // The harness mounts a 256 MiB image under the much larger runner disk.
+    assert!(available > 0 && available <= 256 * 1024 * 1024);
+    assert_eq!(
+        preview.plan().filesystem.filesystem,
+        std::env::var("ORBIS_TEST_FILESYSTEM").unwrap()
+    );
+    let completed = preview.export(SilentProgress).unwrap();
+    assert!(completed.verify(SilentProgress).unwrap().issues.is_empty());
 }
 
 #[test]
@@ -750,7 +806,7 @@ fn resume_keeps_the_validated_parent_when_its_path_is_replaced() {
     }
     impl ExtractProgress for MoveParent {
         fn phase(&self, phase: &str) {
-            if phase == "Hashing export sources for safe resume" {
+            if phase == "Hashing export sources" {
                 fs::rename(&self.parent, &self.moved).unwrap();
                 fs::create_dir(&self.parent).unwrap();
                 fs::write(self.parent.join("keep"), b"KEEP").unwrap();

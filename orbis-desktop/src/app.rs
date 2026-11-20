@@ -153,6 +153,8 @@ impl OrbisApp {
                     };
                     self.folder_name = operations::suggested_folder(&info);
                     self.parent = info.path.parent().map(PathBuf::from);
+                } else if self.action == Action::Update && !info.update_supported {
+                    self.action = Action::Extract;
                 }
                 self.refreshing_package = false;
                 self.package = Some(info);

@@ -87,8 +87,8 @@ impl PreparedExport {
         )
     }
 
-    pub fn preview(&self, parent: &Path) -> Result<ExportPlan> {
-        Ok(ExportPlan {
+    pub fn preview(&self, filesystem: super::super::FilesystemPlan) -> ExportPlan {
+        ExportPlan {
             schema_version: 1,
             title_id: self.report.title_id.clone(),
             base_version: self.metadata.version.to_string(),
@@ -97,8 +97,8 @@ impl PreparedExport {
             files: self.report.files,
             update_files: self.report.update_files,
             bytes: self.report.bytes,
-            filesystem: self.filesystem_plan(parent)?,
-        })
+            filesystem,
+        }
     }
 
     pub fn source(&self, entry: &Entry) -> Result<(&Dir, Option<&FileRecord>)> {
@@ -118,12 +118,27 @@ impl PreparedExport {
         }
     }
 
-    pub fn manifest(
-        &self,
-        files: Vec<FileRecord>,
-        complete: bool,
-    ) -> super::super::directory::ExportManifest {
-        super::super::directory::ExportManifest {
+    pub fn source_manifest(&self, progress: &impl ExtractProgress) -> Result<ExportManifest> {
+        progress.phase("Hashing export sources");
+        progress.bytes_total(self.report.bytes);
+        let mut files = Vec::new();
+        let mut buffer = vec![0u8; 1024 * 1024];
+        for entry in self.files() {
+            let (source, expected) = self.source(entry)?;
+            let record = crate::inventory::hash_file(source, &entry.path, &mut buffer, progress)?;
+            if record.bytes != entry.bytes || expected.is_some_and(|expected| expected != &record) {
+                return Err(invalid(format!(
+                    "source changed while planning export: {}",
+                    entry.path
+                )));
+            }
+            files.push(record);
+        }
+        Ok(self.manifest(files, false))
+    }
+
+    pub fn manifest(&self, files: Vec<FileRecord>, complete: bool) -> ExportManifest {
+        ExportManifest {
             schema_version: 1,
             title_id: self.metadata.title_id.clone(),
             content_id: self.metadata.content_id.clone(),
