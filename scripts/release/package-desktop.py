@@ -72,6 +72,8 @@ def package(version: str, target: str, binary: Path, output: Path) -> Path:
         (root / "START-HERE.txt").write_text(
             f"Orbis {version}\n\n{launch}\n\n"
             "Use Open PKG or drop a PlayStation 4 PKG onto the window.\n"
+            "Open or drop an extracted base game folder to check installed versions.\n"
+            "Choose Export this game to export that base and its separate update.\n"
             "Verify package checks full integrity/readability or metadata only.\n"
             "Save verification report writes a summary to a new JSON file.\n"
             "Package passcode validates a known passcode for the open package only.\n"
@@ -82,7 +84,7 @@ def package(version: str, target: str, binary: Path, output: Path) -> Path:
             "close the emulator, and click Install update.\n\n"
             "Keep update separate preserves the base. Merge into game folder replaces\n"
             "game files and saves originals beside the game in .<game>.orbis-install.\n"
-            "Keep that backup folder. Manage game lets you restore or recover the base\n"
+            "Keep that backup folder. Open game folder lets you restore or recover the base\n"
             "without the PKG. Restore before installing another merged update.\n"
             "Existing extraction files are never overwritten.\n"
             "Use Resume to continue an interrupted extraction into the same folder.\n"

@@ -7,9 +7,7 @@ exclude = ["fuzz"]
 [workspace.package]
 authors = ["videobitva", "Andrii Dmytrenko"]
 license = "MIT OR Apache-2.0"
-readme = "README.md"
 repository = "https://github.com/Antti/orbis"
-homepage = "https://github.com/Antti/orbis"
 
 [workspace.dependencies]
 orbis-integrity = { version = "0.1.0", path = "orbis-integrity" }
@@ -20,4 +18,3 @@ zerocopy = { version = "0.8.38" }
 
 orbis-pfs = { version = "0.1.0", path = "orbis-pfs" }
 orbis-pkg = { version = "0.1.0", path = "orbis-pkg" }
-orbis-cli = { version = "0.5.0", path = "orbis-cli" }

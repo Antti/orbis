@@ -1,9 +1,11 @@
 use super::*;
+use eframe::App;
+use egui::accesskit::{Action as AccessibilityAction, ActionRequest, TreeId, TreeUpdate};
 use std::{fs, time::Instant};
 
 use crate::features;
 
-fn finish(app: &mut OrbisApp) {
+pub(super) fn finish(app: &mut OrbisApp) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while app.job.is_some() {
         assert!(Instant::now() < deadline, "desktop worker did not finish");
@@ -213,4 +215,175 @@ fn passcode_editor_forgets_history_after_open() {
     assert_passcode_editor_reset("0123456789abcdef0123456789abcdef", |app| {
         app.open(path);
     });
+}
+
+pub(super) fn frame(app: &mut OrbisApp, mut input: egui::RawInput) -> TreeUpdate {
+    let ctx = app.ctx.clone();
+    ctx.enable_accesskit();
+    input.screen_rect = Some(egui::Rect::from_min_size(
+        egui::Pos2::ZERO,
+        egui::vec2(640.0, 560.0),
+    ));
+    let mut output = ctx.run_ui(input, |ui| app.ui(ui, &mut eframe::Frame::_new_kittest()));
+    output.textures_delta.clear();
+    output.platform_output.accesskit_update.unwrap()
+}
+
+pub(super) fn click(app: &mut OrbisApp, label: &str) {
+    let tree = frame(app, Default::default());
+    let (button, _) = tree
+        .nodes
+        .iter()
+        // An action tab can have the same label as the footer button.
+        .find(|(_, node)| node.label() == Some(label) && node.toggled().is_none())
+        .unwrap_or_else(|| panic!("missing button {label}"));
+    let event = egui::Event::AccessKitActionRequest(ActionRequest {
+        action: AccessibilityAction::Click,
+        target_tree: TreeId::ROOT,
+        target_node: *button,
+        data: None,
+    });
+    frame(
+        app,
+        egui::RawInput {
+            events: vec![event],
+            ..Default::default()
+        },
+    );
+}
+
+#[test]
+fn extraction_form_with_a_metadata_warning_fits_the_default_window() {
+    let ctx = egui::Context::default();
+    let mut app = OrbisApp::new(&ctx, None);
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp
+        .path()
+        .join("Sample.Game.of.the.Year.Edition.01.00.pkg");
+    fs::write(&path, features::signed_pkg_with_metadata(true)).unwrap();
+    app.open(path);
+    finish(&mut app);
+
+    // Let the panels reserve their final sizes before measuring the scroll area.
+    frame(&mut app, Default::default());
+    let tree = frame(&mut app, Default::default());
+    assert!(tree.nodes.iter().any(|(_, node)| {
+        node.value()
+            .is_some_and(|text| text.contains("encrypted metadata entry cannot be read"))
+    }));
+    assert!(
+        tree.nodes
+            .iter()
+            .any(|(_, node)| node.label() == Some("Resume an unfinished extraction")),
+        "the last extraction setting should be visible on opening the PKG"
+    );
+    assert!(
+        !tree
+            .nodes
+            .iter()
+            .any(|(_, node)| node.role() == egui::accesskit::Role::ScrollBar),
+        "the collapsed extraction form should fit without scrolling"
+    );
+}
+
+#[test]
+fn byte_count_stays_outside_the_progress_bar_in_both_themes() {
+    use egui::accesskit::Role;
+    use orbis_cli::ExtractProgress;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sample.pkg");
+    fs::write(&path, features::signed_pkg()).unwrap();
+    let ctx = egui::Context::default();
+    let mut app = OrbisApp::new(&ctx, Some(path));
+    // Render successive progress snapshots before the app polls the worker.
+    for theme in [egui::Theme::Light, egui::Theme::Dark] {
+        ctx.set_theme(theme);
+        for done in [0, 8, 100] {
+            let progress = &app.job.as_ref().unwrap().progress;
+            progress.bytes_total(100);
+            progress.bytes_processed(done);
+            let tree = frame(&mut app, Default::default());
+            let (_, bar) = tree
+                .nodes
+                .iter()
+                .find(|(_, node)| {
+                    node.role() == Role::ProgressIndicator && node.numeric_value().is_some()
+                })
+                .unwrap();
+            let expected = format!("{} / 100.0 B", human_size(done));
+            let (id, label) = tree
+                .nodes
+                .iter()
+                .find(|(_, node)| {
+                    node.role() == Role::Label && node.value() == Some(expected.as_str())
+                })
+                .unwrap();
+            assert!(label.bounds().unwrap().x1 <= bar.bounds().unwrap().x0);
+            assert_eq!(bar.labelled_by(), &[*id]);
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct DroppedPath(pub PathBuf);
+
+impl egui::DroppedFile for DroppedPath {
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+
+    fn bytes(&self) -> Result<Vec<u8>, String> {
+        panic!("a dropped native folder should be opened by path")
+    }
+}
+
+#[test]
+fn interrupted_merge_offers_recovery_and_refreshes_the_restored_base() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = crate::common::base_game(temp.path());
+    let pkg = orbis_pkg::Pkg::new(crate::common::update("01.12", "new.txt", b"PATCH")).unwrap();
+    orbis_cli::install::install_with_mode(
+        &pkg,
+        &base,
+        InstallMode::Merge,
+        orbis_cli::SilentProgress,
+    )
+    .unwrap();
+    let mut app = OrbisApp::default();
+    app.open(base.clone());
+    finish(&mut app);
+    let view = frame(&mut app, Default::default());
+    assert!(
+        view.nodes
+            .iter()
+            .any(|(_, node)| node.label() == Some("Restore base"))
+    );
+    assert!(
+        !view
+            .nodes
+            .iter()
+            .any(|(_, node)| node.label() == Some("Export this game…"))
+    );
+
+    fs::write(
+        temp.path()
+            .join(".CUSA00000.orbis-install/merge/pending.json"),
+        br#""restore""#,
+    )
+    .unwrap();
+    click(&mut app, "Refresh");
+    finish(&mut app);
+    click(&mut app, "Recover base");
+    finish(&mut app);
+    assert_eq!(app.notice.as_ref().unwrap().title, "Recovery complete");
+    click(&mut app, "Done");
+    finish(&mut app);
+    let view = frame(&mut app, Default::default());
+    assert!(
+        view.nodes
+            .iter()
+            .any(|(_, node)| node.value() == Some("Base game only"))
+    );
+    assert!(!base.join("new.txt").exists());
 }

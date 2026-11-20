@@ -364,7 +364,6 @@ version = "0.1.0"
 dependencies = [
  "aes",
  "bitflags",
- "byteorder",
  "cbc",
  "orbis-integrity",
  "rsa",
