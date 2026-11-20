@@ -12,8 +12,11 @@ pub(super) struct GameFolder {
 }
 
 impl GameFolder {
-    pub(super) fn new(base: PathBuf, status: Option<Box<InstallationStatus>>) -> Self {
-        let rollback = status.as_ref().and_then(|s| s.separate_rollback());
+    pub(super) fn new(
+        base: PathBuf,
+        status: Option<Box<InstallationStatus>>,
+        rollback: Option<SeparateRollback>,
+    ) -> Self {
         Self {
             base,
             status,
@@ -100,7 +103,7 @@ impl OrbisApp {
     pub(super) fn open_game(&mut self, base: PathBuf) {
         self.export = None;
         self.preview = None;
-        self.game = Some(GameFolder::new(base.clone(), None));
+        self.game = Some(GameFolder::new(base.clone(), None, None));
         self.start(PathBuf::new(), Operation::CheckGame { base });
     }
 

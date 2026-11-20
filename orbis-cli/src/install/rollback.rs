@@ -1,58 +1,76 @@
 use super::{storage::RollbackTarget, *};
+use crate::fs_output::directory_identity;
+use sha2::{Digest, Sha256};
 
-/// The separate update and restore point offered by a game-folder status check.
-#[derive(Debug)]
-pub struct SeparateRollback {
-    title_id: String,
-    base_version: String,
-    active_version: String,
-    previous_update: Option<String>,
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct VerifiedUpdate {
+    version: String,
+    fingerprint: [u8; 32],
 }
 
-impl InstallationStatus {
-    /// Returns a confirmable rollback only for a healthy, managed separate update.
-    pub fn separate_rollback(&self) -> Option<SeparateRollback> {
-        if self.mode != InstallMode::Separate
-            || self.pending_recovery
-            || !self.issues.is_empty()
-            || !self.modified_files.is_empty()
-            || !self.unmanaged_directories.is_empty()
-        {
-            return None;
-        }
-        let version = self.rollback_version.as_ref()?;
-        let previous_update = match self.rollback.as_str() {
-            "base" if version == &self.base_version => None,
-            "update" => Some(version.clone()),
-            _ => return None,
-        };
-        Some(SeparateRollback {
-            title_id: self.title_id.clone(),
-            base_version: self.base_version.clone(),
-            active_version: self.active_version.clone()?,
-            previous_update,
+impl VerifiedUpdate {
+    pub(super) fn from_manifest(manifest: Manifest) -> Result<Self> {
+        // The manifest includes the game identity and ordered paths, sizes and file hashes.
+        let mut hash = Sha256::new();
+        serde_json::to_writer(&mut hash, &manifest)?;
+        Ok(Self {
+            version: manifest.app_version,
+            fingerprint: hash.finalize().into(),
         })
     }
 }
 
+/// The separate update and restore point offered by a game-folder status check.
+#[derive(Debug)]
+pub struct SeparateRollback {
+    base_path: PathBuf,
+    base_identity: (u64, u64),
+    base_version: String,
+    active: VerifiedUpdate,
+    previous: Option<VerifiedUpdate>,
+}
+
 impl SeparateRollback {
+    pub(super) fn new(
+        layout: &Layout,
+        base_dir: &Dir,
+        base_version: String,
+        active: VerifiedUpdate,
+        previous: Option<Manifest>,
+    ) -> Result<Self> {
+        Ok(Self {
+            base_path: layout.parent_path.join(&layout.base),
+            base_identity: directory_identity(base_dir)?,
+            base_version,
+            active,
+            previous: previous.map(VerifiedUpdate::from_manifest).transpose()?,
+        })
+    }
+
     pub fn active_version(&self) -> &str {
-        &self.active_version
+        &self.active.version
     }
 
     pub fn restores_base(&self) -> bool {
-        self.previous_update.is_none()
+        self.previous.is_none()
     }
 
     pub fn target_version(&self) -> &str {
-        self.previous_update
-            .as_deref()
-            .unwrap_or(&self.base_version)
+        self.previous
+            .as_ref()
+            .map_or(&self.base_version, |update| &update.version)
     }
 
-    /// Rechecks the confirmed versions under the installation lock before restoring.
+    /// Rechecks the scanned game folder and both verified manifests under its installation lock.
     pub fn apply(&self, base: &Path, progress: impl ExtractProgress) -> Result<()> {
-        let location = Layout::open(base, true)?;
+        let location = Layout::open_locked_existing(base)?;
+        if location.parent_path.join(&location.base) != self.base_path
+            || directory_identity(&location.base_dir()?)? != self.base_identity
+        {
+            return Err(invalid(
+                "The game folder changed. Refresh it before restoring.",
+            ));
+        }
         location.require_recovered()?;
         rollback_separate(&location, Some(self), &progress)
     }
@@ -66,7 +84,7 @@ pub fn rollback(base: &Path) -> Result<()> {
 
 /// Rolls back with cancellable checks of the active and previous file inventories.
 /// Final sync failures after commit are reported through [`ExtractProgress::warning`].
-pub fn rollback_with_progress(base: &Path, progress: impl ExtractProgress) -> Result<()> {
+pub fn rollback_with_progress<P: ExtractProgress>(base: &Path, progress: P) -> Result<()> {
     let location = Layout::open(base, true)?;
     location.require_recovered()?;
     if merge::present(&location)? {
@@ -84,23 +102,26 @@ fn rollback_separate(
     let base = location.base_metadata()?;
     let active = location
         .active_manifest(&state, &base, progress)?
-        .map(|m| m.app_version);
+        .filter(|_| expected.is_some())
+        .map(VerifiedUpdate::from_manifest)
+        .transpose()?;
     let previous = location
         .verify_previous(&state, &base, progress)?
-        .map(|m| m.app_version);
+        .filter(|_| expected.is_some())
+        .map(VerifiedUpdate::from_manifest)
+        .transpose()?;
     if state.rollback == RollbackTarget::None {
         return Err(invalid(
             "no previous installation is available for rollback",
         ));
     }
     if let Some(expected) = expected {
-        if expected.title_id != base.title_id
-            || expected.base_version != base.version.to_string()
-            || active.as_deref() != Some(expected.active_version())
-            || expected.previous_update != previous
+        if expected.base_version != base.version.to_string()
+            || active.as_ref() != Some(&expected.active)
+            || previous != expected.previous
         {
             return Err(invalid(
-                "The installed versions changed. Refresh the game folder to review the new rollback target.",
+                "The installation changed. Refresh the game folder to review the rollback target.",
             ));
         }
         let root = location.manager()?;

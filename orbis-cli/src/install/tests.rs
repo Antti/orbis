@@ -12,6 +12,9 @@ use std::{
 fn package(version: &str, name: &str) -> Pkg<Vec<u8>> {
     Pkg::new(update(version, name, version.as_bytes())).unwrap()
 }
+fn rollback_offer(base: &Path) -> Option<SeparateRollback> {
+    status_with_rollback(base, SilentProgress).unwrap().1
+}
 fn active(base: &Path) -> PathBuf {
     base.with_file_name("CUSA00000-UPDATE")
 }
@@ -91,10 +94,7 @@ fn confirmed_rollback_rejects_a_changed_target_even_at_the_same_active_version()
     let base = base_game(tmp.path());
     let latest = package("01.12", "latest.txt");
     install(&latest, &base, SilentProgress).unwrap();
-    let confirmed = status(&base, SilentProgress)
-        .unwrap()
-        .separate_rollback()
-        .unwrap();
+    let confirmed = rollback_offer(&base).unwrap();
     rollback(&base).unwrap();
     install(&package("01.10", "prior.txt"), &base, SilentProgress).unwrap();
     install(&latest, &base, SilentProgress).unwrap();
@@ -104,15 +104,123 @@ fn confirmed_rollback_rejects_a_changed_target_even_at_the_same_active_version()
             .apply(&base, SilentProgress)
             .unwrap_err()
             .to_string()
-            .contains("versions changed")
+            .contains("installation changed")
     );
-    let fresh = status(&base, SilentProgress)
-        .unwrap()
-        .separate_rollback()
-        .unwrap();
+    let fresh = rollback_offer(&base).unwrap();
     assert_eq!(fresh.active_version(), "01.12");
     assert_eq!(fresh.target_version(), "01.10");
     assert!(!fresh.restores_base());
+}
+
+#[test]
+fn confirmed_rollback_preserves_a_reinstalled_update_of_the_same_version() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = base_game(tmp.path());
+    install(&package("01.12", "update.txt"), &base, SilentProgress).unwrap();
+    let confirmed = rollback_offer(&base).unwrap();
+    rollback(&base).unwrap();
+    let replacement = Pkg::new(update("01.12", "update.txt", b"OTHER")).unwrap();
+    install(&replacement, &base, SilentProgress).unwrap();
+
+    assert!(confirmed.apply(&base, SilentProgress).is_err());
+    assert_eq!(
+        fs::read(active(&base).join("update.txt")).unwrap(),
+        b"OTHER"
+    );
+    rollback_offer(&base)
+        .unwrap()
+        .apply(&base, SilentProgress)
+        .unwrap();
+    assert!(!active(&base).exists());
+}
+
+#[test]
+fn confirmed_rollback_preserves_a_replaced_backup_of_the_same_version() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = base_game(&tmp.path().join("game"));
+    let other = base_game(&tmp.path().join("backup"));
+    install(&package("01.10", "prior.txt"), &base, SilentProgress).unwrap();
+    install(&package("01.12", "new.txt"), &base, SilentProgress).unwrap();
+    let confirmed = rollback_offer(&base).unwrap();
+
+    let replacement = Pkg::new(update("01.10", "prior.txt", b"OTHER")).unwrap();
+    install(&replacement, &other, SilentProgress).unwrap();
+    let previous = manager(&base).join("previous");
+    fs::rename(&previous, tmp.path().join("original-backup")).unwrap();
+    fs::rename(active(&other), &previous).unwrap();
+
+    assert!(confirmed.apply(&base, SilentProgress).is_err());
+    assert_eq!(version(&base), "01.12");
+    assert_eq!(fs::read(previous.join("prior.txt")).unwrap(), b"OTHER");
+    rollback_offer(&base)
+        .unwrap()
+        .apply(&base, SilentProgress)
+        .unwrap();
+    assert_eq!(fs::read(active(&base).join("prior.txt")).unwrap(), b"OTHER");
+}
+
+#[cfg(unix)]
+#[test]
+fn confirmed_rollback_rejects_a_redirected_game_folder_symlink() {
+    use std::os::unix::fs::symlink;
+    let tmp = tempfile::tempdir().unwrap();
+    let first = base_game(&tmp.path().join("first"));
+    let second = base_game(&tmp.path().join("second"));
+    let update = package("01.12", "update.txt");
+    for base in [&first, &second] {
+        install(&update, base, SilentProgress).unwrap();
+    }
+    let link = tmp.path().join("game");
+    symlink(&first, &link).unwrap();
+    let confirmed = rollback_offer(&link).unwrap();
+    fs::remove_file(&link).unwrap();
+    symlink(&second, &link).unwrap();
+
+    assert!(confirmed.apply(&link, SilentProgress).is_err());
+    assert_eq!(version(&first), "01.12");
+    assert_eq!(version(&second), "01.12");
+}
+
+#[test]
+fn confirmed_rollback_rejects_a_replacement_game_directory_at_the_same_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = base_game(tmp.path());
+    install(&package("01.12", "update.txt"), &base, SilentProgress).unwrap();
+    let confirmed = rollback_offer(&base).unwrap();
+    fs::rename(&base, tmp.path().join("original-game")).unwrap();
+    base_game(tmp.path());
+
+    assert!(confirmed.apply(&base, SilentProgress).is_err());
+    assert_eq!(version(&base), "01.12");
+    rollback_offer(&base)
+        .unwrap()
+        .apply(&base, SilentProgress)
+        .unwrap();
+}
+
+#[test]
+fn confirmed_rollback_does_not_create_or_recreate_installation_state() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = base_game(tmp.path());
+    install(&package("01.12", "update.txt"), &base, SilentProgress).unwrap();
+    let confirmed = rollback_offer(&base).unwrap();
+    let untouched = base_game(&tmp.path().join("untouched"));
+    assert!(confirmed.apply(&untouched, SilentProgress).is_err());
+    assert!(!manager(&untouched).exists());
+
+    let lock = manager(&base).join("lock");
+    fs::remove_file(&lock).unwrap();
+    let (report, offer) = status_with_rollback(&base, SilentProgress).unwrap();
+    assert_eq!(report.active_version.as_deref(), Some("01.12"));
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|issue| issue.contains("lock is missing"))
+    );
+    assert!(offer.is_none());
+    assert!(confirmed.apply(&base, SilentProgress).is_err());
+    assert!(!lock.exists());
 }
 
 #[test]
@@ -121,18 +229,15 @@ fn confirmed_separate_rollback_never_restores_a_newly_merged_game() {
     let base = base_game(tmp.path());
     let update = package("01.12", "merged.txt");
     install(&update, &base, SilentProgress).unwrap();
-    let confirmed = status(&base, SilentProgress)
-        .unwrap()
-        .separate_rollback()
-        .unwrap();
+    let confirmed = rollback_offer(&base).unwrap();
     rollback(&base).unwrap();
     install_with_mode(&update, &base, InstallMode::Merge, SilentProgress).unwrap();
 
     assert!(confirmed.apply(&base, SilentProgress).is_err());
     assert_eq!(fs::read(base.join("merged.txt")).unwrap(), b"01.12");
-    let report = status(&base, SilentProgress).unwrap();
+    let (report, offer) = status_with_rollback(&base, SilentProgress).unwrap();
     assert_eq!(report.mode, InstallMode::Merge);
-    assert!(report.separate_rollback().is_none());
+    assert!(offer.is_none());
 }
 
 #[test]
@@ -140,32 +245,19 @@ fn confirmed_rollback_preserves_a_separate_installation_that_now_needs_attention
     let tmp = tempfile::tempdir().unwrap();
     let base = base_game(tmp.path());
     install(&package("01.12", "new.txt"), &base, SilentProgress).unwrap();
-    let confirmed = status(&base, SilentProgress)
-        .unwrap()
-        .separate_rollback()
-        .unwrap();
+    let confirmed = rollback_offer(&base).unwrap();
     for path in [
         manager(&base).join("staging"),
         base.with_file_name("CUSA00000-PATCH"),
     ] {
         fs::create_dir(&path).unwrap();
-        assert!(
-            status(&base, SilentProgress)
-                .unwrap()
-                .separate_rollback()
-                .is_none()
-        );
+        assert!(rollback_offer(&base).is_none());
         assert!(confirmed.apply(&base, SilentProgress).is_err());
         assert_eq!(version(&base), "01.12");
         fs::remove_dir(path).unwrap();
     }
     fs::write(manager(&base).join("journal.json"), b"{}").unwrap();
-    assert!(
-        status(&base, SilentProgress)
-            .unwrap()
-            .separate_rollback()
-            .is_none()
-    );
+    assert!(rollback_offer(&base).is_none());
     assert!(confirmed.apply(&base, SilentProgress).is_err());
     assert_eq!(version(&base), "01.12");
 }
@@ -492,7 +584,7 @@ fn final_sync_failure_reports_success_for_committed_rollbacks() {
         }
         let warnings = Warnings::default();
         transaction::ERROR_AT.with(|f| f.set(Some("final_sync")));
-        let result = rollback_with_progress(&base, &warnings);
+        let result = rollback_with_progress::<&Warnings>(&base, &warnings);
         transaction::ERROR_AT.with(|f| f.set(None));
         result.unwrap();
         warnings.assert_committed_warning();
@@ -595,9 +687,9 @@ fn diagnostics_and_installation_agree_on_invalid_managed_manifests() {
             _ => unreachable!(),
         }
         fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
-        let report = status(&base, SilentProgress).unwrap();
+        let (report, offer) = status_with_rollback(&base, SilentProgress).unwrap();
         assert!(!report.issues.is_empty(), "{defect}");
-        assert!(report.separate_rollback().is_none(), "{defect}");
+        assert!(offer.is_none(), "{defect}");
         assert!(
             report.modified_files.is_empty(),
             "file contents did not change"
@@ -606,9 +698,9 @@ fn diagnostics_and_installation_agree_on_invalid_managed_manifests() {
     }
     fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
     fs::write(active(&base).join("base.txt"), b"EDITED").unwrap();
-    let report = status(&base, SilentProgress).unwrap();
+    let (report, offer) = status_with_rollback(&base, SilentProgress).unwrap();
     assert_eq!(report.modified_files, ["base.txt"]);
-    assert!(report.separate_rollback().is_none());
+    assert!(offer.is_none());
     assert!(plan(&next, &base).is_err());
 }
 

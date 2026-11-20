@@ -1,6 +1,7 @@
 //! Diagnose installations without creating state or attempting recovery.
 use super::{
-    Result,
+    Result, SeparateRollback,
+    rollback::VerifiedUpdate,
     storage::{self, Layout, Manifest, RollbackTarget},
 };
 use crate::ExtractProgress;
@@ -32,11 +33,27 @@ impl Drop for ReadLock {
 }
 
 pub fn status(base: &Path, progress: impl ExtractProgress) -> Result<InstallationStatus> {
-    if let Some(report) = super::merge::status(base, &progress)? {
-        return Ok(report);
+    Ok(scan(base, &progress, false)?.0)
+}
+
+/// Returns the status and an optional separate rollback from the same verified scan.
+pub fn status_with_rollback(
+    base: &Path,
+    progress: impl ExtractProgress,
+) -> Result<(InstallationStatus, Option<SeparateRollback>)> {
+    scan(base, &progress, true)
+}
+
+fn scan(
+    base: &Path,
+    progress: &impl ExtractProgress,
+    prepare_rollback: bool,
+) -> Result<(InstallationStatus, Option<SeparateRollback>)> {
+    if let Some(report) = super::merge::status(base, progress)? {
+        return Ok((report, None));
     }
     let layout = Layout::inspect(base)?;
-    let metadata = layout.base_metadata()?;
+    let (base_dir, metadata) = layout.original_base()?;
     let mut report = InstallationStatus {
         schema_version: 1,
         mode: super::InstallMode::Separate,
@@ -52,20 +69,20 @@ pub fn status(base: &Path, progress: impl ExtractProgress) -> Result<Installatio
         base_integrity: "not_tracked".into(),
     };
     // Lock only an existing lock file. An untouched base remains untouched.
-    let _guard = if let Some(root) = &layout.root {
+    let guard = if let Some(root) = &layout.root {
         if storage::exists(root, "lock")? {
             if !root.symlink_metadata("lock")?.is_file() {
                 report
                     .issues
                     .push("installation lock is not a regular file".into());
-                return Ok(report);
+                return Ok((report, None));
             }
             let file = root.open("lock")?.into_std();
             if FileExt::try_lock_shared(&file).is_err() {
                 report.issues.push(
                     "installation operation is in progress; retry status when it finishes".into(),
                 );
-                return Ok(report);
+                return Ok((report, None));
             }
             Some(ReadLock(file))
         } else {
@@ -104,7 +121,7 @@ pub fn status(base: &Path, progress: impl ExtractProgress) -> Result<Installatio
         Ok(s) => s,
         Err(e) => {
             report.issues.push(e.to_string());
-            return Ok(report);
+            return Ok((report, None));
         }
     };
     report.rollback = match state.rollback {
@@ -125,13 +142,14 @@ pub fn status(base: &Path, progress: impl ExtractProgress) -> Result<Installatio
             .issues
             .push("managed -UPDATE directory is missing".into());
     }
+    let mut active = None;
     if state.active && present {
         let checked = (|| -> Result<()> {
             storage::require_directory(&layout.parent, &layout.active)?;
             let dir = layout.parent.open_dir(&layout.active)?;
             let manifest: Manifest = storage::read_json(&dir, storage::MANIFEST)?;
             report.active_version = Some(manifest.app_version.clone());
-            let differences = storage::compare_inventory(&dir, &manifest, &progress)?;
+            let differences = storage::compare_inventory(&dir, &manifest, progress)?;
             report.modified_files = differences.modified_files;
             if !differences.matches {
                 report
@@ -146,6 +164,19 @@ pub fn status(base: &Path, progress: impl ExtractProgress) -> Result<Installatio
                     other => return Err(other),
                 }
             }
+            if prepare_rollback
+                && state.rollback != RollbackTarget::None
+                && report.issues.is_empty()
+                && report.unmanaged_directories.is_empty()
+            {
+                if guard.is_some() {
+                    active = Some(VerifiedUpdate::from_manifest(manifest)?);
+                } else {
+                    report.issues.push(
+                        "The installation lock is missing. Close the emulator and run orbis recover --base <DIR> before restoring.".into(),
+                    );
+                }
+            }
             Ok(())
         })();
         if let Err(error) = checked {
@@ -155,11 +186,33 @@ pub fn status(base: &Path, progress: impl ExtractProgress) -> Result<Installatio
             report.issues.push(error.to_string());
         }
     }
-    match layout.verify_previous(&state, &metadata, &progress) {
-        Ok(Some(manifest)) => report.rollback_version = Some(manifest.app_version),
-        Ok(None) => {}
+    let previous = match layout.verify_previous(&state, &metadata, progress) {
+        Ok(manifest) => manifest,
         Err(error) if progress.is_cancelled() => return Err(error),
-        Err(error) => report.issues.push(format!("rollback: {error}")),
+        Err(error) => {
+            report.issues.push(format!("rollback: {error}"));
+            return Ok((report, None));
+        }
+    };
+    if let Some(manifest) = &previous {
+        report.rollback_version = Some(manifest.app_version.clone());
     }
-    Ok(report)
+    let Some(active) = active else {
+        return Ok((report, None));
+    };
+    match SeparateRollback::new(
+        &layout,
+        &base_dir,
+        report.base_version.clone(),
+        active,
+        previous,
+    ) {
+        Ok(plan) => Ok((report, Some(plan))),
+        Err(error) => {
+            report
+                .issues
+                .push(format!("cannot prepare rollback: {error}"));
+            Ok((report, None))
+        }
+    }
 }

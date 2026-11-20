@@ -131,6 +131,7 @@ pub enum Outcome {
     GameStatus {
         base: PathBuf,
         status: Box<install::InstallationStatus>,
+        rollback: Option<install::SeparateRollback>,
     },
     GameChanged {
         base: PathBuf,
@@ -467,9 +468,11 @@ fn execute(
 }
 
 fn game_status(base: &Path, progress: &impl ExtractProgress) -> Result<Outcome> {
+    let (status, rollback) = install::status_with_rollback(base, progress)?;
     Ok(Outcome::GameStatus {
         base: base.to_owned(),
-        status: Box::new(install::status(base, progress)?),
+        status: Box::new(status),
+        rollback,
     })
 }
 
