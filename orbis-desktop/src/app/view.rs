@@ -354,11 +354,15 @@ impl OrbisApp {
             let total = job.progress.total.load(Ordering::Relaxed);
             let done = job.progress.processed.load(Ordering::Relaxed);
             if total > 0 {
-                ui.add(
-                    egui::ProgressBar::new((done as f64 / total as f64).clamp(0.0, 1.0) as f32)
-                        .fill(theme::ACCENT)
-                        .text(format!("{} / {}", human_size(done), human_size(total))),
-                );
+                ui.horizontal(|ui| {
+                    let count = ui.label(format!("{} / {}", human_size(done), human_size(total)));
+                    ui.add(
+                        egui::ProgressBar::new((done as f64 / total as f64).clamp(0.0, 1.0) as f32)
+                            .desired_height(10.0)
+                            .fill(theme::ACCENT),
+                    )
+                    .labelled_by(count.id);
+                });
             }
             if !details.file.is_empty() {
                 ui.add(egui::Label::new(muted(ui, &details.file).size(12.0)).truncate())

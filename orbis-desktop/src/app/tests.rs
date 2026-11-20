@@ -286,6 +286,45 @@ fn extraction_form_with_a_metadata_warning_fits_the_default_window() {
     );
 }
 
+#[test]
+fn byte_count_stays_outside_the_progress_bar_in_both_themes() {
+    use egui::accesskit::Role;
+    use orbis_cli::ExtractProgress;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sample.pkg");
+    fs::write(&path, features::signed_pkg()).unwrap();
+    let ctx = egui::Context::default();
+    let mut app = OrbisApp::new(&ctx, Some(path));
+    // Render successive progress snapshots before the app polls the worker.
+    for theme in [egui::Theme::Light, egui::Theme::Dark] {
+        ctx.set_theme(theme);
+        for done in [0, 8, 100] {
+            let progress = &app.job.as_ref().unwrap().progress;
+            progress.bytes_total(100);
+            progress.bytes_processed(done);
+            let tree = frame(&mut app, Default::default());
+            let (_, bar) = tree
+                .nodes
+                .iter()
+                .find(|(_, node)| {
+                    node.role() == Role::ProgressIndicator && node.numeric_value().is_some()
+                })
+                .unwrap();
+            let expected = format!("{} / 100.0 B", human_size(done));
+            let (id, label) = tree
+                .nodes
+                .iter()
+                .find(|(_, node)| {
+                    node.role() == Role::Label && node.value() == Some(expected.as_str())
+                })
+                .unwrap();
+            assert!(label.bounds().unwrap().x1 <= bar.bounds().unwrap().x0);
+            assert_eq!(bar.labelled_by(), &[*id]);
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct DroppedPath(pub PathBuf);
 
