@@ -387,3 +387,72 @@ fn interrupted_merge_offers_recovery_and_refreshes_the_restored_base() {
     );
     assert!(!base.join("new.txt").exists());
 }
+
+#[test]
+fn separate_rollback_confirms_the_versions_and_refreshes_the_game_folder() {
+    use orbis_cli::{SilentProgress, install};
+
+    for (versions, button, question, expected) in [
+        (
+            &["01.10"][..],
+            "Restore base 01.00…",
+            "Switch from 01.10 to base game 01.00?",
+            None,
+        ),
+        (
+            &["01.10", "01.12"][..],
+            "Restore previous update 01.10…",
+            "Switch from 01.12 to previous update 01.10?",
+            Some("01.10"),
+        ),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let base = crate::common::base_game(temp.path());
+        for version in versions {
+            let pkg = orbis_pkg::Pkg::new(crate::common::update(
+                version,
+                "base.txt",
+                version.as_bytes(),
+            ))
+            .unwrap();
+            install::install(&pkg, &base, SilentProgress).unwrap();
+        }
+        let active_file = temp.path().join("CUSA00000-UPDATE/base.txt");
+        let mut app = OrbisApp::default();
+        app.open(base.clone());
+        finish(&mut app);
+        click(&mut app, button);
+        let view = frame(&mut app, Default::default());
+        assert!(
+            view.nodes
+                .iter()
+                .any(|(_, node)| node.value() == Some(question))
+        );
+        click(&mut app, "Cancel");
+        assert!(app.job.is_none());
+        assert_eq!(
+            fs::read(&active_file).unwrap(),
+            versions.last().unwrap().as_bytes()
+        );
+
+        click(&mut app, button);
+        click(&mut app, "Confirm restore");
+        finish(&mut app);
+        assert_eq!(app.notice.as_ref().unwrap().title, "Rollback complete");
+        click(&mut app, "Done");
+        finish(&mut app);
+        let report = app.game.as_ref().unwrap().status.as_ref().unwrap();
+        assert_eq!(report.active_version.as_deref(), expected);
+        assert!(report.rollback_version.is_none());
+        let view = frame(&mut app, Default::default());
+        assert!(!view.nodes.iter().any(|(_, node)| {
+            node.label()
+                .is_some_and(|label| label.starts_with("Restore "))
+        }));
+        assert_eq!(fs::read(base.join("base.txt")).unwrap(), b"BASE");
+        match expected {
+            Some(version) => assert_eq!(fs::read(active_file).unwrap(), version.as_bytes()),
+            None => assert!(!active_file.parent().unwrap().exists()),
+        }
+    }
+}

@@ -182,10 +182,7 @@ impl OrbisApp {
             Ok(Outcome::Preview(plan)) => self.preview = Some(plan),
             Ok(Outcome::GameStatus { base, status }) => {
                 self.preview = None;
-                self.game = Some(game::GameFolder {
-                    base,
-                    status: Some(status),
-                });
+                self.game = Some(game::GameFolder::new(base, Some(status)));
             }
             Ok(Outcome::GameChanged {
                 base,
@@ -193,10 +190,7 @@ impl OrbisApp {
                 message,
             }) => {
                 self.preview = None;
-                self.game = Some(game::GameFolder {
-                    base: base.clone(),
-                    status: None,
-                });
+                self.game = Some(game::GameFolder::new(base.clone(), None));
                 self.notice = Some(Notice {
                     title: title.into(),
                     message,

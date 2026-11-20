@@ -62,6 +62,10 @@ pub enum Operation {
     RestoreBase {
         base: PathBuf,
     },
+    RollbackSeparate {
+        base: PathBuf,
+        plan: install::SeparateRollback,
+    },
     RecoverBase {
         base: PathBuf,
     },
@@ -83,6 +87,7 @@ impl Operation {
             Self::InstallUpdate { .. } => "Installing update",
             Self::CheckGame { .. } => "Checking game folder",
             Self::RestoreBase { .. } => "Restoring base game",
+            Self::RollbackSeparate { .. } => "Rolling back separate update",
             Self::RecoverBase { .. } => "Recovering game folder",
         }
     }
@@ -106,6 +111,9 @@ impl Operation {
             }
             Self::CheckGame { .. } => {
                 "Choose the extracted base game folder containing sce_sys/param.sfo. For an interrupted merge, choose the original game folder."
+            }
+            Self::RollbackSeparate { .. } => {
+                "Keep the emulator closed. Refresh the game folder to check the installed version and available rollback target."
             }
             Self::InstallUpdate { .. } | Self::RestoreBase { .. } | Self::RecoverBase { .. } => {
                 "Keep the emulator closed and retain the backup folder beside your game. Open the game folder to check its status or recover an interrupted merge."
@@ -273,6 +281,14 @@ fn execute(
             });
         }
         Operation::CheckGame { base } => return game_status(base, progress),
+        Operation::RollbackSeparate { base, plan } => {
+            plan.apply(base, progress)?;
+            return Ok(Outcome::GameChanged {
+                base: base.clone(),
+                title: "Rollback complete",
+                message: format!("Version {} is now active.", plan.target_version()),
+            });
+        }
         Operation::PreviewUpdate { base, .. } if install::merge_status(base)?.is_some() => {
             return game_status(base, progress);
         }
@@ -386,6 +402,7 @@ fn execute(
         | Operation::Export(_)
         | Operation::CheckGame { .. }
         | Operation::RestoreBase { .. }
+        | Operation::RollbackSeparate { .. }
         | Operation::RecoverBase { .. } => unreachable!(),
         Operation::Extract { output, resume } => {
             // Never overwrite a different file, including when resuming.
@@ -439,7 +456,7 @@ fn execute(
             Ok(Outcome::Finished {
                 title: "Update installed".into(),
                 message: format!(
-                    "{} is now at version {}. The base game was preserved. One previous installation is available through the CLI's rollback command.",
+                    "{} is now at version {}. Open the base game folder in Orbis to restore the previous version.",
                     plan.title_id, plan.update_version
                 ),
                 output: plan.destination,

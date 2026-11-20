@@ -135,7 +135,9 @@ The base remains in `CUSA12345`; the managed update lives beside it in
 newer application version. Supported full-file updates replace the update layer;
 binary delta patches are rejected.
 
-To restore the retained installation:
+To restore the retained installation, open the base game folder in Orbis and
+choose **Restore base** or **Restore previous update**. The button shows the
+version you will return to. The CLI uses the same rollback point.
 
 ```sh
 orbis rollback --base ./games/CUSA12345
