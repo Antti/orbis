@@ -56,6 +56,23 @@ pub(super) struct Layout {
 
 struct InstallLock(std::fs::File);
 
+impl InstallLock {
+    fn acquire(root: &Dir, create: bool) -> Result<Self> {
+        if !create || exists(root, "lock")? {
+            require_file(root, "lock")?;
+        }
+        let file = root
+            .open_with(
+                "lock",
+                OpenOptions::new().create(create).read(true).write(true),
+            )?
+            .into_std();
+        file.try_lock_exclusive()
+            .map_err(|_| invalid("another installation operation holds the lock"))?;
+        Ok(Self(file))
+    }
+}
+
 impl Drop for InstallLock {
     fn drop(&mut self) {
         // Closing our descriptor alone can leave flock held by a concurrently
@@ -71,6 +88,12 @@ impl Layout {
     }
     pub fn inspect(base: &Path) -> Result<Self> {
         Self::open_inner(base, false, true)
+    }
+    /// Lock a managed installation without creating state in a replacement folder.
+    pub fn open_locked_existing(base: &Path) -> Result<Self> {
+        let mut layout = Self::open(base, false)?;
+        layout._lock = Some(InstallLock::acquire(layout.manager()?, false)?);
+        Ok(layout)
     }
     fn open_inner(base: &Path, write: bool, allow_legacy: bool) -> Result<Self> {
         let base_path = std::fs::canonicalize(base)?;
@@ -106,19 +129,7 @@ impl Layout {
             None
         };
         let lock = if write {
-            let root = root.as_ref().unwrap();
-            if exists(root, "lock")? {
-                require_file(root, "lock")?;
-            }
-            let file = root
-                .open_with(
-                    "lock",
-                    OpenOptions::new().create(true).read(true).write(true),
-                )?
-                .into_std();
-            file.try_lock_exclusive()
-                .map_err(|_| invalid("another installation operation holds the lock"))?;
-            Some(InstallLock(file))
+            Some(InstallLock::acquire(root.as_ref().unwrap(), true)?)
         } else {
             None
         };
@@ -148,18 +159,22 @@ impl Layout {
         Ok(self.parent.open_dir(&self.base)?)
     }
     pub fn base_metadata(&self) -> Result<AppMetadata> {
+        Ok(self.original_base()?.1)
+    }
+    pub fn original_base(&self) -> Result<(Dir, AppMetadata)> {
         if super::merge::present(self)? {
             return Err(invalid(
                 "this game has a merged update; restore the base with rollback --base <DIR> before installing or exporting",
             ));
         }
-        let result = app_metadata(&self.base_dir()?)?;
+        let dir = self.base_dir()?;
+        let result = app_metadata(&dir)?;
         if result.category != "gd" {
             return Err(invalid(
                 "base PARAM.SFO CATEGORY must be gd; provide the original base directory",
             ));
         }
-        Ok(result)
+        Ok((dir, result))
     }
     pub fn state(&self) -> Result<State> {
         let state = match &self.root {

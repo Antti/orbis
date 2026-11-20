@@ -9,10 +9,12 @@ mod merge;
 pub use directory::{DirectoryIssue, DirectoryIssueKind, DirectoryReport, verify_directory};
 pub use merge::{MergeStatus, merge_status};
 mod preflight;
+mod rollback;
 mod status;
 mod storage;
 mod transaction;
-pub use status::{InstallationStatus, status};
+pub use rollback::{SeparateRollback, rollback, rollback_with_progress};
+pub use status::{InstallationStatus, status, status_with_rollback};
 
 pub use export::{
     ExportPlan, ExportPreview, ExportReport, ExportedDirectory, export_for_verification,
@@ -426,43 +428,6 @@ pub fn restore_merged(base: &Path, progress: impl ExtractProgress) -> Result<()>
         return Err(invalid("this game has no merged update to restore"));
     }
     merge::restore(&location, &progress)
-}
-
-/// Restores the previous managed update, or removes the first update to use the base.
-/// Only one rollback is retained. Modified/unmanaged trees are never overwritten.
-pub fn rollback(base: &Path) -> Result<()> {
-    rollback_with_progress(base, SilentProgress)
-}
-
-/// Rolls back with cancellable checks of the active and previous file inventories.
-/// Final sync failures after commit are reported through [`ExtractProgress::warning`].
-pub fn rollback_with_progress<P: ExtractProgress>(base: &Path, progress: P) -> Result<()> {
-    let location = Layout::open(base, true)?;
-    location.require_recovered()?;
-    if merge::present(&location)? {
-        return merge::restore(&location, &progress);
-    }
-    let state = location.state()?;
-    let base_meta = location.base_metadata()?;
-    location.active_manifest(&state, &base_meta, &progress)?;
-    location.verify_previous(&state, &base_meta, &progress)?;
-    match state.rollback {
-        storage::RollbackTarget::None => {
-            return Err(invalid(
-                "no previous installation is available for rollback",
-            ));
-        }
-        storage::RollbackTarget::Update | storage::RollbackTarget::Base => {}
-    }
-    if progress.is_cancelled() {
-        return Err(ExtractError::Cancelled.into());
-    }
-    location.clean_uncommitted()?;
-    if let Err(error) = location.rollback_transaction(&progress) {
-        location.restore_after_error(&error, &progress)?;
-        return Err(error);
-    }
-    Ok(())
 }
 
 /// Recovers an interrupted activation/rollback and removes abandoned staging data.

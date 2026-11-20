@@ -1,15 +1,30 @@
 use super::view::{metric, path_label, warning};
 use super::*;
 use crate::theme::{self, heading, muted};
-use orbis_cli::install::InstallationStatus;
+use orbis_cli::install::{InstallationStatus, SeparateRollback};
 
 pub(super) struct GameFolder {
     pub base: PathBuf,
     // A mutation invalidates the last scan even if it stops partway through.
     pub status: Option<Box<InstallationStatus>>,
+    rollback: Option<SeparateRollback>,
+    confirming_rollback: bool,
 }
 
 impl GameFolder {
+    pub(super) fn new(
+        base: PathBuf,
+        status: Option<Box<InstallationStatus>>,
+        rollback: Option<SeparateRollback>,
+    ) -> Self {
+        Self {
+            base,
+            status,
+            rollback,
+            confirming_rollback: false,
+        }
+    }
+
     pub fn show(&self, ui: &mut egui::Ui) {
         ui.label(heading("Game folder", 21.0));
         path_label(ui, &self.base, "");
@@ -88,22 +103,66 @@ impl OrbisApp {
     pub(super) fn open_game(&mut self, base: PathBuf) {
         self.export = None;
         self.preview = None;
-        self.game = Some(GameFolder {
-            base: base.clone(),
-            status: None,
-        });
+        self.game = Some(GameFolder::new(base.clone(), None, None));
         self.start(PathBuf::new(), Operation::CheckGame { base });
     }
 
     pub(super) fn game_footer(&mut self, ui: &mut egui::Ui) {
-        let game = self.game.as_ref().unwrap();
+        let game = self.game.as_mut().unwrap();
         let base = game.base.clone();
         let state = game.status.as_ref().map(|s| (s.mode, s.pending_recovery));
+        if let Some(plan) = &game.rollback
+            && game.confirming_rollback
+        {
+            let target = if plan.restores_base() {
+                "base game"
+            } else {
+                "previous update"
+            };
+            ui.label(heading(
+                format!(
+                    "Switch from {} to {target} {}?",
+                    plan.active_version(),
+                    plan.target_version()
+                ),
+                15.0,
+            ));
+            ui.label("Close the emulator first. Restoring removes the active update and uses the only rollback point.");
+            let confirm = ui
+                .horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        game.confirming_rollback = false;
+                    }
+                    ui.add(theme::primary("Confirm restore")).clicked()
+                })
+                .inner;
+            if confirm {
+                let plan = game.rollback.take().unwrap();
+                game.status = None;
+                game.confirming_rollback = false;
+                self.start(PathBuf::new(), Operation::RollbackSeparate { base, plan });
+            }
+            return;
+        }
         ui.horizontal_wrapped(|ui| {
             match state {
                 Some((InstallMode::Separate, false)) => {
                     if ui.add(theme::primary("Export this game…")).clicked() {
                         self.export = Some(tools::ExportState::from_base(base.clone()));
+                    }
+                    let game = self.game.as_mut().unwrap();
+                    if let Some(plan) = &game.rollback {
+                        let target = if plan.restores_base() {
+                            "base"
+                        } else {
+                            "previous update"
+                        };
+                        if ui
+                            .button(format!("Restore {target} {}…", plan.target_version()))
+                            .clicked()
+                        {
+                            game.confirming_rollback = true;
+                        }
                     }
                 }
                 Some((InstallMode::Merge, pending)) => {

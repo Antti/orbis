@@ -40,9 +40,12 @@ flagged before extraction. macOS installer `.pkg` files cannot be read by Orbis.
   the available rollback target, and any installation issues. Checking managed
   files can take time. **Refresh** repeats the check after changes on disk.
   For a base game or separate update, **Export this game…** opens the export
-  form with that base selected. For a merged update, **Restore base** restores
+  form with that base selected. To roll back a managed separate update, choose
+  **Restore base** or **Restore previous update**, review the versions, close
+  the emulator, and confirm. This uses the single rollback point. Choose **Done**
+  to see the active version. For a merged update, **Restore base** restores
   replaced originals and removes update-only files. An interrupted merge offers
-  **Recover base**. Both actions work without the PKG.
+  **Recover base**. Restoring or recovering a game works without the PKG.
 - **Cancel:** stops cooperatively between work chunks. Completed extraction files
   remain. Closing during work offers to cancel and waits for cleanup before exit.
 - **Show in folder:** opens the output directory after extraction or installation.
@@ -103,9 +106,8 @@ support for exclusive renames; macOS exFAT users should use separate updates and
 **Export game…** instead. The update preview estimates patch staging space and reports the
 size of retained originals; it does not reserve space.
 
-Separate updates retain one previous installation. Rollback and recovery for
-separate updates, selective extraction, and streamed per-check verification
-reports remain in the [CLI](../orbis-cli/README.md).
+Recovery for interrupted separate updates, selective extraction, and streamed
+per-check verification reports remain in the [CLI](../orbis-cli/README.md).
 
 The app accepts one package path as its first argument. Windows **Open with** can
 use `Orbis.exe`; Linux launchers can pass a file path to `Orbis`. The app does not change
