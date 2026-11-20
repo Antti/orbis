@@ -8,7 +8,6 @@ readme = "README.md"
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-homepage.workspace = true
 keywords = ["ps4", "playstation", "pkg", "extract", "orbis"]
 categories = ["command-line-utilities"]
 

@@ -26,11 +26,11 @@ jobs:
       build: ${{ steps.version.outputs.build }}
       publish: ${{ steps.version.outputs.publish }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
       - run: python3 -m unittest discover -s scripts/release -p 'test_*.py' -v
@@ -61,7 +61,7 @@ jobs:
     if: needs.plan.outputs.build == 'true'
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
@@ -84,7 +84,7 @@ jobs:
         run: >-
           bash scripts/release/package-linux.sh "$RELEASE_VERSION"
           "target/$RELEASE_TARGET/release/orbis" dist "$RELEASE_ARCH"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-linux-${{ matrix.arch }}
           path: dist/*
@@ -107,7 +107,7 @@ jobs:
     env:
       MACOSX_DEPLOYMENT_TARGET: '11.0'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
@@ -137,7 +137,7 @@ jobs:
         run: >-
           bash scripts/release/package-macos.sh "$RELEASE_VERSION" "$RELEASE_TARGET"
           "target/$RELEASE_TARGET/release/orbis" dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.target }}
           path: dist/*.tar.gz
@@ -150,10 +150,10 @@ jobs:
     if: needs.plan.outputs.build == 'true'
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
       - uses: dtolnay/rust-toolchain@stable
@@ -168,7 +168,7 @@ jobs:
         env:
           RELEASE_VERSION: ${{ needs.plan.outputs.version }}
         run: python scripts/release/package-windows.py "$env:RELEASE_VERSION" target/x86_64-pc-windows-msvc/release/orbis.exe dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-windows-x86_64
           path: dist/*.zip
@@ -202,10 +202,10 @@ jobs:
     env:
       MACOSX_DEPLOYMENT_TARGET: '11.0'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
       - uses: dtolnay/rust-toolchain@stable
@@ -232,7 +232,7 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: python scripts/release/package-desktop.py "${{ needs.plan.outputs.version }}" "${{ matrix.target }}" "target/${{ matrix.target }}/release/${{ matrix.binary }}" dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-desktop-${{ matrix.target }}
           path: dist/*
@@ -250,13 +250,13 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: release-*
           merge-multiple: true
