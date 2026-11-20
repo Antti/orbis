@@ -234,7 +234,8 @@ pub(super) fn click(app: &mut OrbisApp, label: &str) {
     let (button, _) = tree
         .nodes
         .iter()
-        .find(|(_, node)| node.label() == Some(label))
+        // An action tab can have the same label as the footer button.
+        .find(|(_, node)| node.label() == Some(label) && node.toggled().is_none())
         .unwrap_or_else(|| panic!("missing button {label}"));
     let event = egui::Event::AccessKitActionRequest(ActionRequest {
         action: AccessibilityAction::Click,
@@ -248,6 +249,40 @@ pub(super) fn click(app: &mut OrbisApp, label: &str) {
             events: vec![event],
             ..Default::default()
         },
+    );
+}
+
+#[test]
+fn extraction_form_with_a_metadata_warning_fits_the_default_window() {
+    let ctx = egui::Context::default();
+    let mut app = OrbisApp::new(&ctx, None);
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp
+        .path()
+        .join("Sample.Game.of.the.Year.Edition.01.00.pkg");
+    fs::write(&path, features::signed_pkg_with_metadata(true)).unwrap();
+    app.open(path);
+    finish(&mut app);
+
+    // Let the panels reserve their final sizes before measuring the scroll area.
+    frame(&mut app, Default::default());
+    let tree = frame(&mut app, Default::default());
+    assert!(tree.nodes.iter().any(|(_, node)| {
+        node.value()
+            .is_some_and(|text| text.contains("encrypted metadata entry cannot be read"))
+    }));
+    assert!(
+        tree.nodes
+            .iter()
+            .any(|(_, node)| node.label() == Some("Resume an unfinished extraction")),
+        "the last extraction setting should be visible on opening the PKG"
+    );
+    assert!(
+        !tree
+            .nodes
+            .iter()
+            .any(|(_, node)| node.role() == egui::accesskit::Role::ScrollBar),
+        "the collapsed extraction form should fit without scrolling"
     );
 }
 

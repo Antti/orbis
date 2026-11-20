@@ -146,40 +146,18 @@ impl OrbisApp {
             }
             ui.add_space(6.0);
             ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
                 ui.add(egui::Label::new(heading(&info.title, 21.0)).truncate())
                     .on_hover_text(&info.title);
-                ui.horizontal(|ui| {
-                    egui::Frame::new()
-                        .fill(ui.visuals().selection.bg_fill)
-                        .corner_radius(4)
-                        .inner_margin(egui::Margin::symmetric(7, 3))
-                        .show(ui, |ui| {
-                            ui.label(
-                                RichText::new(&info.kind)
-                                    .size(12.0)
-                                    .color(ui.visuals().selection.stroke.color),
-                            );
-                        });
-                    ui.label(muted(ui, &info.title_id).size(13.0));
-                });
-                let filename = info.path.file_name().unwrap_or_default().to_string_lossy();
-                ui.add(egui::Label::new(muted(ui, filename).size(12.0)).truncate())
-                    .on_hover_text(info.path.display().to_string());
+                ui.label(format!("{} · {}", info.kind, info.title_id));
+                let metadata = format!(
+                    "App version {}  ·  {}  ·  Minimum system {}",
+                    info.version.as_deref().unwrap_or("unavailable"),
+                    human_size(info.size),
+                    info.required_system.as_deref().unwrap_or("unavailable"),
+                );
+                ui.label(muted(ui, metadata).size(13.0));
             });
-        });
-        ui.add_space(6.0);
-        ui.columns(3, |columns| {
-            metric(
-                &mut columns[0],
-                "App version",
-                info.version.as_deref().unwrap_or("Unavailable"),
-            );
-            metric(&mut columns[1], "PKG size", &human_size(info.size));
-            metric(
-                &mut columns[2],
-                "Minimum system",
-                info.required_system.as_deref().unwrap_or("Unavailable"),
-            );
         });
         egui::CollapsingHeader::new("Package details").show(ui, |ui| {
             detail(ui, "Content ID", &info.content_id);
@@ -208,9 +186,7 @@ impl OrbisApp {
         for message in &info.warnings {
             warning(ui, message);
         }
-        ui.add_space(5.0);
         ui.separator();
-        ui.add_space(6.0);
     }
 
     fn settings(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
@@ -596,31 +572,36 @@ pub(super) fn folder_picker(
     label: &str,
     path: &mut Option<PathBuf>,
 ) -> bool {
-    ui.label(heading(label, 13.0));
-    let mut changed = false;
-    ui.horizontal(|ui| {
-        let text = path
-            .as_ref()
-            .map_or_else(|| "Choose a folder".into(), |p| p.display().to_string());
-        let width = (ui.available_width() - 86.0).max(100.0);
-        let response = ui.add_sized(
-            [width, 32.0],
-            egui::Button::new(RichText::new(&text).size(13.0)).truncate(),
-        );
-        let clicked = response.on_hover_text(&text).clicked() | ui.button("Browse…").clicked();
-        if clicked
-            && let Some(folder) = rfd::FileDialog::new()
-                .set_parent(frame)
-                .set_title(label)
-                .pick_folder()
-        {
-            *path = Some(folder);
-            changed = true;
-            // A native dialog returns after this frame's widgets were painted.
-            ui.ctx().request_repaint();
-        }
-    });
-    changed
+    let clicked = ui
+        .horizontal(|ui| {
+            ui.label(heading(label, 13.0));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let browse = ui.button("Browse…");
+                let text = path
+                    .as_ref()
+                    .map_or_else(|| "Choose a folder".into(), |p| p.display().to_string());
+                let field = ui
+                    .add_sized(
+                        [ui.available_width(), 32.0],
+                        egui::Button::new(RichText::new(&text).size(13.0)).truncate(),
+                    )
+                    .on_hover_text(text);
+                browse.clicked() || field.clicked()
+            })
+            .inner
+        })
+        .inner;
+    if clicked
+        && let Some(folder) = rfd::FileDialog::new()
+            .set_parent(frame)
+            .set_title(label)
+            .pick_folder()
+    {
+        *path = Some(folder);
+        ui.ctx().request_repaint();
+        return true;
+    }
+    false
 }
 
 pub(super) fn warning(ui: &mut egui::Ui, message: &str) {
