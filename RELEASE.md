@@ -49,8 +49,8 @@ Windows treats `Orbis.exe` and the CLI's `orbis.exe` as the same filename.
 ## Cutting a release
 
 1. Increase the CLI package version in `orbis-cli/Cargo.toml`. If the
-   workspace dependency on `orbis-cli` in the root `Cargo.toml` no longer
-   accepts that version, update its requirement and the desktop crate's dependency too.
+   `orbis-cli` dependency in `orbis-desktop/Cargo.toml` no longer accepts that
+   version, update its requirement too.
 2. Run `cargo check --workspace` to refresh `Cargo.lock`, and commit the lockfile
    with the version change. Library versions only need changes when those crates
    are released separately.

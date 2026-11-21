@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.6.0]
+
+### Added
+
+- Open an extracted game folder in the desktop app to see the active version,
+  export the game, or restore the base or previous managed update.
+- Run `orbis export --resume --dry-run` to see how many files can be reused,
+  how much data remains to copy, and how much free space the export needs.
+
+### Changed
+
+- New exports check free space before hashing game files. If the destination is
+  too small, the desktop app lets you choose another drive and keep the folder name.
+- Extraction settings fit in the default desktop window, and progress text stays
+  readable as the bar fills.
+
+### Fixed
+
+- Desktop exports recheck source files against the approved preview before
+  copying. Resumed exports measure free space on the destination volume.
+- Desktop verification reports can be saved on macOS exFAT volumes.
+
 ## [0.5.0] - 2026-10-25
 
 ### Added
