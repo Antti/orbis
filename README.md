@@ -13,9 +13,8 @@ Choose the `orbis-desktop` archive for your platform, unpack it, and open
 `Orbis.exe` (Windows), `Orbis.app` (macOS), or `Orbis` (Linux). For the command
 line, choose an `orbis-cli` download. [Platform instructions and checksums](RELEASE.md#installing-packages)
 
-The screenshots show `master`. The desktop game-folder view and the option to
-combine `--resume` with `--dry-run` in `orbis export` were added after v0.5.0.
-[Build from source](#build-from-source) to try them.
+The desktop game-folder view and the option to combine `--resume` with
+`--dry-run` in `orbis export` require Orbis 0.6.0 or later.
 
 ## Extract a package
 

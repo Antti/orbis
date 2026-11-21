@@ -144,7 +144,7 @@ The packaging script requires Python 3.11 or later.
 
 ```sh
 # Use x86_64-apple-darwin on an Intel Mac.
-python3 scripts/release/package-desktop.py 0.5.0 aarch64-apple-darwin \
+python3 scripts/release/package-desktop.py 0.6.0 aarch64-apple-darwin \
   target/release/orbis-desktop dist
 ```
 
