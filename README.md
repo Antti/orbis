@@ -1,5 +1,7 @@
 # Orbis
 
+![PS4 package tools for desktop and command line](assets/readme-hero.svg)
+
 Orbis opens PlayStation 4 PKG files on Windows, macOS, and Linux. Use the desktop
 app or the `orbis` command to inspect and extract a package, install a full-file
 update for shadPS4, or export the base game and its update as a single folder.
@@ -11,8 +13,9 @@ Choose the `orbis-desktop` archive for your platform, unpack it, and open
 `Orbis.exe` (Windows), `Orbis.app` (macOS), or `Orbis` (Linux). For the command
 line, choose an `orbis-cli` download. [Platform instructions and checksums](RELEASE.md#installing-packages)
 
-The screenshots show `master`. The game-folder view and the resumable export
-preview were added after v0.5.0. [Build from source](#build-from-source) to try them.
+The screenshots show `master`. The desktop game-folder view and the option to
+combine `--resume` with `--dry-run` in `orbis export` were added after v0.5.0.
+[Build from source](#build-from-source) to try them.
 
 ## Extract a package
 
@@ -24,6 +27,9 @@ extraction, select the same output and turn on **Resume an unfinished extraction
 
 To try the package shown above, download [PS4Load](https://github.com/bucanero/ps4load/releases/tag/v0.5.0).
 For your own game, use its title ID in place of `CUSA00000` in the CLI examples.
+
+The examples assume `orbis` is on your `PATH`. In PowerShell, you can run the
+downloaded CLI from its extracted folder, for example `.\orbis.exe info game.pkg`.
 
 ```sh
 orbis info game.pkg
@@ -80,8 +86,8 @@ orbis verify-dir ./merged-game
 
 Use `--resume` from the first run. If the copy is interrupted, repeat the command
 to check completed files and copy what's missing. Add `--dry-run` to see how much
-is left to copy. After moving the export to another drive, run `verify-dir` there
-to check it against its SHA-256 manifest.
+is left to copy. After moving the export to another drive, open a terminal in the
+moved folder and run `orbis verify-dir .` to check its files against the SHA-256 manifest.
 [Export destinations, space requirements, and exFAT](orbis-cli/README.md#export-a-merged-game)
 
 ## Build from source
