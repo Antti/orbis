@@ -33,6 +33,45 @@ fn no_staging(parent: &Path) {
 }
 
 #[test]
+fn new_destination_shortfall_skips_update_and_source_hashing() {
+    struct NoHashing;
+    impl ExtractProgress for NoHashing {
+        fn bytes_processed(&self, bytes: u64) {
+            panic!("space check hashed {bytes} bytes");
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let base = base_game(temp.path());
+    install_update(&base, "base.txt", b"PATCH");
+    let output = temp.path().join("merged");
+    let location = storage::Layout::open(&base, false).unwrap();
+    let prepared = PreparedExport::new(&location, output.clone(), &NoHashing).unwrap();
+    for resume in [false, true] {
+        let mut filesystem = prepared.filesystem_plan(temp.path()).unwrap();
+        filesystem.available_bytes = filesystem.required_free_bytes - 123;
+        let (estimate, manifest) = prepared
+            .preview_new_destination(filesystem, resume, true, &NoHashing)
+            .unwrap();
+        assert_eq!(estimate.plan.filesystem.shortfall_bytes(), 123);
+        assert!(manifest.is_none());
+        let preview = ExportPreview {
+            base: base.clone(),
+            resume,
+            estimate,
+            manifest,
+        };
+        assert!(
+            preview
+                .export(NoHashing)
+                .unwrap_err()
+                .to_string()
+                .contains("insufficient export space")
+        );
+        assert!(!output.exists());
+    }
+}
+
+#[test]
 fn confirmation_rejects_source_edits_renames_and_new_updates_before_writing() {
     for resume in [false, true] {
         let temp = tempfile::tempdir().unwrap();

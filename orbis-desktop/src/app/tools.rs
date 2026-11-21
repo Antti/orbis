@@ -36,6 +36,20 @@ impl ExportState {
             .filter(|_| operations::folder_name_valid(&self.name))
             .map(|p| p.join(&self.name))
     }
+
+    fn check_export(&mut self) -> Option<Operation> {
+        self.preview = None;
+        Some(Operation::PreviewExport {
+            base: self.base.clone()?,
+            output: self.output()?,
+            resume: self.resume,
+        })
+    }
+
+    fn change_destination(&mut self, parent: PathBuf) -> Option<Operation> {
+        self.parent = Some(parent);
+        self.check_export()
+    }
 }
 
 impl OrbisApp {
@@ -197,7 +211,8 @@ impl OrbisApp {
             path_label(ui, &output, "Output: ");
         }
         ui.label(muted(ui, "Close the emulator and keep the source files unchanged. An in-place merge must be restored before export. Existing conflicting files are never replaced.").size(12.0));
-        if let Some(plan) = state.preview.as_ref().map(|preview| preview.plan()) {
+        if let Some(preview) = &state.preview {
+            let plan = preview.plan();
             ui.separator();
             ui.label(heading(&plan.title_id, 16.0));
             ui.label(format!(
@@ -216,8 +231,13 @@ impl OrbisApp {
                 human_size(plan.filesystem.required_free_bytes),
                 human_size(plan.filesystem.available_bytes)
             ));
-            if plan.filesystem.available_bytes < plan.filesystem.required_free_bytes {
-                warning(ui, "Not enough free space. Free space and check again.");
+            if let Some(work) = preview.resume_plan() {
+                ui.label(format!(
+                    "{} files reusable · {} files to copy ({})",
+                    work.reusable_files,
+                    work.remaining_files,
+                    human_size(work.remaining_bytes)
+                ));
             }
             ui.label(muted(ui, "The space reserve includes staging and filesystem overhead. Resuming checks completed files and reserves space for missing files. The finished export is verified automatically.").size(12.0));
         }
@@ -227,18 +247,36 @@ impl OrbisApp {
         }
     }
 
-    pub(super) fn export_footer(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn export_footer(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
         let state = self.export.as_mut().unwrap();
         let mut operation = None;
+        let shortfall = state
+            .preview
+            .as_ref()
+            .map_or(0, |preview| preview.plan().filesystem.shortfall_bytes());
+        if shortfall > 0 {
+            warning(
+                ui,
+                &format!(
+                    "This destination needs {} more free space.",
+                    human_size(shortfall)
+                ),
+            );
+        }
         ui.horizontal_wrapped(|ui| {
-            if let Some(plan) = state.preview.as_ref().map(|preview| preview.plan()) {
-                let enough = plan.filesystem.available_bytes >= plan.filesystem.required_free_bytes;
-                if ui
-                    .add_enabled(enough, theme::primary("Export and verify"))
-                    .clicked()
+            if shortfall > 0 {
+                if ui.add(theme::primary("Choose another drive…")).clicked()
+                    && let Some(parent) = rfd::FileDialog::new()
+                        .set_parent(frame)
+                        .set_title("Choose a folder for the export")
+                        .pick_folder()
                 {
-                    operation = state.preview.take().map(Operation::Export);
+                    operation = state.change_destination(parent);
                 }
+            } else if state.preview.is_some()
+                && ui.add(theme::primary("Export and verify")).clicked()
+            {
+                operation = state.preview.take().map(Operation::Export);
             }
             let check_button = if state.preview.is_some() {
                 egui::Button::new("Check again")
@@ -253,12 +291,7 @@ impl OrbisApp {
                     )
                     .clicked()
             {
-                state.preview = None;
-                operation = Some(Operation::PreviewExport {
-                    base: state.base.clone().unwrap(),
-                    output: state.output().unwrap(),
-                    resume: state.resume,
-                });
+                operation = state.check_export();
             }
             ui.label(muted(ui, "The original game and update stay unchanged.").size(12.0));
         });
@@ -347,6 +380,38 @@ mod tests {
         click(&mut app, "Back");
         assert!(app.export.is_none());
         assert_eq!(app.game.as_ref().unwrap().base, base);
+    }
+
+    #[test]
+    fn choosing_another_drive_rechecks_the_new_parent_with_the_same_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = crate::common::base_game(temp.path());
+        let next = temp.path().join("other-drive");
+        fs::create_dir(&next).unwrap();
+        for resume in [true, false] {
+            let name = "my-export";
+            let preview =
+                ExportPreview::new(&base, &temp.path().join(name), resume, SilentProgress).unwrap();
+            let mut state = ExportState {
+                base: Some(base.clone()),
+                parent: Some(temp.path().to_owned()),
+                name: name.into(),
+                resume,
+                preview: Some(Box::new(preview)),
+            };
+            let Some(Operation::PreviewExport {
+                base: selected,
+                output,
+                resume: selected_resume,
+            }) = state.change_destination(next.clone())
+            else {
+                panic!("choosing a destination must start a new check");
+            };
+            assert_eq!(selected, base);
+            assert_eq!(output, next.join(name));
+            assert_eq!(selected_resume, resume);
+            assert!(state.preview.is_none());
+        }
     }
 
     #[test]

@@ -46,7 +46,7 @@ pub struct Selection {
 pub enum Command {
     /// Export the base and its installed update as one merged game directory
     #[command(
-        after_help = "Example:\n  orbis export --base ./games/CUSA12345 -o ./bbport-game\n\nUpdate files take precedence; unchanged files come from the base. With no installed\nupdate, exports the base alone. Uses the managed sibling -UPDATE directory and\nvalidates its inventory. Installer metadata and rollback copies are excluded.\nThe output must be outside the sources, with an existing parent. By default it\nmust be new; --resume accepts a matching export manifest, verifies completed\nfiles, and copies missing files. Resumable output remains visible while incomplete.\nUse --dry-run to inspect versions and space; verify-dir checks exported hashes.\nWithout --resume, filesystems without exclusive rename (such as macOS exFAT)\nneed a second full copy and space for two merged games. Do not use the output until\nexport succeeds; forced termination can leave a partial destination.\nKeep the emulator stopped and source files unchanged until export completes.\nThis copies files; it does not decrypt executables or check game-specific requirements."
+        after_help = "Example:\n  orbis export --base ./games/CUSA12345 -o ./bbport-game\n\nUpdate files take precedence; unchanged files come from the base. With no installed\nupdate, exports the base alone. Uses the managed sibling -UPDATE directory and\nvalidates its inventory. Installer metadata and rollback copies are excluded.\nThe output must be outside the sources, with an existing parent. By default it\nmust be new; --resume accepts a matching export manifest, verifies completed\nfiles, and copies missing files. Resumable output remains visible while incomplete.\nUse --resume --dry-run to see verified reusable files, remaining files and space.\nUse verify-dir to check exported hashes.\nWithout --resume, filesystems without exclusive rename (such as macOS exFAT)\nneed a second full copy and space for two merged games. Do not use the output until\nexport succeeds; forced termination can leave a partial destination.\nKeep the emulator stopped and source files unchanged until export completes.\nThis copies files; it does not decrypt executables or check game-specific requirements."
     )]
     Export {
         /// Original extracted base game directory used by install
@@ -56,7 +56,7 @@ pub enum Command {
         #[arg(short, long, value_name = "DIR")]
         output: PathBuf,
         /// Keep incomplete output and verify completed files when restarting
-        #[arg(long, conflicts_with = "dry_run")]
+        #[arg(long)]
         resume: bool,
         /// Inspect versions, file counts, filesystem limits, and peak space without writing
         #[arg(long)]

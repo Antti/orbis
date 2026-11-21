@@ -56,7 +56,7 @@ pub(crate) fn run(cli: &Cli, out: &mut impl Write, cancelled: Arc<AtomicBool>) -
             json,
         } => {
             if *dry_run {
-                export::preview(base, output, *json, cli, out, cancelled)
+                export::preview(base, output, *resume, *json, cli, out, cancelled)
             } else {
                 export::run(base, output, *resume, cli, cancelled)
             }

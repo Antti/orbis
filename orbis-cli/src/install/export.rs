@@ -50,6 +50,34 @@ pub struct ExportPlan {
     pub filesystem: super::FilesystemPlan,
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct ExportEstimate {
+    #[serde(flatten)]
+    pub plan: ExportPlan,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resume: Option<ResumePlan>,
+}
+
+impl ExportEstimate {
+    /// Estimate a new or resumed export without creating installation state or output.
+    pub fn new(
+        base: &Path,
+        output: &Path,
+        resume: bool,
+        progress: impl ExtractProgress,
+    ) -> Result<Self> {
+        Ok(prepare_preview(base, output, resume, false, &progress)?.0)
+    }
+}
+
+/// Work remaining after verification of the chosen resume destination.
+#[derive(Debug, serde::Serialize)]
+pub struct ResumePlan {
+    pub reusable_files: usize,
+    pub remaining_files: usize,
+    pub remaining_bytes: u64,
+}
+
 pub fn plan_export(
     base: &Path,
     output: &Path,
@@ -67,24 +95,33 @@ pub fn plan_export_with_resume(
     resume: bool,
     progress: impl ExtractProgress,
 ) -> Result<ExportPlan> {
-    if resume {
-        return Ok(ExportPreview::new(base, output, true, progress)?.plan);
-    }
-    let (destination, prepared) = prepare_preview(base, output, false, &progress)?;
-    Ok(prepared.preview(prepared.filesystem_plan(&destination.parent_path)?))
+    Ok(ExportEstimate::new(base, output, resume, progress)?.plan)
 }
 
 fn prepare_preview(
     base: &Path,
     output: &Path,
     resume: bool,
+    for_confirmation: bool,
     progress: &impl ExtractProgress,
-) -> Result<(ExportDestination, PreparedExport)> {
+) -> Result<(ExportEstimate, Option<ExportManifest>)> {
     check_cancelled(progress)?;
     let location = storage::Layout::open(base, false)?;
     let destination = destination(&location, output, resume)?;
     let prepared = PreparedExport::new(&location, destination.path(), progress)?;
-    Ok((destination, prepared))
+    if resume && storage::exists(&destination.parent, &destination.name)? {
+        prepared.verify_update(progress)?;
+        let manifest = prepared.source_manifest(progress)?;
+        let remaining = resume::inspect_remaining(&manifest, &destination, progress)?;
+        let work = remaining.work(&manifest);
+        let estimate = ExportEstimate {
+            plan: prepared.preview(remaining.filesystem),
+            resume: Some(work),
+        };
+        return Ok((estimate, Some(manifest)));
+    }
+    let filesystem = prepared.filesystem_plan(&destination.parent_path)?;
+    prepared.preview_new_destination(filesystem, resume, for_confirmation, progress)
 }
 
 /// An export awaiting confirmation. Keeps the approved versions, paths and hashes
@@ -93,8 +130,8 @@ fn prepare_preview(
 pub struct ExportPreview {
     base: PathBuf,
     resume: bool,
-    plan: ExportPlan,
-    manifest: ExportManifest,
+    estimate: ExportEstimate,
+    manifest: Option<ExportManifest>,
 }
 
 impl ExportPreview {
@@ -104,33 +141,35 @@ impl ExportPreview {
         resume: bool,
         progress: impl ExtractProgress,
     ) -> Result<Self> {
-        let (destination, prepared) = prepare_preview(base, output, resume, &progress)?;
-        let manifest = prepared.source_manifest(&progress)?;
-        let filesystem = if resume {
-            resume::inspect_remaining(&manifest, &destination, &progress)?.filesystem
-        } else {
-            prepared.filesystem_plan(&destination.parent_path)?
-        };
+        let (estimate, manifest) = prepare_preview(base, output, resume, true, &progress)?;
         Ok(Self {
             base: base.to_owned(),
             resume,
-            plan: prepared.preview(filesystem),
+            estimate,
             manifest,
         })
     }
 
     pub fn plan(&self) -> &ExportPlan {
-        &self.plan
+        &self.estimate.plan
+    }
+
+    pub fn resume_plan(&self) -> Option<&ResumePlan> {
+        self.estimate.resume.as_ref()
     }
 
     /// Revalidate under the install lock, then copy the approved content.
     pub fn export(&self, progress: impl ExtractProgress) -> Result<ExportedDirectory> {
+        let manifest = self.manifest.as_ref().ok_or_else(|| invalid(format!(
+            "insufficient export space at preview: {} more bytes needed. Check the export again before confirming.",
+            self.plan().filesystem.shortfall_bytes()
+        )))?;
         export_impl(
             &self.base,
-            &self.plan.destination,
+            &self.plan().destination,
             progress,
             self.resume,
-            Some(self),
+            Some((self.plan(), manifest)),
         )
     }
 }
@@ -197,7 +236,7 @@ fn export_impl<P: ExtractProgress>(
     output: &Path,
     progress: P,
     resume: bool,
-    approved: Option<&ExportPreview>,
+    approved: Option<(&ExportPlan, &ExportManifest)>,
 ) -> Result<ExportedDirectory> {
     check_cancelled(&progress)?;
     // Validate the destination before creating the state directory/lock.
@@ -206,12 +245,18 @@ fn export_impl<P: ExtractProgress>(
     drop(preview);
     let location = storage::Layout::open(base, true)?;
     let mut prepared = PreparedExport::new(&location, destination.path(), &progress)?;
+    if !resume || !storage::exists(&destination.parent, &destination.name)? {
+        prepared
+            .filesystem_plan(&destination.parent_path)?
+            .require_space()?;
+    }
+    prepared.verify_update(&progress)?;
     if resume || approved.is_some() {
         let manifest = prepared.source_manifest(&progress)?;
-        if let Some(preview) = approved
-            && (manifest != preview.manifest
-                || prepared.report.update_files != preview.plan.update_files
-                || prepared.report.destination != preview.plan.destination)
+        if let Some((plan, expected)) = approved
+            && (&manifest != expected
+                || prepared.report.update_files != plan.update_files
+                || prepared.report.destination != plan.destination)
         {
             return Err(invalid(
                 "The game or destination changed after the preview. Check the export again.",
@@ -247,8 +292,8 @@ fn export_impl<P: ExtractProgress>(
     }
     // A base file can also change during the staged copy. Check the bytes
     // actually copied before publishing the directory.
-    if let Some(preview) = approved
-        && records != preview.manifest.files
+    if let Some((_, expected)) = approved
+        && records != expected.files
     {
         return Err(invalid("source changed during export"));
     }

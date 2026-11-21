@@ -209,6 +209,14 @@ impl Layout {
         base: &AppMetadata,
         progress: &P,
     ) -> Result<Option<Manifest>> {
+        let Some((dir, manifest)) = self.open_active_manifest(state)? else {
+            return Ok(None);
+        };
+        progress.phase("Checking installed update");
+        verify_manifest(&dir, &manifest, base, progress)?;
+        Ok(Some(manifest))
+    }
+    pub fn open_active_manifest(&self, state: &State) -> Result<Option<(Dir, Manifest)>> {
         if exists(&self.parent, &self.active)? != state.active {
             return Err(invalid(
                 "unmanaged or missing -UPDATE directory; refusing to replace it",
@@ -220,9 +228,7 @@ impl Layout {
         require_directory(&self.parent, &self.active)?;
         let dir = self.parent.open_dir(&self.active)?;
         let manifest: Manifest = read_json(&dir, MANIFEST)?;
-        progress.phase("Checking installed update");
-        verify_manifest(&dir, &manifest, base, progress)?;
-        Ok(Some(manifest))
+        Ok(Some((dir, manifest)))
     }
     pub fn verify_previous<P: ExtractProgress>(
         &self,

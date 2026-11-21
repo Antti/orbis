@@ -4,18 +4,21 @@ use super::*;
 pub(super) fn preview(
     base: &Path,
     output: &Path,
+    resume: bool,
     json: bool,
     cli: &Cli,
     out: &mut impl Write,
     cancelled: Arc<AtomicBool>,
 ) -> Result<u8> {
-    let plan = orbis_cli::install::plan_export(
+    let estimate = orbis_cli::install::ExportEstimate::new(
         base,
         output,
+        resume,
         ConsoleProgress::with_options(cli.quiet, cancelled),
     )?;
+    let plan = &estimate.plan;
     if json {
-        write_json(out, &plan)?;
+        write_json(out, &estimate)?;
     } else {
         writeln!(
             out,
@@ -37,23 +40,37 @@ pub(super) fn preview(
             escaped(&plan.destination),
             plan.filesystem.filesystem
         )?;
+        if let Some(work) = &estimate.resume {
+            writeln!(
+                out,
+                "Reusable files: {}. Remaining files: {} ({} to copy).",
+                work.reusable_files,
+                work.remaining_files,
+                human_size(work.remaining_bytes)
+            )?;
+        }
         writeln!(
             out,
             "Peak space reserve: {} ({} available)",
             human_size(plan.filesystem.required_free_bytes),
             human_size(plan.filesystem.available_bytes)
         )?;
+        if plan.filesystem.shortfall_bytes() > 0 {
+            writeln!(
+                out,
+                "Additional free space needed: {}",
+                human_size(plan.filesystem.shortfall_bytes())
+            )?;
+        }
         for warning in &plan.filesystem.warnings {
             writeln!(out, "{warning}")?;
         }
     }
-    Ok(
-        if plan.filesystem.available_bytes >= plan.filesystem.required_free_bytes {
-            0
-        } else {
-            3
-        },
-    )
+    Ok(if plan.filesystem.shortfall_bytes() == 0 {
+        0
+    } else {
+        3
+    })
 }
 
 pub(super) fn run(
