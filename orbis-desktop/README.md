@@ -5,8 +5,6 @@ installing supported full-file updates, and exporting merged games. Updates can
 stay separate for shadPS4 or be merged into a game folder. It calls the same Rust libraries
 as the CLI; no command-line executable or subprocess is needed for package work.
 
-See the [desktop screenshots](../README.md#desktop-screenshots) for package inspection and update setup.
-
 ## Open the app
 
 Use an **orbis-desktop** archive from v0.4.0 or later.
@@ -35,6 +33,9 @@ flagged before extraction. macOS installer `.pkg` files cannot be read by Orbis.
   the base. **Merge into game folder** writes update files directly into the base;
   review the preview, close the emulator, then click **Merge update**. Replaced
   originals are moved to a backup beside the game; unchanged files stay in place.
+
+  <img src="../assets/screenshots/update.png" width="640" alt="Sample update PKG for CUSA00000 with Keep update separate selected and Check update ready">
+
 - **Open game folder…** Choose the extracted base or drop its folder onto the
   window. Orbis shows the base and active versions, how the update is installed,
   the available rollback target, and any installation issues. Checking managed
