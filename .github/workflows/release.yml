@@ -249,6 +249,8 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v6
         with:
@@ -261,8 +263,18 @@ jobs:
           pattern: release-*
           merge-multiple: true
           path: dist
-      - name: Check assets, tag the tested commit, and publish
+      - name: Validate downloads and generate SHA256SUMS
+        id: checksums
+        env:
+          RELEASE_VERSION: ${{ needs.plan.outputs.version }}
+        run: python3 scripts/release/publish.py "$RELEASE_VERSION" dist --checksums-only >> "$GITHUB_OUTPUT"
+      - name: Attest release packages and SHA256SUMS
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/*
+      - name: Publish the attested downloads
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ needs.plan.outputs.version }}
-        run: python3 scripts/release/publish.py "$RELEASE_VERSION" dist
+          CHECKSUMS_SHA256: ${{ steps.checksums.outputs.checksums_sha256 }}
+        run: python3 scripts/release/publish.py "$RELEASE_VERSION" dist --checksums-sha256 "$CHECKSUMS_SHA256"

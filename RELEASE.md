@@ -61,8 +61,9 @@ Windows treats `Orbis.exe` and the CLI's `orbis.exe` as the same filename.
    extraction, cancellation, and a base/update install. GUI packages are built
    separately from the musl CLI on Linux.
 4. Merge to `master`. A version increase across the entire push triggers the
-   build, creates tag `vVERSION` at that exact commit, uploads all assets to a
-   draft, and publishes it after the uploads finish.
+   build. The publishing job attests the twelve packages and `SHA256SUMS`, tags
+   the tested commit, and uploads the files to a draft. It publishes after GitHub
+   reports the expected SHA-256 digest for every download.
 
 Pull requests and manual workflow runs build packages without creating tags or
 releases. This also allows packaging changes to be reviewed before any version
@@ -74,11 +75,24 @@ to another commit and leaves an already published release unchanged. If a
 published release needs correction, bump the version again. Do not move its tag.
 To disable future publication, disable `Release packages` in Actions.
 
-The repository must allow GitHub Actions and the workflow's `contents: write`
-permission. Only the publishing job has that permission; PR builds use read-only
-permissions. Unsigned releases require no third-party service secrets.
+The publishing job uses `contents: write` to manage the release, `id-token: write`
+to obtain a signing identity, and `attestations: write` to record provenance on
+GitHub. PR and manual builds use read-only permissions.
 
 ## Installing packages
+
+For releases after v0.6.0, verify a downloaded package with the GitHub CLI.
+Replace `PACKAGE` with its local filename. The same command accepts `SHA256SUMS`.
+
+```sh
+gh attestation verify PACKAGE --repo Antti/orbis \
+  --signer-workflow Antti/orbis/.github/workflows/release.yml --source-ref refs/heads/master
+```
+
+This checks the file against provenance signed by the Orbis release workflow.
+To require a specific release commit, add `--source-digest COMMIT_SHA`. For
+v0.6.0 and earlier, use the published `SHA256SUMS` file. The separate
+`gh release verify TAG` command requires [GitHub immutable releases](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/secure-your-dependencies/verify-release-integrity).
 
 For desktop use, extract the matching **orbis-desktop** archive and double-click
 `Orbis.exe`, `Orbis.app`, or `Orbis`. Move `Orbis.app` to Applications on
