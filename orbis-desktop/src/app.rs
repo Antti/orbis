@@ -100,7 +100,7 @@ impl OrbisApp {
         }
     }
 
-    fn reset_package(&mut self) {
+    fn reset_package(&mut self, base: UpdateBase) {
         self.passcode = None;
         self.pending_passcode = None;
         self.reset_passcode_input();
@@ -110,25 +110,29 @@ impl OrbisApp {
         self.package = None;
         self.artwork = None;
         self.parent = None;
-        self.base = UpdateBase::default();
+        if !matches!((&self.base, &base), (UpdateBase::Game(old), UpdateBase::Game(new)) if old == new)
+        {
+            self.mode = InstallMode::Separate;
+        }
+        self.base = base;
         self.game = None;
-        self.mode = InstallMode::Separate;
         self.folder_name.clear();
         self.resume = false;
         self.preview = None;
     }
 
     fn open_package(&mut self, path: PathBuf, base: UpdateBase) {
-        self.reset_package();
-        self.base = base;
+        self.reset_package(base);
         self.start(path, Operation::Inspect);
     }
 
-    fn preview_update(&mut self, path: PathBuf) {
-        if let Some(base) = self.base.path().cloned() {
+    fn preview_update(&mut self) {
+        if let Some(info) = self.package.as_ref().filter(|info| info.can_check_update())
+            && let Some(base) = self.base.path().cloned()
+        {
             self.preview = None;
             self.start(
-                path,
+                info.path.clone(),
                 Operation::PreviewUpdate {
                     base,
                     mode: self.mode,
@@ -193,11 +197,9 @@ impl OrbisApp {
                 if let Some(passcode) = self.pending_passcode.take() {
                     self.passcode = Some(passcode);
                 }
-                if matches!(self.base, UpdateBase::Game(_)) {
+                let from_game = matches!(self.base, UpdateBase::Game(_));
+                if from_game {
                     self.action = Action::Update;
-                    if info.update_supported && !cancelled && !self.close_after_job {
-                        self.preview_update(info.path.clone());
-                    }
                 } else if !self.refreshing_package {
                     self.action = if info.update_supported {
                         Action::Update
@@ -211,6 +213,9 @@ impl OrbisApp {
                 }
                 self.refreshing_package = false;
                 self.package = Some(info);
+                if from_game && !cancelled && !self.close_after_job {
+                    self.preview_update();
+                }
             }
             Ok(Outcome::Verified(report)) => {
                 self.notice = Some(Notice {

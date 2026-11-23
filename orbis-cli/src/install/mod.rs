@@ -139,8 +139,13 @@ fn serialize_path<S: serde::Serializer>(
     serializer.serialize_str(&path.to_string_lossy())
 }
 
+/// Reads the original base's extracted PARAM.SFO without hashing installed updates.
+pub fn base_metadata(base: &Path) -> Result<AppMetadata> {
+    Layout::inspect(base)?.base_metadata()
+}
+
 /// Inspects compatibility and affected paths without creating directories or locks.
-/// `pkg` must have the keys required to list its filesystem.
+/// `pkg` must have the keys required to read its metadata and list its filesystem.
 pub fn plan<R: AsRef<[u8]> + Sync>(pkg: &Pkg<R>, base: &Path) -> Result<InstallPlan> {
     plan_with_progress(pkg, base, SilentProgress)
 }
@@ -244,6 +249,15 @@ fn make_plan<R: AsRef<[u8]> + Sync, P: ExtractProgress>(
     }
     let extractor = PkgExtractor::new(pkg, SilentProgress, false);
     let entries = extractor.list_entries()?;
+    if let Some(slot) = entries
+        .iter()
+        .filter_map(|entry| entry.key_index)
+        .find(|&slot| !pkg.has_entry_key(slot))
+    {
+        return Err(invalid(format!(
+            "update metadata needs a decryption key for slot {slot}"
+        )));
+    }
     if entries.iter().any(|e| e.path.is_none()) {
         return Err(invalid(
             "update contains unknown metadata entries; installation requires complete extraction",

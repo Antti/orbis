@@ -120,7 +120,7 @@ impl OrbisApp {
 
     pub(super) fn open_game(&mut self, base: PathBuf) {
         if matches!(self.base, UpdateBase::Game(_)) {
-            self.reset_package();
+            self.reset_package(UpdateBase::default());
         }
         self.export = None;
         self.preview = None;

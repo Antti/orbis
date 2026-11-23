@@ -114,7 +114,7 @@ fn passcode_frame(app: &mut OrbisApp, events: Vec<egui::Event>) {
             events,
             ..Default::default()
         },
-        |ui| app.passcode_settings(ui),
+        |ui| app.passcode_settings(ui, false),
     );
     // This headless test has no renderer to consume texture updates.
     output.textures_delta.clear();
@@ -235,7 +235,8 @@ pub(super) fn click(app: &mut OrbisApp, label: &str) {
         .nodes
         .iter()
         // An action tab can have the same label as the footer button.
-        .find(|(_, node)| node.label() == Some(label) && node.toggled().is_none())
+        .filter(|(_, node)| node.label() == Some(label))
+        .min_by_key(|(_, node)| node.toggled().is_some())
         .unwrap_or_else(|| panic!("missing button {label}"));
     let event = egui::Event::AccessKitActionRequest(ActionRequest {
         action: AccessibilityAction::Click,
@@ -422,6 +423,97 @@ fn extracted_game_can_preview_retry_and_install_an_update() {
         fs::read(base.with_file_name("CUSA00000-UPDATE").join("game.txt")).unwrap(),
         b"PATCH"
     );
+}
+
+#[test]
+fn replacing_a_pkg_in_the_same_game_rechecks_the_selected_install_mode() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = crate::common::base_game(temp.path());
+    let first = temp.path().join("first.pkg");
+    let replacement = temp.path().join("replacement.pkg");
+    fs::write(&first, crate::common::update("01.10", "base.txt", b"FIRST")).unwrap();
+    fs::write(
+        &replacement,
+        crate::common::update("01.12", "base.txt", b"SECOND"),
+    )
+    .unwrap();
+    let mut app = OrbisApp::default();
+    app.open_package(first, UpdateBase::Game(base.clone()));
+    finish(&mut app);
+    click(&mut app, "Merge into game folder");
+    finish(&mut app);
+    assert_eq!(app.preview.as_ref().unwrap().mode, InstallMode::Merge);
+
+    app.open_package(replacement.clone(), UpdateBase::Game(base.clone()));
+    assert!(app.preview.is_none());
+    finish(&mut app);
+    let plan = app.preview.as_ref().unwrap();
+    assert_eq!(plan.mode, InstallMode::Merge);
+    assert_eq!(plan.update_version, "01.12");
+    assert_eq!(plan.destination, base.canonicalize().unwrap());
+    assert_eq!(fs::read(base.join("base.txt")).unwrap(), b"BASE");
+
+    app.open(replacement);
+    finish(&mut app);
+    assert_eq!(app.mode, InstallMode::Separate);
+}
+
+#[test]
+fn update_with_locked_metadata_requires_a_passcode_even_with_readable_sfo() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = crate::common::base_game(temp.path());
+    let path = temp.path().join("locked-metadata.pkg");
+    let bytes = features::passcoded_pkg_with_entry(2, orbis_pkg::entry::EntryId::PfsImageKey);
+    fs::write(&path, bytes).unwrap();
+    let mut app = OrbisApp::default();
+    app.open_package(path.clone(), UpdateBase::Game(base.clone()));
+    finish(&mut app);
+    let info = app.package.as_ref().unwrap();
+    assert!(info.update_supported);
+    assert_eq!(info.missing_keys, 1);
+    assert!(app.preview.is_none());
+    let tree = frame(&mut app, Default::default());
+    assert!(
+        tree.nodes
+            .iter()
+            .any(|(_, node)| node.value().is_some_and(|value| {
+                value.contains("1 encrypted metadata entry cannot be read")
+                    && value.contains("passcode")
+            }))
+    );
+    assert!(
+        tree.nodes
+            .iter()
+            .any(|(_, node)| node.label() == Some("Validate passcode"))
+    );
+    assert!(
+        tree.nodes
+            .iter()
+            .any(|(_, node)| node.label() == Some("Check update") && node.is_disabled())
+    );
+
+    let error = operations::run(
+        &path,
+        Operation::PreviewUpdate {
+            base: base.clone(),
+            mode: InstallMode::Separate,
+        },
+        &orbis_cli::SilentProgress,
+    )
+    .unwrap_err();
+    assert!(error.details.contains("decryption key for slot 2"));
+    assert!(!temp.path().join(".CUSA00000.orbis-install").exists());
+
+    app.passcode_input = String::from_utf8(features::PASSCODE.to_vec())
+        .unwrap()
+        .into();
+    click(&mut app, "Validate passcode");
+    finish(&mut app);
+    assert_eq!(app.package.as_ref().unwrap().missing_keys, 0);
+    assert_eq!(app.preview.as_ref().unwrap().update_version, "01.12");
+    click(&mut app, "Install update");
+    finish(&mut app);
+    assert_eq!(app.notice.as_ref().unwrap().title, "Update installed");
 }
 
 #[test]

@@ -69,8 +69,16 @@ impl OrbisApp {
             .data_mut(|data| data.remove::<egui::text_edit::TextEditState>(id));
     }
 
-    pub(super) fn passcode_settings(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new(if self.passcode.is_some() { "Package passcode · validated" } else { "Package passcode (optional)" })
+    pub(super) fn passcode_settings(&mut self, ui: &mut egui::Ui, required: bool) {
+        let label = if self.passcode.is_some() {
+            "Package passcode · validated"
+        } else if required {
+            "Package passcode required"
+        } else {
+            "Package passcode (optional)"
+        };
+        egui::CollapsingHeader::new(label)
+            .default_open(required)
             .show(ui, |ui| {
                 ui.label(muted(ui, "Enter a known 32-character passcode to unlock encrypted metadata. It is kept only for this open package and is never saved in reports."));
                 ui.add(egui::TextEdit::singleline(&mut *self.passcode_input).id(Self::passcode_input_id()).password(true).char_limit(32).hint_text("32-character package passcode"));

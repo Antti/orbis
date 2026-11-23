@@ -2,7 +2,7 @@
 use orbis_cli::{ExtractError, ExtractOptions, ExtractProgress, PkgExtractor, install};
 use orbis_pkg::{
     entry::EntryId,
-    sfo::{AppMetadata, Sfo, Value},
+    sfo::{Sfo, Value},
 };
 use std::{
     error::Error,
@@ -34,6 +34,12 @@ pub struct PackageInfo {
     pub update_supported: bool,
     pub update_note: String,
     pub warnings: Vec<String>,
+}
+
+impl PackageInfo {
+    pub fn can_check_update(&self) -> bool {
+        self.update_supported && self.missing_keys == 0
+    }
 }
 
 #[derive(Debug)]
@@ -425,13 +431,7 @@ fn execute(
                 .with_resume(resume)
                 .extract_with_options(&output, &ExtractOptions::default())?;
             let incomplete = !report.skipped.is_empty();
-            let is_base = !incomplete
-                && pkg
-                    .param_sfo_data()
-                    .ok()
-                    .flatten()
-                    .and_then(|data| AppMetadata::parse(&data).ok())
-                    .is_some_and(|app| app.category == "gd");
+            let is_base = !incomplete && install::base_metadata(&output).is_ok();
             Ok(Outcome::Finished {
                 title: if incomplete {
                     "Extraction incomplete"

@@ -113,16 +113,43 @@ impl OrbisApp {
                     }
                 });
             });
-            ui.separator();
         } else if self.package.is_some() {
             self.package_summary(ui);
         } else {
             self.empty_view(ui, frame);
             return;
         }
-        if self.package.is_some() && self.notice.is_none() {
+        let Some(info) = &self.package else { return };
+        let needs_passcode =
+            self.action == Action::Update && info.missing_keys > 0 && self.passcode.is_none();
+        if info.missing_keys > 0 {
+            let entries = if info.missing_keys == 1 {
+                "entry"
+            } else {
+                "entries"
+            };
+            let guidance = if needs_passcode {
+                "Validate the package passcode before installing this update."
+            } else if self.action == Action::Update {
+                "The validated passcode could not unlock this update."
+            } else {
+                "Extraction may be incomplete."
+            };
+            warning(
+                ui,
+                &format!(
+                    "{} encrypted metadata {entries} cannot be read. {guidance}",
+                    info.missing_keys
+                ),
+            );
+        }
+        for message in &info.warnings {
+            warning(ui, message);
+        }
+        ui.separator();
+        if self.notice.is_none() {
             ui.add_enabled_ui(idle, |ui| {
-                self.passcode_settings(ui);
+                self.passcode_settings(ui, needs_passcode);
                 self.settings(ui, frame);
             });
         }
@@ -192,24 +219,6 @@ impl OrbisApp {
             ui.label(muted(ui, "Region is inferred from the content ID. The system version is declared by the package; neither establishes emulator compatibility.").size(12.0));
             if !info.update_supported { ui.label(muted(ui, format!("Update installation: {}", info.update_note)).size(12.0)); }
         });
-        if info.missing_keys > 0 {
-            warning(
-                ui,
-                &format!(
-                    "{} encrypted metadata {} cannot be read. Extraction may be incomplete.",
-                    info.missing_keys,
-                    if info.missing_keys == 1 {
-                        "entry"
-                    } else {
-                        "entries"
-                    }
-                ),
-            );
-        }
-        for message in &info.warnings {
-            warning(ui, message);
-        }
-        ui.separator();
     }
 
     fn settings(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
@@ -296,7 +305,7 @@ impl OrbisApp {
                 if self.mode != old_mode {
                     self.preview = None;
                     if matches!(self.base, UpdateBase::Game(_)) {
-                        self.preview_update(info.path.clone());
+                        self.preview_update();
                     }
                 }
                 ui.add_space(5.0);
@@ -467,7 +476,7 @@ impl OrbisApp {
             return;
         };
         let path = package.path.clone();
-        let update_supported = package.update_supported;
+        let can_check_update = package.can_check_update();
         ui.horizontal(|ui| {
             let caption = match self.action {
                 Action::Verify => "Verification does not write package data.",
@@ -529,16 +538,16 @@ impl OrbisApp {
                                     },
                                 );
                             } else if !enough && ui.add(theme::primary("Check again")).clicked() {
-                                self.preview_update(path);
+                                self.preview_update();
                             }
                         } else if ui
                             .add_enabled(
-                                self.base.path().is_some() && update_supported,
+                                self.base.path().is_some() && can_check_update,
                                 theme::primary("Check update"),
                             )
                             .clicked()
                         {
-                            self.preview_update(path);
+                            self.preview_update();
                         }
                     }
                 },

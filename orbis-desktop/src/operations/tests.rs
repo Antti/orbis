@@ -418,6 +418,44 @@ fn automatic_export_verification_rejects_a_directory_replaced_while_copying() {
 }
 
 #[test]
+fn complete_extraction_recognizes_a_base_sfo_from_the_inner_filesystem() {
+    use common::{BS, be32, dirent, le32, le64};
+    let temp = tempfile::tempdir().unwrap();
+    let metadata = common::sfo("CUSA00000", "gd", "01.00");
+    let mut image = common::pfs("param.sfo", &metadata, false);
+    // Insert a directory between uroot and the fixture's param.sfo.
+    image.resize(6 * BS, 0);
+    le64(&mut image, 0x28, 6);
+    le64(&mut image, 0x30, 4);
+    let dir_inode = BS + 3 * 168;
+    image.copy_within(BS + 168..BS + 2 * 168, dir_inode);
+    le32(&mut image, dir_inode + 100, 5);
+    dirent(&mut image[2 * BS..], 3, 3, "uroot");
+    dirent(&mut image[5 * BS..], 1, 3, "sce_sys");
+    let mut bytes = common::pkg(image);
+    be32(&mut bytes, 0x10, 2); // Keep the two key entries, omit the outer PARAM.SFO.
+    let path = temp.path().join("base.pkg");
+    fs::write(&path, bytes).unwrap();
+    let output = temp.path().join("game");
+    let result = run(
+        &path,
+        Operation::Extract {
+            output: output.clone(),
+            resume: false,
+        },
+        &SilentProgress,
+    )
+    .unwrap();
+    assert!(
+        matches!(result, Outcome::Finished { output: OutputFolder::ExtractedGame(path), incomplete: false, .. } if path == output)
+    );
+    assert_eq!(
+        fs::read(output.join("sce_sys/param.sfo")).unwrap(),
+        metadata
+    );
+}
+
+#[test]
 fn inspects_then_extracts_real_package_without_a_cli() {
     let dir = tempfile::tempdir().unwrap();
     let path = package(dir.path());

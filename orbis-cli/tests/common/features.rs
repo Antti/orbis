@@ -1,4 +1,5 @@
 use super::common::*;
+use orbis_pkg::entry::EntryId;
 use sha2::{Digest, Sha256};
 
 fn hash_at(bytes: &mut [u8], slot: usize, start: usize, size: usize) {
@@ -82,6 +83,10 @@ const KEYS: [&str; 7] = [
 pub const PASSCODE: &[u8] = b"0123456789abcdef0123456789abcdef";
 
 pub fn passcoded_pkg(slot: usize) -> Vec<u8> {
+    passcoded_pkg_with_entry(slot, EntryId::ParamSfo)
+}
+
+pub fn passcoded_pkg_with_entry(slot: usize, id: EntryId) -> Vec<u8> {
     use aes::cipher::{BlockEncryptMut, KeyIvInit};
     let mut b = update("01.12", "hello.txt", b"hello");
     let mut cid = [0; 48];
@@ -102,13 +107,19 @@ pub fn passcoded_pkg(slot: usize) -> Vec<u8> {
             b[0x1120 + i * 32 + j] = digest[j] ^ key[j];
         }
     }
-    be32(&mut b, 0x1048, 0x80000000);
-    be32(&mut b, 0x104c, (slot as u32) << 12);
-    let size = u32::from_be_bytes(b[0x1054..0x1058].try_into().unwrap()) as usize;
-    let key = Sha256::digest([&b[0x1040..0x1060], &keys[slot]].concat());
+    let (entries, _) = b[0x1000..0x1060].as_chunks_mut::<32>();
+    let entry = entries
+        .iter_mut()
+        .find(|entry| entry[..4] == id.as_u32().to_be_bytes())
+        .unwrap();
+    be32(entry, 8, 0x80000000);
+    be32(entry, 12, (slot as u32) << 12);
+    let offset = u32::from_be_bytes(entry[16..20].try_into().unwrap()) as usize;
+    let size = u32::from_be_bytes(entry[20..24].try_into().unwrap()) as usize;
+    let key = Sha256::digest([entry.as_slice(), &keys[slot]].concat());
     let mut cipher =
         cbc::Encryptor::<aes::Aes128>::new_from_slices(&key[16..], &key[..16]).unwrap();
-    for block in b[0x1a00..0x1a00 + size.div_ceil(16) * 16]
+    for block in b[offset..offset + size.div_ceil(16) * 16]
         .as_chunks_mut::<16>()
         .0
     {
