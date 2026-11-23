@@ -470,7 +470,7 @@ fn inspects_then_extracts_real_package_without_a_cli() {
     assert_eq!(info.missing_keys, 0);
     assert!(info.required_system.is_none());
     assert!(info.artwork.is_none());
-    assert!(info.update_supported);
+    assert!(info.update_error.is_none());
     let output = dir.path().join("output");
     let result = run(
         &path,

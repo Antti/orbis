@@ -28,13 +28,13 @@ flagged before extraction. macOS installer `.pkg` files cannot be read by Orbis.
   checked before reuse; conflicting files remain untouched. After a complete
   base-game extraction, **Open game folder in Orbis** opens its status (added after v0.6.0).
 - **Install update…** in the game-folder view (added after v0.6.0) opens a PKG
-  picker and checks the selected update against the open game. If the package is
-  for a different game, click **Choose another PKG…** or drop a replacement onto
-  the window. Orbis keeps the game folder and your choice of separate or merged
-  installation. If metadata entries are locked, enter the package passcode and
-  click **Validate passcode** to continue. You can also start by opening an update
-  PKG, choosing the extracted base folder containing `sce_sys`, and clicking
-  **Check update**.
+  picker and checks the selected update against the open game. If the PKG is for
+  a different game or uses an unsupported update format, click **Choose another
+  PKG…** or drop a replacement onto the window. Orbis keeps the game folder and
+  your choice of separate or merged installation. If Orbis needs a passcode to
+  read update metadata, enter it and click **Validate passcode**. You can also
+  open an update PKG, choose the extracted base folder containing `sce_sys`, and
+  click **Check update**.
 
   Review the versions, destination, file changes, and space estimate. Close the
   emulator before confirming. With **Keep update separate** selected, **Install

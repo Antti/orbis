@@ -201,14 +201,14 @@ impl OrbisApp {
                 if from_game {
                     self.action = Action::Update;
                 } else if !self.refreshing_package {
-                    self.action = if info.update_supported {
+                    self.action = if info.update_error.is_none() {
                         Action::Update
                     } else {
                         Action::Extract
                     };
                     self.folder_name = operations::suggested_folder(&info);
                     self.parent = info.path.parent().map(PathBuf::from);
-                } else if self.action == Action::Update && !info.update_supported {
+                } else if self.action == Action::Update && info.update_error.is_some() {
                     self.action = Action::Extract;
                 }
                 self.refreshing_package = false;

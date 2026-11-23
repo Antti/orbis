@@ -57,11 +57,11 @@ fn passcodes_are_accepted_only_after_validation_and_cleared_for_another_package(
             .skipped
             .is_empty()
     );
-    assert!(app.package.as_ref().unwrap().update_supported);
+    assert!(app.package.as_ref().unwrap().update_error.is_none());
     app.action = Action::Update;
     app.clear_passcode();
     finish(&mut app);
-    assert!(!app.package.as_ref().unwrap().update_supported);
+    assert!(app.package.as_ref().unwrap().update_error.is_some());
     assert!(app.action == Action::Extract);
     assert!(app.passcode.is_none());
     assert!(app.verification.is_none());
@@ -459,6 +459,57 @@ fn replacing_a_pkg_in_the_same_game_rechecks_the_selected_install_mode() {
 }
 
 #[test]
+fn incompatible_packages_with_locked_entries_offer_a_replacement_without_a_passcode() {
+    use crate::common;
+    use orbis_pkg::entry::EntryId;
+
+    let temp = tempfile::tempdir().unwrap();
+    let base = common::base_game(temp.path());
+    let mut app = OrbisApp::default();
+
+    let mut base_pkg = features::passcoded_pkg_with_entry(2, EntryId::PfsImageKey);
+    common::be32(&mut base_pkg, 0x78, 0);
+    let mut delta = features::passcoded_pkg(2);
+    common::be32(&mut delta, 0x74, 0x1e);
+    let mut wrong_category = features::passcoded_pkg_with_entry(2, EntryId::PfsImageKey);
+    let sfo = common::sfo("CUSA00000", "gd", "01.12");
+    wrong_category[0x1a00..0x1a00 + sfo.len()].copy_from_slice(&sfo);
+
+    for (file, bytes, reason) in [
+        ("base.pkg", base_pkg, "expected a PS4 full-file"),
+        ("delta.pkg", delta, "binary delta packages"),
+        ("category.pkg", wrong_category, "CATEGORY must be gp"),
+    ] {
+        let path = temp.path().join(file);
+        fs::write(&path, bytes).unwrap();
+        app.open_package(path, UpdateBase::Game(base.clone()));
+        finish(&mut app);
+        assert_eq!(app.package.as_ref().unwrap().missing_keys, 1);
+        assert!(app.preview.is_none());
+        let tree = frame(&mut app, Default::default());
+        assert!(
+            tree.nodes
+                .iter()
+                .any(|(_, n)| n.value().is_some_and(|v| v.contains(reason))),
+            "{file}"
+        );
+        assert!(
+            tree.nodes
+                .iter()
+                .any(|(_, n)| n.label() == Some("Choose another PKG…") && !n.is_disabled()),
+            "{file}"
+        );
+        assert!(
+            !tree.nodes.iter().any(|(_, n)| [n.label(), n.value()]
+                .into_iter()
+                .flatten()
+                .any(|s| s.contains("passcode"))),
+            "{file} should not request a passcode"
+        );
+    }
+}
+
+#[test]
 fn update_with_locked_metadata_requires_a_passcode_even_with_readable_sfo() {
     let temp = tempfile::tempdir().unwrap();
     let base = crate::common::base_game(temp.path());
@@ -469,7 +520,7 @@ fn update_with_locked_metadata_requires_a_passcode_even_with_readable_sfo() {
     app.open_package(path.clone(), UpdateBase::Game(base.clone()));
     finish(&mut app);
     let info = app.package.as_ref().unwrap();
-    assert!(info.update_supported);
+    assert!(info.update_error.is_none());
     assert_eq!(info.missing_keys, 1);
     assert!(app.preview.is_none());
     let tree = frame(&mut app, Default::default());
@@ -526,11 +577,14 @@ fn contextual_update_accepts_a_passcode_and_rereads_the_game_on_back() {
     app.open_package(path, UpdateBase::Game(base.clone()));
     finish(&mut app);
     assert!(app.preview.is_none() && app.action == Action::Update);
-    assert!(!app.package.as_ref().unwrap().update_supported);
+    assert!(matches!(
+        app.package.as_ref().unwrap().update_error,
+        Some(orbis_cli::install::InstallError::MissingUpdateKey { slot: 2 })
+    ));
     app.passcode_input = String::from_utf8(features::PASSCODE.to_vec())
         .unwrap()
         .into();
-    app.validate_passcode();
+    click(&mut app, "Validate passcode");
     finish(&mut app);
     assert!(app.preview.is_some());
     click(&mut app, "Back to game");

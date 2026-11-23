@@ -1,7 +1,7 @@
 use super::*;
 use crate::theme::{self, heading, muted};
 use egui::{Color32, RichText};
-use orbis_cli::install::ChangeKind;
+use orbis_cli::install::{ChangeKind, InstallError};
 use std::path::Path;
 
 impl OrbisApp {
@@ -120,6 +120,13 @@ impl OrbisApp {
             return;
         }
         let Some(info) = &self.package else { return };
+        if matches!(self.base, UpdateBase::Game(_))
+            && let Some(error) = &info.update_error
+            && !matches!(error, InstallError::MissingUpdateKey { .. })
+        {
+            warning(ui, &error.to_string());
+            return;
+        }
         let needs_passcode =
             self.action == Action::Update && info.missing_keys > 0 && self.passcode.is_none();
         if info.missing_keys > 0 {
@@ -217,15 +224,14 @@ impl OrbisApp {
             detail(ui, "Integrity", self.verification.as_ref().map_or("Not checked", |r| r.title()));
             detail(ui, "Package file", &info.path.display().to_string());
             ui.label(muted(ui, "Region is inferred from the content ID. The system version is declared by the package; neither establishes emulator compatibility.").size(12.0));
-            if !info.update_supported { ui.label(muted(ui, format!("Update installation: {}", info.update_note)).size(12.0)); }
+            if let Some(error) = &info.update_error { ui.label(muted(ui, format!("Update installation: {error}")).size(12.0)); }
         });
     }
 
     fn settings(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
         let info = self.package.as_ref().unwrap();
         if matches!(self.base, UpdateBase::Game(_)) {
-            if !info.update_supported {
-                warning(ui, &info.update_note);
+            if info.update_error.is_some() {
                 return;
             }
         } else {
@@ -236,13 +242,15 @@ impl OrbisApp {
                     Action::Extract,
                     heading("Extract files", 14.0),
                 );
-                ui.add_enabled_ui(info.update_supported, |ui| {
-                    ui.selectable_value(
+                ui.add_enabled_ui(info.update_error.is_none(), |ui| {
+                    let tab = ui.selectable_value(
                         &mut self.action,
                         Action::Update,
                         heading("Install update", 14.0),
-                    )
-                    .on_disabled_hover_text(&info.update_note);
+                    );
+                    if let Some(error) = &info.update_error {
+                        tab.on_disabled_hover_text(error.to_string());
+                    }
                 });
                 ui.selectable_value(
                     &mut self.action,

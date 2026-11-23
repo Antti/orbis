@@ -25,7 +25,7 @@ pub use preflight::FilesystemPlan;
 use crate::{ExtractError, ExtractOptions, ExtractProgress, PkgExtractor, SilentProgress};
 use cap_std::fs::Dir;
 use orbis_pkg::{
-    Pkg,
+    EntryDataError, ParamSfoError, Pkg,
     header::ContentFlags,
     sfo::{AppMetadata, AppVersion},
 };
@@ -43,6 +43,8 @@ pub(crate) type Result<T> = std::result::Result<T, InstallError>;
 pub enum InstallError {
     #[snafu(display("{message}"))]
     Invalid { message: String },
+    #[snafu(display("update metadata needs a decryption key for slot {slot}"))]
+    MissingUpdateKey { slot: usize },
     #[snafu(display("installation filesystem operation failed"))]
     Io { source: std::io::Error },
     #[snafu(display("invalid installation metadata"))]
@@ -207,7 +209,12 @@ pub fn update_metadata<R: AsRef<[u8]>>(pkg: &Pkg<R>) -> Result<AppMetadata> {
     }
     let data = pkg
         .param_sfo_data()
-        .map_err(|e| invalid(e.to_string()))?
+        .map_err(|e| match e {
+            ParamSfoError::ReadData {
+                source: EntryDataError::NoDecryptionKey { key_index },
+            } => InstallError::MissingUpdateKey { slot: key_index },
+            other => invalid(other.to_string()),
+        })?
         .ok_or_else(|| invalid("update has no PARAM.SFO"))?;
     let metadata = AppMetadata::parse(&data)?;
     if metadata.category != "gp" {
@@ -254,9 +261,7 @@ fn make_plan<R: AsRef<[u8]> + Sync, P: ExtractProgress>(
         .filter_map(|entry| entry.key_index)
         .find(|&slot| !pkg.has_entry_key(slot))
     {
-        return Err(invalid(format!(
-            "update metadata needs a decryption key for slot {slot}"
-        )));
+        return Err(InstallError::MissingUpdateKey { slot });
     }
     if entries.iter().any(|e| e.path.is_none()) {
         return Err(invalid(

@@ -31,14 +31,13 @@ pub struct PackageInfo {
     pub artwork: Option<eframe::egui::ColorImage>,
     pub kind: String,
     pub size: u64,
-    pub update_supported: bool,
-    pub update_note: String,
+    pub update_error: Option<install::InstallError>,
     pub warnings: Vec<String>,
 }
 
 impl PackageInfo {
     pub fn can_check_update(&self) -> bool {
-        self.update_supported && self.missing_keys == 0
+        self.update_error.is_none() && self.missing_keys == 0
     }
 }
 
@@ -362,8 +361,7 @@ fn execute(
             artwork: None,
             kind: header.content_type_name().to_owned(),
             size: header.pkg_size(),
-            update_supported: false,
-            update_note: String::new(),
+            update_error: install::update_metadata(&pkg).err(),
             warnings: Vec::new(),
         };
         match pkg.param_sfo_data() {
@@ -381,10 +379,6 @@ fn execute(
             Err(e) => info
                 .warnings
                 .push(format!("Package details are unavailable: {e}")),
-        }
-        match install::update_metadata(&pkg) {
-            Ok(_) => info.update_supported = true,
-            Err(e) => info.update_note = e.to_string(),
         }
         for entry in pkg.entries() {
             // A malformed table can declare billions of absent entries. Stop
