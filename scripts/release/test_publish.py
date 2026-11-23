@@ -102,7 +102,8 @@ class FakeGitHub:
                     "-f",
                     f"Built from `{SHA}`. Includes Linux x86_64/ARM64 AppImage/Flatpak bundles, "
                     "Windows x86_64 ZIP, and macOS Intel/Apple Silicon archives. Choose orbis-cli-* for the orbis command or orbis-desktop-* for the graphical app. "
-                    "Verify downloads with SHA256SUMS. Mac signing status is in BUILD-INFO.txt. See RELEASE.md for installation.",
+                    f"[Verify and install the downloads](https://github.com/{REPO}/blob/{TAG}/RELEASE.md#installing-packages). "
+                    "Mac signing status is in BUILD-INFO.txt.",
                 ),
             }
             if fields != expected_fields:
@@ -151,15 +152,23 @@ class FakeGitHub:
         raise AssertionError(f"Unexpected GitHub command: {args}")
 
     def release_response(self):
-        sizes = {path.name: path.stat().st_size for path in self.uploads[-1]} if self.uploads else {}
-        assets = [{"name": name, "size": sizes.get(name, 0)} for name in self.assets]
+        assets = [{"name": name} for name in self.assets]
         if self.uploads:
+            assets = [
+                {"name": path.name, "size": path.stat().st_size,
+                 "digest": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()}
+                for path in self.uploads[-1]
+            ]
             if self.verification == "extra":
                 assets.append({"name": "extra.zip", "size": 3})
             elif self.verification == "missing":
                 assets.pop()
             elif self.verification == "size":
                 assets[0]["size"] += 1
+            elif self.verification == "digest":
+                assets[0]["digest"] = "sha256:" + "0" * 64
+            elif self.verification == "no-digest":
+                del assets[0]["digest"]
         return json.dumps({
             "id": self.release_id,
             "draft": False if self.verification == "public" else self.draft,
@@ -180,8 +189,18 @@ class PublishTests(unittest.TestCase):
         make_assets(self.directory)
 
     def run_publish(self, remote):
+        prepared = publish.write_checksums(self.directory, VERSION)["SHA256SUMS"]
         with patch.object(publish, "gh", side_effect=remote), redirect_stdout(io.StringIO()):
-            publish.publish(REPO, SHA, VERSION, self.directory)
+            publish.publish(REPO, SHA, VERSION, self.directory, checksums_sha256=prepared)
+
+    def test_changed_package_after_preparation_prevents_upload(self):
+        prepared = publish.write_checksums(self.directory, VERSION)["SHA256SUMS"]
+        package = self.directory / ASSETS[0]
+        package.write_bytes(b"x" * package.stat().st_size)
+        with patch.object(publish, "gh") as gh:
+            with self.assertRaisesRegex(ValueError, "changed since checksum preparation"):
+                publish.publish(REPO, SHA, VERSION, self.directory, checksums_sha256=prepared)
+            gh.assert_not_called()
 
     def test_checksums_match_exact_asset_names_contents_and_sorted_order(self):
         self.assertEqual(publish.expected_assets(VERSION), ASSETS)
@@ -267,7 +286,7 @@ class PublishTests(unittest.TestCase):
         )
         self.assertEqual(len(remote.uploads), 1)
         self.assertTrue(all(path.is_file() for path in remote.uploads[0]))
-        for verification in ["extra", "missing", "size", "public"]:
+        for verification in ["extra", "missing", "size", "digest", "no-digest", "public"]:
             with self.subTest(verification=verification):
                 remote = FakeGitHub(verification=verification)
                 with self.assertRaisesRegex(ValueError, "refusing publication"):
@@ -401,7 +420,29 @@ class PublishTests(unittest.TestCase):
             patch.dict(os.environ, {"GITHUB_REPOSITORY": REPO, "GITHUB_SHA": SHA}),
         ):
             publish.main()
-            release.assert_called_once_with(REPO, SHA, VERSION, self.directory)
+            release.assert_called_once_with(REPO, SHA, VERSION, self.directory, checksums_sha256=None)
+
+    def test_workflow_hands_the_prepared_manifest_digest_to_publication(self):
+        args = ["publish.py", VERSION, str(self.directory)]
+        output = io.StringIO()
+        with (
+            patch("sys.argv", [*args, "--checksums-only"]),
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(publish, "gh") as gh,
+            redirect_stdout(output),
+        ):
+            publish.main()
+            gh.assert_not_called()
+        manifest = (self.directory / "SHA256SUMS").read_bytes()
+        digest = hashlib.sha256(manifest).hexdigest()
+        self.assertEqual(output.getvalue(), f"checksums_sha256={digest}\n")
+        with (
+            patch("sys.argv", [*args, "--checksums-sha256", digest]),
+            patch.dict(os.environ, {"GITHUB_REPOSITORY": REPO, "GITHUB_SHA": SHA}),
+            patch.object(publish, "gh", side_effect=FakeGitHub()),
+            redirect_stdout(io.StringIO()),
+        ):
+            publish.main()
 
 
 if __name__ == "__main__":

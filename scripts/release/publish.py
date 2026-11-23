@@ -34,31 +34,37 @@ def expected_assets(version: str) -> list[str]:
     ]
 
 
-def write_checksums(directory: Path, version: str) -> None:
+def write_checksums(directory: Path, version: str) -> dict[str, str]:
     expected = expected_assets(version)
     actual = {path.name for path in directory.iterdir()}
     if actual - {"SHA256SUMS"} != set(expected):
         raise ValueError(f"Expected exactly these release assets: {expected}; found {sorted(actual)}")
-    lines = []
+    digests = {}
     for name in sorted(expected):
         path = directory / name
         if path.is_symlink() or not path.is_file() or path.stat().st_size == 0:
             raise ValueError(f"Invalid release asset: {path}")
         with path.open("rb") as stream:
-            digest = hashlib.file_digest(stream, "sha256").hexdigest()
-        lines.append(f"{digest}  {name}\n")
+            digests[name] = hashlib.file_digest(stream, "sha256").hexdigest()
     checksum_file = directory / "SHA256SUMS"
     if checksum_file.is_symlink() or (checksum_file.exists() and not checksum_file.is_file()):
         raise ValueError(f"Invalid checksum file: {checksum_file}")
-    checksum_file.write_text("".join(lines))
+    manifest = "".join(f"{digest}  {name}\n" for name, digest in digests.items()).encode()
+    checksum_file.write_bytes(manifest)
+    digests["SHA256SUMS"] = hashlib.sha256(manifest).hexdigest()
+    return digests
 
 
-def publish(repo: str, sha: str, version: str, directory: Path) -> None:
+def publish(
+    repo: str, sha: str, version: str, directory: Path, *, checksums_sha256: str | None = None
+) -> None:
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
         raise ValueError("Invalid repository name")
     if not re.fullmatch(r"[0-9a-f]{40}", sha):
         raise ValueError("Invalid release commit SHA")
-    write_checksums(directory, version)
+    digests = write_checksums(directory, version)
+    if checksums_sha256 is not None and digests["SHA256SUMS"] != checksums_sha256:
+        raise ValueError("Release assets changed since checksum preparation")
     tag = f"v{version}"
     # Fail on API/authentication errors rather than treating them as missing tags.
     refs = json.loads(gh("api", f"repos/{repo}/git/matching-refs/tags/{tag}"))
@@ -93,7 +99,8 @@ def publish(repo: str, sha: str, version: str, directory: Path) -> None:
         notes = (
             f"Built from `{sha}`. Includes Linux x86_64/ARM64 AppImage/Flatpak bundles, "
             "Windows x86_64 ZIP, and macOS Intel/Apple Silicon archives. Choose orbis-cli-* for the orbis command or orbis-desktop-* for the graphical app. "
-            "Verify downloads with SHA256SUMS. Mac signing status is in BUILD-INFO.txt. See RELEASE.md for installation."
+            f"[Verify and install the downloads](https://github.com/{repo}/blob/{tag}/RELEASE.md#installing-packages). "
+            "Mac signing status is in BUILD-INFO.txt."
         )
         release = json.loads(
             gh(
@@ -109,9 +116,13 @@ def publish(repo: str, sha: str, version: str, directory: Path) -> None:
     gh("release", "upload", tag, "--repo", repo, "--clobber", *assets)
     # The tag endpoint only finds published releases; drafts need their numeric ID.
     uploaded = json.loads(gh("api", f"repos/{repo}/releases/{release['id']}"))
-    sizes = {asset["name"]: asset["size"] for asset in uploaded["assets"]}
-    expected_sizes = {Path(asset).name: Path(asset).stat().st_size for asset in assets}
-    if not uploaded["draft"] or sizes != expected_sizes:
+    uploaded_files = {
+        asset["name"]: (asset["size"], asset.get("digest")) for asset in uploaded["assets"]
+    }
+    expected_files = {
+        name: ((directory / name).stat().st_size, f"sha256:{digest}") for name, digest in digests.items()
+    }
+    if not uploaded["draft"] or uploaded_files != expected_files:
         raise ValueError("Draft release state or uploaded assets changed; refusing publication")
     # Semantic-version ordering avoids making an older, slower build Latest.
     gh(
@@ -125,8 +136,18 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("version")
     parser.add_argument("directory", type=Path)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--checksums-only", action="store_true", help="Prepare assets and print the manifest digest")
+    mode.add_argument("--checksums-sha256", help="Require the prepared manifest digest before uploading")
     args = parser.parse_args()
-    publish(os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_SHA"], args.version, args.directory)
+    if args.checksums_only:
+        digests = write_checksums(args.directory, args.version)
+        print(f"checksums_sha256={digests['SHA256SUMS']}")
+        return
+    publish(
+        os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_SHA"], args.version, args.directory,
+        checksums_sha256=args.checksums_sha256,
+    )
 
 
 if __name__ == "__main__":
