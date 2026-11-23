@@ -339,6 +339,115 @@ impl egui::DroppedFile for DroppedPath {
 }
 
 #[test]
+fn extracted_game_can_preview_retry_and_install_an_update() {
+    use crate::common;
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().join("CUSA00000");
+    let base_pkg = temp.path().join("base.pkg");
+    let mut bytes = common::update("01.00", "game.txt", b"BASE");
+    let sfo = common::sfo("CUSA00000", "gd", "01.00");
+    bytes[0x1a00..0x1a00 + sfo.len()].copy_from_slice(&sfo);
+    common::be32(&mut bytes, 0x78, 0);
+    fs::write(&base_pkg, bytes).unwrap();
+    let mut app = OrbisApp::default();
+    app.open(base_pkg);
+    finish(&mut app);
+    click(&mut app, "Extract files");
+    finish(&mut app);
+    click(&mut app, "Open game folder in Orbis");
+    finish(&mut app);
+    assert_eq!(app.game.as_ref().unwrap().base, base);
+    assert!(
+        frame(&mut app, Default::default())
+            .nodes
+            .iter()
+            .any(|(_, n)| n.label() == Some("Install update…"))
+    );
+
+    let wrong = temp.path().join("other-game.pkg");
+    let mut bytes = common::update("01.12", "game.txt", b"OTHER");
+    let sfo = common::sfo("CUSA12345", "gp", "01.12");
+    bytes[0x1a00..0x1a00 + sfo.len()].copy_from_slice(&sfo);
+    bytes[0x47..0x50].copy_from_slice(b"CUSA12345");
+    fs::write(&wrong, bytes).unwrap();
+    app.open_package(wrong, UpdateBase::Game(base.clone()));
+    finish(&mut app);
+    assert!(
+        app.notice
+            .as_ref()
+            .unwrap()
+            .details
+            .contains("does not match")
+    );
+    assert!(app.preview.is_none());
+    assert!(
+        frame(&mut app, Default::default())
+            .nodes
+            .iter()
+            .any(|(_, n)| n.label() == Some("Choose another PKG…"))
+    );
+
+    let update = temp.path().join("update.pkg");
+    fs::write(&update, common::update("01.12", "game.txt", b"PATCH")).unwrap();
+    frame(
+        &mut app,
+        egui::RawInput {
+            dropped_files: vec![Arc::new(DroppedPath(update))],
+            ..Default::default()
+        },
+    );
+    finish(&mut app);
+    let plan = app.preview.as_ref().unwrap();
+    assert_eq!(plan.current_version, "01.00");
+    assert_eq!(plan.update_version, "01.12");
+    assert_eq!(
+        plan.destination,
+        base.canonicalize()
+            .unwrap()
+            .with_file_name("CUSA00000-UPDATE")
+    );
+    assert!(!plan.destination.exists());
+    click(&mut app, "Install update");
+    finish(&mut app);
+    click(&mut app, "Done");
+    finish(&mut app);
+    let game = app.game.as_ref().unwrap();
+    assert_eq!(game.base, base);
+    assert_eq!(
+        game.status.as_ref().unwrap().active_version.as_deref(),
+        Some("01.12")
+    );
+    assert_eq!(fs::read(base.join("game.txt")).unwrap(), b"BASE");
+    assert_eq!(
+        fs::read(base.with_file_name("CUSA00000-UPDATE").join("game.txt")).unwrap(),
+        b"PATCH"
+    );
+}
+
+#[test]
+fn contextual_update_accepts_a_passcode_and_rereads_the_game_on_back() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = crate::common::base_game(temp.path());
+    let path = temp.path().join("locked.pkg");
+    fs::write(&path, features::passcoded_pkg(2)).unwrap();
+    let mut app = OrbisApp::default();
+    app.open_package(path, UpdateBase::Game(base.clone()));
+    finish(&mut app);
+    assert!(app.preview.is_none() && app.action == Action::Update);
+    assert!(!app.package.as_ref().unwrap().update_supported);
+    app.passcode_input = String::from_utf8(features::PASSCODE.to_vec())
+        .unwrap()
+        .into();
+    app.validate_passcode();
+    finish(&mut app);
+    assert!(app.preview.is_some());
+    click(&mut app, "Back to game");
+    finish(&mut app);
+    assert_eq!(app.game.as_ref().unwrap().base, base);
+    assert!(app.package.is_none() && app.passcode.is_none() && app.preview.is_none());
+}
+
+#[test]
 fn interrupted_merge_offers_recovery_and_refreshes_the_restored_base() {
     let temp = tempfile::tempdir().unwrap();
     let base = crate::common::base_game(temp.path());
@@ -363,7 +472,7 @@ fn interrupted_merge_offers_recovery_and_refreshes_the_restored_base() {
         !view
             .nodes
             .iter()
-            .any(|(_, node)| node.label() == Some("Export this game…"))
+            .any(|(_, node)| matches!(node.label(), Some("Export this game…" | "Install update…")))
     );
 
     fs::write(

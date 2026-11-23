@@ -446,6 +446,7 @@ fn inspects_then_extracts_real_package_without_a_cli() {
     assert!(matches!(
         result,
         Outcome::Finished {
+            output: OutputFolder::Directory(_),
             incomplete: false,
             ..
         }
@@ -512,7 +513,10 @@ fn previews_and_installs_updates_without_changing_the_base() {
     else {
         panic!()
     };
-    assert_eq!(fs::read(output.join("new.txt")).unwrap(), b"NEW DATA");
+    assert_eq!(
+        fs::read(output.path().join("new.txt")).unwrap(),
+        b"NEW DATA"
+    );
     assert_eq!(fs::read(base.join("base.txt")).unwrap(), b"BASE");
     assert!(!base.join("new.txt").exists());
 }
@@ -573,6 +577,7 @@ fn incomplete_extraction_is_not_reported_as_success() {
     assert!(matches!(
         result,
         Outcome::Finished {
+            output: OutputFolder::Directory(_),
             incomplete: true,
             ..
         }

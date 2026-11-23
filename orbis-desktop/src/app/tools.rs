@@ -177,7 +177,9 @@ impl OrbisApp {
                     title: "Verification report saved".into(),
                     message: destination.display().to_string(),
                     details: String::new(),
-                    output: destination.parent().map(PathBuf::from),
+                    output: destination
+                        .parent()
+                        .map(|p| OutputFolder::Directory(p.to_owned())),
                     attention: false,
                 });
             }
@@ -328,7 +330,7 @@ mod tests {
         app.open(path);
         finish(&mut app);
         assert!(app.game.is_none());
-        app.base = Some(base.clone());
+        app.base = UpdateBase::Pick(Some(base.clone()));
         click(&mut app, "Check update");
         finish(&mut app);
         click(&mut app, "Install update");

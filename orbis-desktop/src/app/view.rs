@@ -44,7 +44,7 @@ impl OrbisApp {
                                 .add_enabled(self.job.is_none(), egui::Button::new("Open PKG…"))
                                 .clicked()
                             {
-                                self.choose_package(frame);
+                                self.choose_package(frame, UpdateBase::default());
                             }
                         });
                     }
@@ -81,21 +81,10 @@ impl OrbisApp {
                                     |ui| self.export_settings(ui, frame),
                                 );
                             }
-                        } else if let Some(game) = &self.game {
-                            game.show(ui);
-                        } else if self.package.is_none() {
-                            self.empty_view(ui, frame);
+                        } else if self.game.is_some() {
+                            self.game_view(ui);
                         } else {
-                            self.package_summary(ui);
-                            if self.notice.is_none() {
-                                ui.add_enabled_ui(
-                                    self.job.is_none() && !self.close_after_job,
-                                    |ui| {
-                                        self.passcode_settings(ui);
-                                        self.settings(ui, frame);
-                                    },
-                                );
-                            }
+                            self.package_view(ui, frame);
                         }
                         self.result_details(ui);
                         if self.export.is_none() && self.game.is_none() && self.package.is_some() {
@@ -103,6 +92,40 @@ impl OrbisApp {
                         }
                     });
             });
+    }
+
+    fn package_view(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
+        let idle = self.job.is_none() && !self.close_after_job;
+        if let UpdateBase::Game(base) = &self.base {
+            let base = base.clone();
+            ui.label(heading("Install update", 21.0));
+            path_label(ui, &base, "Game folder: ");
+            if let Some(info) = &self.package {
+                path_label(ui, &info.path, "Selected PKG: ");
+            }
+            ui.add_enabled_ui(idle, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Choose another PKG…").clicked() {
+                        self.choose_package(frame, UpdateBase::Game(base.clone()));
+                    }
+                    if ui.button("Back to game").clicked() {
+                        self.open_game(base);
+                    }
+                });
+            });
+            ui.separator();
+        } else if self.package.is_some() {
+            self.package_summary(ui);
+        } else {
+            self.empty_view(ui, frame);
+            return;
+        }
+        if self.package.is_some() && self.notice.is_none() {
+            ui.add_enabled_ui(idle, |ui| {
+                self.passcode_settings(ui);
+                self.settings(ui, frame);
+            });
+        }
     }
 
     fn empty_view(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
@@ -121,7 +144,7 @@ impl OrbisApp {
                 .add_enabled(self.job.is_none(), theme::primary("Open PKG…"))
                 .clicked()
             {
-                self.choose_package(frame);
+                self.choose_package(frame, UpdateBase::default());
             }
             if ui
                 .add_enabled(self.job.is_none(), egui::Button::new("Open game folder…"))
@@ -191,29 +214,36 @@ impl OrbisApp {
 
     fn settings(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
         let info = self.package.as_ref().unwrap();
-        let old_action = self.action;
-        ui.horizontal_wrapped(|ui| {
-            ui.selectable_value(
-                &mut self.action,
-                Action::Extract,
-                heading("Extract files", 14.0),
-            );
-            ui.add_enabled_ui(info.update_supported, |ui| {
+        if matches!(self.base, UpdateBase::Game(_)) {
+            if !info.update_supported {
+                warning(ui, &info.update_note);
+                return;
+            }
+        } else {
+            let old_action = self.action;
+            ui.horizontal_wrapped(|ui| {
                 ui.selectable_value(
                     &mut self.action,
-                    Action::Update,
-                    heading("Install update", 14.0),
-                )
-                .on_disabled_hover_text(&info.update_note);
+                    Action::Extract,
+                    heading("Extract files", 14.0),
+                );
+                ui.add_enabled_ui(info.update_supported, |ui| {
+                    ui.selectable_value(
+                        &mut self.action,
+                        Action::Update,
+                        heading("Install update", 14.0),
+                    )
+                    .on_disabled_hover_text(&info.update_note);
+                });
+                ui.selectable_value(
+                    &mut self.action,
+                    Action::Verify,
+                    heading("Verify package", 14.0),
+                );
             });
-            ui.selectable_value(
-                &mut self.action,
-                Action::Verify,
-                heading("Verify package", 14.0),
-            );
-        });
-        if old_action != self.action {
-            self.preview = None;
+            if old_action != self.action {
+                self.preview = None;
+            }
         }
         ui.add_space(8.0);
         match self.action {
@@ -265,9 +295,14 @@ impl OrbisApp {
                 });
                 if self.mode != old_mode {
                     self.preview = None;
+                    if matches!(self.base, UpdateBase::Game(_)) {
+                        self.preview_update(info.path.clone());
+                    }
                 }
                 ui.add_space(5.0);
-                if folder_picker(ui, frame, "Extracted base game", &mut self.base) {
+                if let UpdateBase::Pick(base) = &mut self.base
+                    && folder_picker(ui, frame, "Extracted base game", base)
+                {
                     self.preview = None;
                 }
                 if let Some(plan) = &self.preview {
@@ -317,7 +352,7 @@ impl OrbisApp {
                         "Base files stay unchanged. One previous installation is kept for rollback."
                     };
                     ui.label(muted(ui, note).size(12.0));
-                } else {
+                } else if matches!(self.base, UpdateBase::Pick(_)) {
                     ui.label(muted(ui, if self.mode == InstallMode::Merge {
                         "Choose an original base game. Update files will replace game files, with backups for Restore base. Close the emulator first."
                     } else {
@@ -373,27 +408,42 @@ impl OrbisApp {
         if let Some(notice) = &self.notice {
             let mut done = false;
             let mut reveal_error = None;
-            ui.horizontal(|ui| {
+            let mut open_game = None;
+            ui.horizontal_wrapped(|ui| {
                 ui.label(heading(&notice.title, 14.0).color(if notice.attention {
                     theme::attention(ui)
                 } else {
                     ui.visuals().text_color()
                 }));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if let Some(output) = &notice.output
-                        && ui.add(theme::primary("Show in folder")).clicked()
-                        && let Err(error) = open::that(output)
+                if let Some(OutputFolder::ExtractedGame(path)) = &notice.output
+                    && ui
+                        .add(theme::primary("Open game folder in Orbis"))
+                        .clicked()
+                {
+                    open_game = Some(path.clone());
+                }
+                if let Some(output) = &notice.output {
+                    let reveal = match output {
+                        OutputFolder::ExtractedGame(_) => egui::Button::new("Show in folder"),
+                        OutputFolder::Directory(_) => theme::primary("Show in folder"),
+                    };
+                    if ui.add(reveal).clicked()
+                        && let Err(error) = open::that(output.path())
                     {
                         reveal_error = Some(error.to_string());
                     }
-                    done = ui.button("Done").clicked();
-                });
+                }
+                done = ui.button("Done").clicked();
             });
-            if done {
+            if let Some(base) = open_game {
+                self.open_game(base);
+            } else if done {
                 let refresh = !notice.attention && self.export.is_none();
                 self.notice = None;
                 self.warnings = Details::default();
-                if refresh
+                if refresh && let UpdateBase::Game(base) = &self.base {
+                    self.open_game(base.clone());
+                } else if refresh
                     && let Some(game) = &self.game
                     && game.status.is_none()
                 {
@@ -410,13 +460,14 @@ impl OrbisApp {
             return;
         }
         if self.game.is_some() {
-            self.game_footer(ui);
+            self.game_footer(ui, frame);
             return;
         }
         let Some(package) = &self.package else {
             return;
         };
         let path = package.path.clone();
+        let update_supported = package.update_supported;
         ui.horizontal(|ui| {
             let caption = match self.action {
                 Action::Verify => "Verification does not write package data.",
@@ -473,31 +524,21 @@ impl OrbisApp {
                                 self.start(
                                     path,
                                     Operation::InstallUpdate {
-                                        base: self.base.clone().unwrap(),
+                                        base: self.base.path().unwrap().clone(),
                                         preview,
                                     },
                                 );
                             } else if !enough && ui.add(theme::primary("Check again")).clicked() {
-                                self.preview = None;
-                                self.start(
-                                    path,
-                                    Operation::PreviewUpdate {
-                                        mode: self.mode,
-                                        base: self.base.clone().unwrap(),
-                                    },
-                                );
+                                self.preview_update(path);
                             }
                         } else if ui
-                            .add_enabled(self.base.is_some(), theme::primary("Check update"))
+                            .add_enabled(
+                                self.base.path().is_some() && update_supported,
+                                theme::primary("Check update"),
+                            )
                             .clicked()
                         {
-                            self.start(
-                                path,
-                                Operation::PreviewUpdate {
-                                    mode: self.mode,
-                                    base: self.base.clone().unwrap(),
-                                },
-                            );
+                            self.preview_update(path);
                         }
                     }
                 },
@@ -510,7 +551,7 @@ impl OrbisApp {
             ui.add_space(8.0);
             ui.label(&notice.message);
             if let Some(path) = &notice.output {
-                path_label(ui, path, "Output: ");
+                path_label(ui, path.path(), "Output: ");
             }
             if !notice.details.is_empty() {
                 egui::CollapsingHeader::new("Error details")

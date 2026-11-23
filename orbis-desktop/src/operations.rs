@@ -2,7 +2,7 @@
 use orbis_cli::{ExtractError, ExtractOptions, ExtractProgress, PkgExtractor, install};
 use orbis_pkg::{
     entry::EntryId,
-    sfo::{Sfo, Value},
+    sfo::{AppMetadata, Sfo, Value},
 };
 use std::{
     error::Error,
@@ -107,7 +107,7 @@ impl Operation {
                 "Completed files remain in the destination. To retry, select the same folder and enable Resume. Conflicting files are preserved; choose a new folder if needed."
             }
             Self::PreviewUpdate { .. } => {
-                "Select the extracted base game's folder containing sce_sys/param.sfo and a matching full-file update PKG."
+                "Use a newer full-file update PKG with the same title and content IDs as the base game."
             }
             Self::CheckGame { .. } => {
                 "Choose the extracted base game folder containing sce_sys/param.sfo. For an interrupted merge, choose the original game folder."
@@ -118,6 +118,20 @@ impl Operation {
             Self::InstallUpdate { .. } | Self::RestoreBase { .. } | Self::RecoverBase { .. } => {
                 "Keep the emulator closed and retain the backup folder beside your game. Open the game folder to check its status or recover an interrupted merge."
             }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum OutputFolder {
+    Directory(PathBuf),
+    ExtractedGame(PathBuf),
+}
+
+impl OutputFolder {
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Directory(path) | Self::ExtractedGame(path) => path,
         }
     }
 }
@@ -141,7 +155,7 @@ pub enum Outcome {
     Finished {
         title: String,
         message: String,
-        output: PathBuf,
+        output: OutputFolder,
         incomplete: bool,
     },
 }
@@ -277,7 +291,7 @@ fn execute(
                         human_size(exported.bytes)
                     )
                 },
-                output: exported.destination,
+                output: OutputFolder::Directory(exported.destination),
                 incomplete,
             });
         }
@@ -411,6 +425,13 @@ fn execute(
                 .with_resume(resume)
                 .extract_with_options(&output, &ExtractOptions::default())?;
             let incomplete = !report.skipped.is_empty();
+            let is_base = !incomplete
+                && pkg
+                    .param_sfo_data()
+                    .ok()
+                    .flatten()
+                    .and_then(|data| AppMetadata::parse(&data).ok())
+                    .is_some_and(|app| app.category == "gd");
             Ok(Outcome::Finished {
                 title: if incomplete {
                     "Extraction incomplete"
@@ -431,7 +452,11 @@ fn execute(
                         human_size(report.bytes)
                     )
                 },
-                output,
+                output: if is_base {
+                    OutputFolder::ExtractedGame(output)
+                } else {
+                    OutputFolder::Directory(output)
+                },
                 incomplete,
             })
         }
@@ -457,10 +482,10 @@ fn execute(
             Ok(Outcome::Finished {
                 title: "Update installed".into(),
                 message: format!(
-                    "{} is now at version {}. Open the base game folder in Orbis to restore the previous version.",
+                    "{} is now at version {}. You can restore the previous version from the game folder.",
                     plan.title_id, plan.update_version
                 ),
-                output: plan.destination,
+                output: OutputFolder::Directory(plan.destination),
                 incomplete: false,
             })
         }

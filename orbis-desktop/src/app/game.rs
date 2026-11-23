@@ -26,7 +26,6 @@ impl GameFolder {
     }
 
     pub fn show(&self, ui: &mut egui::Ui) {
-        ui.label(heading("Game folder", 21.0));
         path_label(ui, &self.base, "");
         let Some(status) = &self.status else { return };
         let needs_attention = !status.issues.is_empty() || !status.unmanaged_directories.is_empty();
@@ -100,17 +99,42 @@ impl GameFolder {
 }
 
 impl OrbisApp {
+    pub(super) fn game_view(&mut self, ui: &mut egui::Ui) {
+        let base = self.game.as_ref().unwrap().base.clone();
+        ui.horizontal(|ui| {
+            ui.label(heading("Game folder", 21.0));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_enabled_ui(self.job.is_none() && self.notice.is_none(), |ui| {
+                    if ui.button("Back").clicked() {
+                        self.game = None;
+                    } else if ui.button("Refresh").clicked() {
+                        self.open_game(base);
+                    }
+                });
+            });
+        });
+        if let Some(game) = &self.game {
+            game.show(ui);
+        }
+    }
+
     pub(super) fn open_game(&mut self, base: PathBuf) {
+        if matches!(self.base, UpdateBase::Game(_)) {
+            self.reset_package();
+        }
         self.export = None;
         self.preview = None;
         self.game = Some(GameFolder::new(base.clone(), None, None));
         self.start(PathBuf::new(), Operation::CheckGame { base });
     }
 
-    pub(super) fn game_footer(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn game_footer(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
         let game = self.game.as_mut().unwrap();
         let base = game.base.clone();
         let state = game.status.as_ref().map(|s| (s.mode, s.pending_recovery));
+        let healthy = game.status.as_ref().is_some_and(|s| {
+            s.issues.is_empty() && s.unmanaged_directories.is_empty() && s.modified_files.is_empty()
+        });
         if let Some(plan) = &game.rollback
             && game.confirming_rollback
         {
@@ -144,51 +168,47 @@ impl OrbisApp {
             }
             return;
         }
-        ui.horizontal_wrapped(|ui| {
-            match state {
-                Some((InstallMode::Separate, false)) => {
-                    if ui.add(theme::primary("Export this game…")).clicked() {
-                        self.export = Some(tools::ExportState::from_base(base.clone()));
-                    }
-                    let game = self.game.as_mut().unwrap();
-                    if let Some(plan) = &game.rollback {
-                        let target = if plan.restores_base() {
-                            "base"
-                        } else {
-                            "previous update"
-                        };
-                        if ui
-                            .button(format!("Restore {target} {}…", plan.target_version()))
-                            .clicked()
-                        {
-                            game.confirming_rollback = true;
-                        }
-                    }
+        ui.horizontal_wrapped(|ui| match state {
+            Some((InstallMode::Separate, false)) => {
+                if healthy && ui.add(theme::primary("Install update…")).clicked() {
+                    self.choose_package(frame, UpdateBase::Game(base.clone()));
+                    return;
                 }
-                Some((InstallMode::Merge, pending)) => {
-                    let label = if pending {
-                        "Recover base"
+                if ui.button("Export this game…").clicked() {
+                    self.export = Some(tools::ExportState::from_base(base.clone()));
+                }
+                let game = self.game.as_mut().unwrap();
+                if let Some(plan) = &game.rollback {
+                    let target = if plan.restores_base() {
+                        "base"
                     } else {
-                        "Restore base"
+                        "previous update"
                     };
-                    if ui.add(theme::primary(label)).clicked() {
-                        self.game.as_mut().unwrap().status = None;
-                        let operation = if pending {
-                            Operation::RecoverBase { base: base.clone() }
-                        } else {
-                            Operation::RestoreBase { base: base.clone() }
-                        };
-                        self.start(PathBuf::new(), operation);
+                    if ui
+                        .button(format!("Restore {target} {}…", plan.target_version()))
+                        .clicked()
+                    {
+                        game.confirming_rollback = true;
                     }
                 }
-                _ => {}
             }
-            if ui.button("Refresh").clicked() {
-                self.open_game(base);
+            Some((InstallMode::Merge, pending)) => {
+                let label = if pending {
+                    "Recover base"
+                } else {
+                    "Restore base"
+                };
+                if ui.add(theme::primary(label)).clicked() {
+                    self.game.as_mut().unwrap().status = None;
+                    let operation = if pending {
+                        Operation::RecoverBase { base: base.clone() }
+                    } else {
+                        Operation::RestoreBase { base: base.clone() }
+                    };
+                    self.start(PathBuf::new(), operation);
+                }
             }
-            if ui.button("Back").clicked() {
-                self.game = None;
-            }
+            _ => {}
         });
     }
 }

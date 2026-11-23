@@ -1,5 +1,5 @@
 use crate::{
-    operations::{self, Operation, Outcome, PackageInfo, human_size},
+    operations::{self, Operation, Outcome, OutputFolder, PackageInfo, human_size},
     worker::{Details, Job},
 };
 use eframe::egui;
@@ -28,8 +28,28 @@ struct Notice {
     title: String,
     message: String,
     details: String,
-    output: Option<PathBuf>,
+    output: Option<OutputFolder>,
     attention: bool,
+}
+
+enum UpdateBase {
+    Pick(Option<PathBuf>),
+    Game(PathBuf),
+}
+
+impl Default for UpdateBase {
+    fn default() -> Self {
+        Self::Pick(None)
+    }
+}
+
+impl UpdateBase {
+    fn path(&self) -> Option<&PathBuf> {
+        match self {
+            Self::Pick(path) => path.as_ref(),
+            Self::Game(path) => Some(path),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -41,7 +61,7 @@ pub struct OrbisApp {
     parent: Option<PathBuf>,
     folder_name: String,
     resume: bool,
-    base: Option<PathBuf>,
+    base: UpdateBase,
     preview: Option<InstallPlan>,
     mode: InstallMode,
     game: Option<game::GameFolder>,
@@ -75,8 +95,12 @@ impl OrbisApp {
     fn open(&mut self, path: PathBuf) {
         if path.is_dir() {
             self.open_game(path);
-            return;
+        } else {
+            self.open_package(path, UpdateBase::default());
         }
+    }
+
+    fn reset_package(&mut self) {
         self.passcode = None;
         self.pending_passcode = None;
         self.reset_passcode_input();
@@ -86,13 +110,31 @@ impl OrbisApp {
         self.package = None;
         self.artwork = None;
         self.parent = None;
-        self.base = None;
+        self.base = UpdateBase::default();
         self.game = None;
         self.mode = InstallMode::Separate;
         self.folder_name.clear();
         self.resume = false;
         self.preview = None;
+    }
+
+    fn open_package(&mut self, path: PathBuf, base: UpdateBase) {
+        self.reset_package();
+        self.base = base;
         self.start(path, Operation::Inspect);
+    }
+
+    fn preview_update(&mut self, path: PathBuf) {
+        if let Some(base) = self.base.path().cloned() {
+            self.preview = None;
+            self.start(
+                path,
+                Operation::PreviewUpdate {
+                    base,
+                    mode: self.mode,
+                },
+            );
+        }
     }
 
     fn start(&mut self, path: PathBuf, operation: Operation) {
@@ -137,6 +179,7 @@ impl OrbisApp {
             return;
         }
         let job = self.job.take().unwrap();
+        let cancelled = job.progress.cancelled.load(Ordering::Relaxed);
         self.close_prompt = false;
         let label = job.label;
         let help = job.help;
@@ -150,7 +193,12 @@ impl OrbisApp {
                 if let Some(passcode) = self.pending_passcode.take() {
                     self.passcode = Some(passcode);
                 }
-                if !self.refreshing_package {
+                if matches!(self.base, UpdateBase::Game(_)) {
+                    self.action = Action::Update;
+                    if info.update_supported && !cancelled && !self.close_after_job {
+                        self.preview_update(info.path.clone());
+                    }
+                } else if !self.refreshing_package {
                     self.action = if info.update_supported {
                         Action::Update
                     } else {
@@ -198,7 +246,7 @@ impl OrbisApp {
                 self.notice = Some(Notice {
                     title: title.into(),
                     message,
-                    output: Some(base),
+                    output: Some(OutputFolder::Directory(base)),
                     details: String::new(),
                     attention: false,
                 });
@@ -250,14 +298,17 @@ impl OrbisApp {
         }
     }
 
-    fn choose_package(&mut self, frame: &eframe::Frame) {
+    fn choose_package(&mut self, frame: &eframe::Frame, base: UpdateBase) {
         if let Some(path) = rfd::FileDialog::new()
             .set_parent(frame)
-            .set_title("Open a PlayStation 4 package")
+            .set_title(match base {
+                UpdateBase::Game(_) => "Choose an update PKG for this game",
+                UpdateBase::Pick(_) => "Open a PlayStation 4 package",
+            })
             .add_filter("PlayStation 4 package", &["pkg"])
             .pick_file()
         {
-            self.open(path);
+            self.open_package(path, base);
         }
     }
 }
@@ -288,7 +339,16 @@ impl eframe::App for OrbisApp {
                     "Drop a PKG file or an extracted game folder onto the window.".into(),
                 );
             } else if let Some(file) = dropped.first() {
-                self.open(file.path().to_owned());
+                let path = file.path().to_owned();
+                if let UpdateBase::Game(base) = &self.base
+                    && self.game.is_none()
+                    && self.export.is_none()
+                    && !path.is_dir()
+                {
+                    self.open_package(path, UpdateBase::Game(base.clone()));
+                } else {
+                    self.open(path);
+                }
             }
         }
         if self.close_prompt {
