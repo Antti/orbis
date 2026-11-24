@@ -39,11 +39,18 @@ impl PackageInfo {
     pub fn can_check_update(&self) -> bool {
         self.update_error.is_none() && self.missing_keys == 0
     }
+
+    pub fn update_rejection(&self) -> Option<&install::InstallError> {
+        self.update_error
+            .as_ref()
+            .filter(|error| !matches!(error, install::InstallError::MissingUpdateKey { .. }))
+    }
 }
 
 #[derive(Debug)]
 pub enum Operation {
-    Inspect,
+    /// Inspect a package, optionally for installation into an open game folder.
+    Inspect(Option<PathBuf>),
     Verify {
         metadata_only: bool,
     },
@@ -83,7 +90,7 @@ pub enum Operation {
 impl Operation {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Inspect => "Reading package",
+            Self::Inspect(_) => "Reading package",
             Self::Verify { .. } => "Verifying package",
             Self::PreviewExport { .. } => "Checking export",
             Self::Export(_) => "Exporting merged game",
@@ -105,7 +112,7 @@ impl Operation {
             Self::PreviewExport { .. } | Self::Export(_) => {
                 "Choose an original base with a managed separate update, or the base alone. Close the emulator. Resume checks existing files and preserves conflicts. Do not use an export until verification succeeds."
             }
-            Self::Inspect => {
+            Self::Inspect(_) => {
                 "Choose a PlayStation 4 PKG file. Other .pkg formats are not supported."
             }
             Self::Extract { .. } => {
@@ -341,7 +348,7 @@ fn execute(
         pkg.load_passcode(passcode.bytes())?;
     }
     let _ = pkg.load_entry_keys();
-    if matches!(operation, Operation::Inspect) {
+    if let Operation::Inspect(update_base) = operation {
         let header = pkg.header();
         let mut info = PackageInfo {
             path: path.to_owned(),
@@ -384,9 +391,24 @@ fn execute(
             // A malformed table can declare billions of absent entries. Stop
             // at the first error; param_sfo_data already reports that failure.
             let Ok((_, entry)) = entry else { break };
-            if entry.is_encrypted() && !pkg.has_entry_key(entry.key_index()) {
+            let slot = entry.key_index();
+            if entry.is_encrypted() && !pkg.has_entry_key(slot) {
                 info.missing_keys += 1;
+                if slot >= orbis_pkg::passcode::ENTRY_KEY_COUNT && info.update_rejection().is_none()
+                {
+                    info.update_error = Some(install::InstallError::UnsupportedUpdateKey { slot });
+                }
             }
+        }
+        // Unlocked updates go straight to the full preview. For locked updates,
+        // check the header against the base before asking for a passcode.
+        if let Some(base) = update_base
+            && info.missing_keys > 0
+            && info.update_rejection().is_none()
+            && let Err(error) = install::base_metadata(&base)
+                .and_then(|base| install::check_update_identity(&pkg, &base))
+        {
+            info.update_error = Some(error);
         }
         if let Ok((entry, _)) = pkg.find_entry(EntryId::Icon0Png)
             && entry.data_size() <= 4 * 1024 * 1024
@@ -411,7 +433,7 @@ fn execute(
         return Err(ExtractError::Cancelled.into());
     }
     match operation {
-        Operation::Inspect
+        Operation::Inspect(_)
         | Operation::Verify { .. }
         | Operation::PreviewExport { .. }
         | Operation::Export(_)
@@ -425,7 +447,9 @@ fn execute(
                 .with_resume(resume)
                 .extract_with_options(&output, &ExtractOptions::default())?;
             let incomplete = !report.skipped.is_empty();
-            let is_base = !incomplete && install::base_metadata(&output).is_ok();
+            let is_base = !incomplete
+                && install::base_metadata(&output)
+                    .is_ok_and(|base| base.content_id == pkg.header().content_id().as_str());
             Ok(Outcome::Finished {
                 title: if incomplete {
                     "Extraction incomplete"

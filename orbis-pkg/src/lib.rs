@@ -79,7 +79,7 @@ pub struct Pkg<R: AsRef<[u8]>> {
     raw: R,
     header: PkgHeader,
     entry_key3: Vec<u8>,
-    passcode_keys: Option<[[u8; 32]; 7]>,
+    passcode_keys: Option<[[u8; 32]; passcode::ENTRY_KEY_COUNT]>,
     ekpfs: Vec<u8>,
 }
 

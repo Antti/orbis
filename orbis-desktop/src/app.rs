@@ -123,7 +123,15 @@ impl OrbisApp {
 
     fn open_package(&mut self, path: PathBuf, base: UpdateBase) {
         self.reset_package(base);
-        self.start(path, Operation::Inspect);
+        self.inspect_package(path);
+    }
+
+    fn inspect_package(&mut self, path: PathBuf) {
+        let update_base = match &self.base {
+            UpdateBase::Game(base) => Some(base.clone()),
+            UpdateBase::Pick(_) => None,
+        };
+        self.start(path, Operation::Inspect(update_base));
     }
 
     fn preview_update(&mut self) {

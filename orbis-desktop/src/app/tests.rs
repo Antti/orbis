@@ -458,6 +458,31 @@ fn replacing_a_pkg_in_the_same_game_rechecks_the_selected_install_mode() {
     assert_eq!(app.mode, InstallMode::Separate);
 }
 
+fn assert_rejected_locked_update(app: &mut OrbisApp, reason: &str) {
+    assert_eq!(app.package.as_ref().unwrap().missing_keys, 1);
+    assert!(app.preview.is_none());
+    let tree = frame(app, Default::default());
+    assert!(
+        tree.nodes
+            .iter()
+            .any(|(_, n)| n.value().is_some_and(|v| v.contains(reason))),
+        "expected {reason}"
+    );
+    assert!(
+        tree.nodes
+            .iter()
+            .any(|(_, n)| n.label() == Some("Choose another PKG…") && !n.is_disabled()),
+        "expected {reason}"
+    );
+    assert!(
+        !tree.nodes.iter().any(|(_, n)| [n.label(), n.value()]
+            .into_iter()
+            .flatten()
+            .any(|s| s.contains("passcode"))),
+        "unexpected passcode prompt for {reason}"
+    );
+}
+
 #[test]
 fn incompatible_packages_with_locked_entries_offer_a_replacement_without_a_passcode() {
     use crate::common;
@@ -474,38 +499,57 @@ fn incompatible_packages_with_locked_entries_offer_a_replacement_without_a_passc
     let mut wrong_category = features::passcoded_pkg_with_entry(2, EntryId::PfsImageKey);
     let sfo = common::sfo("CUSA00000", "gd", "01.12");
     wrong_category[0x1a00..0x1a00 + sfo.len()].copy_from_slice(&sfo);
+    let mut unsupported_sfo = features::passcoded_pkg(2);
+    common::be32(&mut unsupported_sfo, 0x104c, 7 << 12);
+    let mut unsupported_entry = features::passcoded_pkg_with_entry(2, EntryId::PfsImageKey);
+    common::be32(&mut unsupported_entry, 0x102c, 7 << 12);
 
     for (file, bytes, reason) in [
         ("base.pkg", base_pkg, "expected a PS4 full-file"),
         ("delta.pkg", delta, "binary delta packages"),
         ("category.pkg", wrong_category, "CATEGORY must be gp"),
+        (
+            "unsupported-sfo.pkg",
+            unsupported_sfo,
+            "unsupported key slot 7",
+        ),
+        (
+            "unsupported-entry.pkg",
+            unsupported_entry,
+            "unsupported key slot 7",
+        ),
     ] {
         let path = temp.path().join(file);
         fs::write(&path, bytes).unwrap();
         app.open_package(path, UpdateBase::Game(base.clone()));
         finish(&mut app);
-        assert_eq!(app.package.as_ref().unwrap().missing_keys, 1);
-        assert!(app.preview.is_none());
-        let tree = frame(&mut app, Default::default());
-        assert!(
-            tree.nodes
-                .iter()
-                .any(|(_, n)| n.value().is_some_and(|v| v.contains(reason))),
-            "{file}"
-        );
-        assert!(
-            tree.nodes
-                .iter()
-                .any(|(_, n)| n.label() == Some("Choose another PKG…") && !n.is_disabled()),
-            "{file}"
-        );
-        assert!(
-            !tree.nodes.iter().any(|(_, n)| [n.label(), n.value()]
-                .into_iter()
-                .flatten()
-                .any(|s| s.contains("passcode"))),
-            "{file} should not request a passcode"
-        );
+        assert_rejected_locked_update(&mut app, reason);
+    }
+}
+
+#[test]
+fn locked_updates_for_another_edition_are_rejected_before_requesting_a_passcode() {
+    use crate::common;
+    let temp = tempfile::tempdir().unwrap();
+    let base = common::base_game(temp.path());
+    let mut metadata = common::sfo("CUSA00000", "gd", "01.00");
+    let region = metadata
+        .windows(7)
+        .position(|bytes| bytes == b"UP0000-")
+        .unwrap();
+    metadata[region..region + 2].copy_from_slice(b"EP");
+    fs::write(base.join("sce_sys/param.sfo"), metadata).unwrap();
+
+    let mut app = OrbisApp::default();
+    for entry in [
+        orbis_pkg::entry::EntryId::ParamSfo,
+        orbis_pkg::entry::EntryId::PfsImageKey,
+    ] {
+        let path = temp.path().join("locked.pkg");
+        fs::write(&path, features::passcoded_pkg_with_entry(2, entry)).unwrap();
+        app.open_package(path, UpdateBase::Game(base.clone()));
+        finish(&mut app);
+        assert_rejected_locked_update(&mut app, "does not match");
     }
 }
 

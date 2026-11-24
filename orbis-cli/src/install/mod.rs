@@ -45,6 +45,8 @@ pub enum InstallError {
     Invalid { message: String },
     #[snafu(display("update metadata needs a decryption key for slot {slot}"))]
     MissingUpdateKey { slot: usize },
+    #[snafu(display("update metadata uses unsupported key slot {slot}"))]
+    UnsupportedUpdateKey { slot: usize },
     #[snafu(display("installation filesystem operation failed"))]
     Io { source: std::io::Error },
     #[snafu(display("invalid installation metadata"))]
@@ -53,6 +55,15 @@ pub enum InstallError {
     Extract { source: ExtractError },
     #[snafu(display("invalid installation state"))]
     State { source: serde_json::Error },
+}
+impl InstallError {
+    fn missing_update_key(slot: usize) -> Self {
+        if slot < orbis_pkg::passcode::ENTRY_KEY_COUNT {
+            Self::MissingUpdateKey { slot }
+        } else {
+            Self::UnsupportedUpdateKey { slot }
+        }
+    }
 }
 impl From<std::io::Error> for InstallError {
     fn from(source: std::io::Error) -> Self {
@@ -212,7 +223,7 @@ pub fn update_metadata<R: AsRef<[u8]>>(pkg: &Pkg<R>) -> Result<AppMetadata> {
         .map_err(|e| match e {
             ParamSfoError::ReadData {
                 source: EntryDataError::NoDecryptionKey { key_index },
-            } => InstallError::MissingUpdateKey { slot: key_index },
+            } => InstallError::missing_update_key(key_index),
             other => invalid(other.to_string()),
         })?
         .ok_or_else(|| invalid("update has no PARAM.SFO"))?;
@@ -226,6 +237,17 @@ pub fn update_metadata<R: AsRef<[u8]>>(pkg: &Pkg<R>) -> Result<AppMetadata> {
     Ok(metadata)
 }
 
+/// Checks the header against the extracted base even when PARAM.SFO is locked.
+pub fn check_update_identity<R: AsRef<[u8]>>(pkg: &Pkg<R>, base: &AppMetadata) -> Result<()> {
+    let id = pkg.header().content_id();
+    if id.as_str() != base.content_id || id.title_id() != base.title_id {
+        return Err(invalid(
+            "update does not match the base game's title and content ID",
+        ));
+    }
+    Ok(())
+}
+
 fn make_plan<R: AsRef<[u8]> + Sync, P: ExtractProgress>(
     pkg: &Pkg<R>,
     location: &Layout,
@@ -236,12 +258,8 @@ fn make_plan<R: AsRef<[u8]> + Sync, P: ExtractProgress>(
     }
     location.require_recovered()?;
     let base = location.base_metadata()?;
+    check_update_identity(pkg, &base)?;
     let update = update_metadata(pkg)?;
-    if update.content_id != base.content_id || update.title_id != base.title_id {
-        return Err(invalid(
-            "update does not match the base game's title and content ID",
-        ));
-    }
     let state = location.state()?;
     let current = location.active_manifest(&state, &base, progress)?;
     location.verify_previous(&state, &base, progress)?;
@@ -256,12 +274,14 @@ fn make_plan<R: AsRef<[u8]> + Sync, P: ExtractProgress>(
     }
     let extractor = PkgExtractor::new(pkg, SilentProgress, false);
     let entries = extractor.list_entries()?;
+    // Report an unsupported slot before any slot a passcode could unlock.
     if let Some(slot) = entries
         .iter()
         .filter_map(|entry| entry.key_index)
-        .find(|&slot| !pkg.has_entry_key(slot))
+        .filter(|&slot| !pkg.has_entry_key(slot))
+        .max()
     {
-        return Err(InstallError::MissingUpdateKey { slot });
+        return Err(InstallError::missing_update_key(slot));
     }
     if entries.iter().any(|e| e.path.is_none()) {
         return Err(invalid(

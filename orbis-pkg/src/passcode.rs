@@ -4,6 +4,9 @@ use crate::{Pkg, entry::EntryId};
 use sha2::{Digest, Sha256};
 use std::fmt;
 
+/// Number of entry-key slots derivable from a known package passcode.
+pub const ENTRY_KEY_COUNT: usize = 7;
+
 #[derive(Debug)]
 pub struct PasscodeError;
 impl fmt::Display for PasscodeError {
@@ -34,7 +37,7 @@ impl<R: AsRef<[u8]>> Pkg<R> {
         if data[..32] != id_hash[..] {
             return Err(PasscodeError);
         }
-        let mut keys = [[0; 32]; 7];
+        let mut keys = [[0; 32]; ENTRY_KEY_COUNT];
         let mut difference = 0u8;
         for (i, key) in keys.iter_mut().enumerate() {
             let mut hash = Sha256::new();

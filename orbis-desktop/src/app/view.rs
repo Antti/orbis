@@ -121,8 +121,7 @@ impl OrbisApp {
         }
         let Some(info) = &self.package else { return };
         if matches!(self.base, UpdateBase::Game(_))
-            && let Some(error) = &info.update_error
-            && !matches!(error, InstallError::MissingUpdateKey { .. })
+            && let Some(error) = info.update_rejection()
         {
             warning(ui, &error.to_string());
             return;
@@ -135,13 +134,16 @@ impl OrbisApp {
             } else {
                 "entries"
             };
-            let guidance = if needs_passcode {
-                "Validate the package passcode before installing this update."
-            } else if self.action == Action::Update {
-                "The validated passcode could not unlock this update."
-            } else {
-                "Extraction may be incomplete."
-            };
+            let guidance =
+                if let Some(InstallError::UnsupportedUpdateKey { slot }) = &info.update_error {
+                    format!("Key slot {slot} is unsupported. Extraction may be incomplete.")
+                } else if needs_passcode {
+                    "Validate the package passcode before installing this update.".into()
+                } else if self.action == Action::Update {
+                    "The validated passcode could not unlock this update.".into()
+                } else {
+                    "Extraction may be incomplete.".into()
+                };
             warning(
                 ui,
                 &format!(

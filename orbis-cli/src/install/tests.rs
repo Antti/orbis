@@ -263,6 +263,24 @@ fn confirmed_rollback_preserves_a_separate_installation_that_now_needs_attention
 }
 
 #[test]
+fn preview_reports_an_unsupported_key_slot_before_a_recoverable_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = base_game(tmp.path());
+    let mut bytes = update("01.01", "file", b"new");
+    // The first two entries are locked, while the update SFO remains readable.
+    for (entry, slot) in [(0x1000, 2), (0x1020, 7)] {
+        be32(&mut bytes, entry + 8, 0x8000_0000);
+        be32(&mut bytes, entry + 12, slot << 12);
+    }
+    let pkg = Pkg::parse(bytes).unwrap();
+    assert!(matches!(
+        plan(&pkg, &base),
+        Err(InstallError::UnsupportedUpdateKey { slot: 7 })
+    ));
+    assert!(!manager(&base).exists());
+}
+
+#[test]
 fn rejects_wrong_titles_categories_and_delta_packages() {
     let tmp = tempfile::tempdir().unwrap();
     let base = base_game(tmp.path());
