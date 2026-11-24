@@ -5,7 +5,10 @@
 //! and retains original files for restoration. Stop the emulator first.
 mod compatibility;
 use compatibility::check_update_version;
-pub use compatibility::{UpdateCheck, check_update_identity, inspect_update, update_metadata};
+pub use compatibility::{
+    LockedUpdate, UpdateCheck, UpdateReadiness, check_update_identity, inspect_update,
+    update_metadata,
+};
 mod directory;
 mod export;
 mod merge;
@@ -50,6 +53,10 @@ pub enum InstallError {
     MissingUpdateKey { slot: usize },
     #[snafu(display("update metadata uses unsupported key slot {slot}"))]
     UnsupportedUpdateKey { slot: usize },
+    #[snafu(display("cannot unlock update metadata"))]
+    PasscodeMetadata {
+        source: orbis_pkg::passcode::PasscodeValidationError,
+    },
     #[snafu(display("installation filesystem operation failed"))]
     Io { source: std::io::Error },
     #[snafu(display("invalid installation metadata"))]
@@ -214,10 +221,11 @@ fn make_plan<R: AsRef<[u8]> + Sync, P: ExtractProgress>(
     location.require_recovered()?;
     let base = location.base_metadata()?;
     check_update_identity(pkg, &base)?;
-    let update = compatibility::inspect_with_target(pkg, |version| {
-        compatibility::check_locked_version(location, &base, version)
-    })
-    .into_ready()?;
+    let package = inspect_update(pkg);
+    if let UpdateReadiness::NeedsPasscode(locked) = &package.readiness {
+        locked.check_version(location, &base)?;
+    }
+    let update = package.readiness.into_ready()?;
     let state = location.state()?;
     let current = location.active_manifest(&state, &base, progress)?;
     location.verify_previous(&state, &base, progress)?;

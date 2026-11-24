@@ -9,7 +9,7 @@ mod game;
 mod tests;
 mod tools;
 mod view;
-use orbis_cli::install::{InstallMode, InstallPlan};
+use orbis_cli::install::{InstallError, InstallMode, InstallPlan, UpdateReadiness};
 use std::{
     path::PathBuf,
     sync::{Arc, atomic::Ordering},
@@ -22,6 +22,14 @@ enum Action {
     Extract,
     Update,
     Verify,
+}
+
+enum UpdateStep<'a> {
+    Preview,
+    CheckTarget,
+    EnterPasscode,
+    PackageRejected(&'a InstallError),
+    TargetRejected(&'a InstallError),
 }
 
 struct Notice {
@@ -62,6 +70,8 @@ pub struct OrbisApp {
     folder_name: String,
     resume: bool,
     base: UpdateBase,
+    // The result belongs to the current folder and mode. None means it needs checking.
+    target_check: Option<Result<(), InstallError>>,
     preview: Option<InstallPlan>,
     mode: InstallMode,
     game: Option<game::GameFolder>,
@@ -115,6 +125,7 @@ impl OrbisApp {
             self.mode = InstallMode::Separate;
         }
         self.base = base;
+        self.target_check = None;
         self.game = None;
         self.folder_name.clear();
         self.resume = false;
@@ -123,38 +134,52 @@ impl OrbisApp {
 
     fn open_package(&mut self, path: PathBuf, base: UpdateBase) {
         self.reset_package(base);
-        self.inspect_package(path);
+        self.start(path, Operation::Inspect);
     }
 
-    fn inspect_package(&mut self, path: PathBuf) {
-        self.start(path, Operation::Inspect(self.base.path().cloned()));
-    }
-
-    fn update_base_changed(&mut self) {
-        self.preview = None;
-        if let Some(info) = &self.package
-            && info.update.missing_keys > 0
-        {
-            self.refreshing_package = true;
-            self.inspect_package(info.path.clone());
+    fn update_step<'a>(&'a self, readiness: &'a UpdateReadiness) -> UpdateStep<'a> {
+        match readiness {
+            UpdateReadiness::Ready(_) => UpdateStep::Preview,
+            UpdateReadiness::Rejected(error) => UpdateStep::PackageRejected(error),
+            UpdateReadiness::NeedsPasscode(_) => match &self.target_check {
+                Some(Err(error)) => UpdateStep::TargetRejected(error),
+                None if self.base.path().is_some() => UpdateStep::CheckTarget,
+                _ => UpdateStep::EnterPasscode,
+            },
         }
     }
 
-    fn preview_update(&mut self) {
-        if let Some(info) = self
-            .package
-            .as_ref()
-            .filter(|info| info.update.can_check_update())
-            && let Some(base) = self.base.path().cloned()
+    // A new folder, mode, or return from the game view invalidates the preview
+    // and the locked update's target check. Package facts and credentials survive.
+    fn update_target_changed(&mut self) {
+        self.preview = None;
+        self.target_check = None;
+        if let Some(info) = &self.package
+            && (matches!(self.base, UpdateBase::Game(_))
+                || matches!(info.update.readiness, UpdateReadiness::NeedsPasscode(_)))
         {
-            self.preview = None;
-            self.start(
-                info.path.clone(),
-                Operation::PreviewUpdate {
-                    base,
-                    mode: self.mode,
-                },
-            );
+            self.check_update();
+        }
+    }
+
+    fn check_update(&mut self) {
+        let (Some(info), Some(base)) = (&self.package, self.base.path().cloned()) else {
+            return;
+        };
+        let mode = self.mode;
+        self.preview = None;
+        match info.update.readiness {
+            UpdateReadiness::Ready(_) => {
+                self.start(info.path.clone(), Operation::PreviewUpdate { base, mode })
+            }
+            UpdateReadiness::NeedsPasscode(update) => {
+                self.target_check = None;
+                self.start(
+                    PathBuf::new(),
+                    Operation::CheckUpdateTarget { update, base, mode },
+                );
+            }
+            UpdateReadiness::Rejected(_) => {}
         }
     }
 
@@ -218,22 +243,26 @@ impl OrbisApp {
                 if from_game {
                     self.action = Action::Update;
                 } else if !self.refreshing_package {
-                    self.action = if info.update.package_error().is_none() {
+                    self.action = if info.update.readiness.has_update_metadata() {
                         Action::Update
                     } else {
                         Action::Extract
                     };
                     self.folder_name = operations::suggested_folder(&info);
                     self.parent = info.path.parent().map(PathBuf::from);
-                } else if self.action == Action::Update && info.update.package_error().is_some() {
+                } else if self.action == Action::Update
+                    && !info.update.readiness.has_update_metadata()
+                {
                     self.action = Action::Extract;
                 }
                 self.refreshing_package = false;
+                self.target_check = None;
                 self.package = Some(*info);
-                if from_game && !cancelled && !self.close_after_job {
-                    self.preview_update();
+                if !cancelled && !self.close_after_job {
+                    self.update_target_changed();
                 }
             }
+            Ok(Outcome::UpdateTarget(result)) => self.target_check = Some(result),
             Ok(Outcome::Verified(report)) => {
                 self.notice = Some(Notice {
                     title: report.title().into(),

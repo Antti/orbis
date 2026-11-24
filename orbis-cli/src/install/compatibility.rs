@@ -1,117 +1,137 @@
 use super::*;
+use orbis_pkg::header::ContentId;
 
-/// What can be established about an update before opening its filesystem.
+/// Package facts stay valid when the user changes the target folder or installation mode.
 #[derive(Debug)]
 pub struct UpdateCheck {
-    metadata: Result<AppMetadata>,
     pub missing_keys: usize,
-    highest_missing_slot: Option<usize>,
-    target_error: Option<InstallError>,
+    pub readiness: UpdateReadiness,
 }
 
-impl UpdateCheck {
-    /// Package metadata alone controls whether the standalone update tab is available.
-    pub fn package_error(&self) -> Option<&InstallError> {
-        self.metadata.as_ref().err()
-    }
+/// Readiness for a full install preview, independent of the selected game.
+#[derive(Debug)]
+pub enum UpdateReadiness {
+    Ready(AppMetadata),
+    NeedsPasscode(LockedUpdate),
+    Rejected(InstallError),
+}
 
-    /// A reason that entering a passcode for this package and game cannot resolve.
+impl UpdateReadiness {
     pub fn rejection(&self) -> Option<&InstallError> {
-        self.package_error()
-            .filter(|error| !matches!(error, InstallError::MissingUpdateKey { .. }))
-            .or(self.target_error.as_ref())
-    }
-
-    pub fn needs_passcode(&self) -> bool {
-        self.missing_keys > 0 && self.rejection().is_none()
-    }
-
-    pub fn can_check_update(&self) -> bool {
-        self.metadata.is_ok() && self.missing_keys == 0 && self.target_error.is_none()
-    }
-
-    /// Requires every metadata entry to be readable before opening the filesystem.
-    pub fn into_ready(self) -> Result<AppMetadata> {
-        if let Some(error) = self.target_error {
-            return Err(error);
+        match self {
+            Self::Rejected(error) => Some(error),
+            _ => None,
         }
-        let metadata = self.metadata?;
-        if let Some(slot) = self.highest_missing_slot {
-            return Err(InstallError::missing_update_key(slot));
+    }
+
+    /// Whether a readable PARAM.SFO identifies a supported update.
+    pub fn has_update_metadata(&self) -> bool {
+        match self {
+            Self::Ready(_) => true,
+            Self::NeedsPasscode(locked) => locked.version.is_some(),
+            Self::Rejected(_) => false,
         }
-        Ok(metadata)
+    }
+
+    /// Require readable entries before opening the filesystem. For locked updates,
+    /// report any known target conflict first. The full planner checks the unlocked PKG.
+    pub fn require_readable_for(self, base: &Path, mode: InstallMode) -> Result<AppMetadata> {
+        if let Self::NeedsPasscode(locked) = &self {
+            locked.check_target(base, mode)?;
+        }
+        self.into_ready()
+    }
+
+    pub(super) fn into_ready(self) -> Result<AppMetadata> {
+        match self {
+            Self::Ready(metadata) => Ok(metadata),
+            Self::NeedsPasscode(locked) => {
+                Err(InstallError::MissingUpdateKey { slot: locked.slot })
+            }
+            Self::Rejected(error) => Err(error),
+        }
     }
 }
 
-/// Checks all locked entries together. When a passcode might help, check the
-/// selected game using only its installation metadata. Preview verifies file contents.
-pub fn inspect_update<R: AsRef<[u8]>>(pkg: &Pkg<R>, base: Option<&Path>) -> UpdateCheck {
-    inspect_with_target(pkg, |version| {
-        let Some(path) = base else { return Ok(()) };
+/// What can be checked against a game before the remaining entries are unlocked.
+#[derive(Debug, Clone, Copy)]
+pub struct LockedUpdate {
+    id: ContentId,
+    version: Option<AppVersion>,
+    slot: usize,
+}
+
+impl LockedUpdate {
+    /// Reads installation metadata under a shared lock. Full preview verifies file contents.
+    pub fn check_target(&self, path: &Path, mode: InstallMode) -> Result<()> {
         let location = Layout::open(path, false)?;
         let _guard = super::merge::read_lock(&location)?;
         location.require_recovered()?;
+        if mode == InstallMode::Merge {
+            super::merge::require_original_base(&location)?;
+        }
         let base = location.base_metadata()?;
-        check_update_identity(pkg, &base)?;
-        check_locked_version(&location, &base, version)
-    })
+        check_identity(&self.id, &base)?;
+        self.check_version(&location, &base)
+    }
+
+    pub(super) fn check_version(&self, location: &Layout, base: &AppMetadata) -> Result<()> {
+        let active = location.open_active_manifest(&location.state()?)?;
+        let installed = match active {
+            Some((dir, manifest)) => storage::validate_manifest_metadata(&dir, &manifest, base)?,
+            None => base.version,
+        };
+        if let Some(version) = self.version {
+            check_update_version(version, installed)?;
+        }
+        Ok(())
+    }
 }
 
-// Defer opening the target until a passcode could change the outcome. The full
-// planner supplies its existing layout and lock when it calls this check.
-pub(super) fn inspect_with_target<R: AsRef<[u8]>>(
-    pkg: &Pkg<R>,
-    check_target: impl FnOnce(Option<AppVersion>) -> Result<()>,
-) -> UpdateCheck {
+/// Classifies all missing keys before suggesting a passcode. Malformed tables are
+/// reported by update_metadata, which also stops at the first invalid entry.
+pub fn inspect_update<R: AsRef<[u8]>>(pkg: &Pkg<R>) -> UpdateCheck {
     let mut missing_keys = 0;
-    let mut highest_missing_slot = None;
-    // param_sfo_data reports malformed tables. Iterating past the first invalid
-    // entry could walk billions of absent entries from a corrupt header.
+    let mut highest_slot = None;
     for (_, entry) in pkg.entries().map_while(|entry| entry.ok()) {
         let slot = entry.key_index();
         if entry.is_encrypted() && !pkg.has_entry_key(slot) {
             missing_keys += 1;
-            highest_missing_slot = highest_missing_slot.max(Some(slot));
+            highest_slot = highest_slot.max(Some(slot));
         }
     }
-    let mut metadata = update_metadata(pkg);
-    if let Some(slot) = highest_missing_slot.filter(|&s| s >= orbis_pkg::passcode::ENTRY_KEY_COUNT)
-        && matches!(
-            metadata,
-            Ok(_)
-                | Err(InstallError::MissingUpdateKey { .. }
-                    | InstallError::UnsupportedUpdateKey { .. })
-        )
-    {
-        metadata = Err(InstallError::UnsupportedUpdateKey { slot });
-    }
-    let mut check = UpdateCheck {
-        metadata,
+    UpdateCheck {
         missing_keys,
-        highest_missing_slot,
-        target_error: None,
-    };
-    if check.needs_passcode() {
-        let version = check.metadata.as_ref().ok().map(|m| m.version);
-        check.target_error = check_target(version).err();
+        readiness: classify_update(pkg, highest_slot),
     }
-    check
 }
 
-pub(super) fn check_locked_version(
-    location: &Layout,
-    base: &AppMetadata,
-    version: Option<AppVersion>,
-) -> Result<()> {
-    let active = location.open_active_manifest(&location.state()?)?;
-    let installed = match active {
-        Some((dir, manifest)) => storage::validate_manifest_metadata(&dir, &manifest, base)?,
-        None => base.version,
+fn classify_update<R: AsRef<[u8]>>(pkg: &Pkg<R>, missing_slot: Option<usize>) -> UpdateReadiness {
+    let metadata = update_metadata(pkg);
+    let Some(slot) = missing_slot else {
+        return match metadata {
+            Ok(metadata) => UpdateReadiness::Ready(metadata),
+            Err(error) => UpdateReadiness::Rejected(error),
+        };
     };
-    if let Some(version) = version {
-        check_update_version(version, installed)?;
+    let version = match metadata {
+        Ok(metadata) => Some(metadata.version),
+        Err(InstallError::MissingUpdateKey { .. } | InstallError::UnsupportedUpdateKey { .. }) => {
+            None
+        }
+        Err(error) => return UpdateReadiness::Rejected(error),
+    };
+    if slot >= orbis_pkg::passcode::ENTRY_KEY_COUNT {
+        return UpdateReadiness::Rejected(InstallError::UnsupportedUpdateKey { slot });
     }
-    Ok(())
+    match pkg.check_passcode_metadata() {
+        Ok(()) => UpdateReadiness::NeedsPasscode(LockedUpdate {
+            id: *pkg.header().content_id(),
+            version,
+            slot,
+        }),
+        Err(source) => UpdateReadiness::Rejected(InstallError::PasscodeMetadata { source }),
+    }
 }
 
 pub(super) fn check_update_version(update: AppVersion, installed: AppVersion) -> Result<()> {
@@ -162,7 +182,10 @@ pub fn update_metadata<R: AsRef<[u8]>>(pkg: &Pkg<R>) -> Result<AppMetadata> {
 
 /// Checks the header against the extracted base even when PARAM.SFO is locked.
 pub fn check_update_identity<R: AsRef<[u8]>>(pkg: &Pkg<R>, base: &AppMetadata) -> Result<()> {
-    let id = pkg.header().content_id();
+    check_identity(pkg.header().content_id(), base)
+}
+
+fn check_identity(id: &ContentId, base: &AppMetadata) -> Result<()> {
     if id.as_str() != base.content_id || id.title_id() != base.title_id {
         return Err(invalid(
             "update does not match the base game's title and content ID",

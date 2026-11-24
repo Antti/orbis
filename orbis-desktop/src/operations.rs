@@ -36,8 +36,12 @@ pub struct PackageInfo {
 
 #[derive(Debug)]
 pub enum Operation {
-    /// Inspect a package, optionally for installation into an open game folder.
-    Inspect(Option<PathBuf>),
+    Inspect,
+    CheckUpdateTarget {
+        update: install::LockedUpdate,
+        base: PathBuf,
+        mode: install::InstallMode,
+    },
     Verify {
         metadata_only: bool,
     },
@@ -77,12 +81,12 @@ pub enum Operation {
 impl Operation {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Inspect(_) => "Reading package",
+            Self::Inspect => "Reading package",
             Self::Verify { .. } => "Verifying package",
             Self::PreviewExport { .. } => "Checking export",
             Self::Export(_) => "Exporting merged game",
             Self::Extract { .. } => "Extracting package",
-            Self::PreviewUpdate { .. } => "Checking update",
+            Self::CheckUpdateTarget { .. } | Self::PreviewUpdate { .. } => "Checking update",
             Self::InstallUpdate { .. } => "Installing update",
             Self::CheckGame { .. } => "Checking game folder",
             Self::RestoreBase { .. } => "Restoring base game",
@@ -99,13 +103,13 @@ impl Operation {
             Self::PreviewExport { .. } | Self::Export(_) => {
                 "Choose an original base with a managed separate update, or the base alone. Close the emulator. Resume checks existing files and preserves conflicts. Do not use an export until verification succeeds."
             }
-            Self::Inspect(_) => {
+            Self::Inspect => {
                 "Choose a PlayStation 4 PKG file. Other .pkg formats are not supported."
             }
             Self::Extract { .. } => {
                 "Completed files remain in the destination. To retry, select the same folder and enable Resume. Conflicting files are preserved; choose a new folder if needed."
             }
-            Self::PreviewUpdate { .. } => {
+            Self::CheckUpdateTarget { .. } | Self::PreviewUpdate { .. } => {
                 "Use a newer full-file update PKG with the same title and content IDs as the base game."
             }
             Self::CheckGame { .. } => {
@@ -138,6 +142,7 @@ impl OutputFolder {
 #[derive(Debug)]
 pub enum Outcome {
     Inspected(Box<PackageInfo>),
+    UpdateTarget(std::result::Result<(), install::InstallError>),
     Verified(Box<VerificationReport>),
     ExportPreview(Box<install::ExportPreview>),
     Preview(install::InstallPlan),
@@ -294,6 +299,9 @@ fn execute(
                 incomplete,
             });
         }
+        Operation::CheckUpdateTarget { update, base, mode } => {
+            return Ok(Outcome::UpdateTarget(update.check_target(base, *mode)));
+        }
         Operation::CheckGame { base } => return game_status(base, progress),
         Operation::RollbackSeparate { base, plan } => {
             plan.apply(base, progress)?;
@@ -332,10 +340,10 @@ fn execute(
     // during an operation. The GUI never writes to the input package.
     let mut pkg = unsafe { orbis_cli::inspect_pkg(path)? };
     if let Some(passcode) = passcode {
-        pkg.load_passcode(passcode.bytes())?;
+        pkg.load_passcode_with_diagnostics(passcode.bytes())?;
     }
     let _ = pkg.load_entry_keys();
-    if let Operation::Inspect(update_base) = operation {
+    if matches!(operation, Operation::Inspect) {
         let header = pkg.header();
         let mut info = PackageInfo {
             path: path.to_owned(),
@@ -354,7 +362,7 @@ fn execute(
             artwork: None,
             kind: header.content_type_name().to_owned(),
             size: header.pkg_size(),
-            update: install::inspect_update(&pkg, update_base.as_deref()),
+            update: install::inspect_update(&pkg),
             warnings: Vec::new(),
         };
         match pkg.param_sfo_data() {
@@ -382,10 +390,15 @@ fn execute(
         return Ok(Outcome::Inspected(Box::new(info)));
     }
 
-    if let Operation::PreviewUpdate { base, .. } | Operation::InstallUpdate { base, .. } =
-        &operation
-    {
-        install::inspect_update(&pkg, Some(base)).into_ready()?;
+    let target = match &operation {
+        Operation::PreviewUpdate { base, mode } => Some((base, *mode)),
+        Operation::InstallUpdate { base, preview } => Some((base, preview.mode)),
+        _ => None,
+    };
+    if let Some((base, mode)) = target {
+        install::inspect_update(&pkg)
+            .readiness
+            .require_readable_for(base, mode)?;
     }
     let image = pkg.get_pfs_image().ok_or(ExtractError::NoPfsImage)?;
     if orbis_pfs::header::read_mode(image.data)?.is_encrypted() {
@@ -395,7 +408,8 @@ fn execute(
         return Err(ExtractError::Cancelled.into());
     }
     match operation {
-        Operation::Inspect(_)
+        Operation::Inspect
+        | Operation::CheckUpdateTarget { .. }
         | Operation::Verify { .. }
         | Operation::PreviewExport { .. }
         | Operation::Export(_)

@@ -156,12 +156,7 @@ pub(super) fn plan<R: AsRef<[u8]> + Sync>(
     let _guard = read_lock(&layout)?;
     make_plan(pkg, &layout, &progress)
 }
-fn make_plan<R: AsRef<[u8]> + Sync>(
-    pkg: &Pkg<R>,
-    layout: &Layout,
-    progress: &impl ExtractProgress,
-) -> Result<InstallPlan> {
-    layout.require_recovered()?;
+pub(super) fn require_original_base(layout: &Layout) -> Result<()> {
     if present(layout)? {
         return Err(invalid(
             "restore the merged base before applying another update",
@@ -177,6 +172,16 @@ fn make_plan<R: AsRef<[u8]> + Sync>(
             "merge requires an original base without a separate update; roll back or move the sibling -UPDATE folder first",
         ));
     }
+    Ok(())
+}
+
+fn make_plan<R: AsRef<[u8]> + Sync>(
+    pkg: &Pkg<R>,
+    layout: &Layout,
+    progress: &impl ExtractProgress,
+) -> Result<InstallPlan> {
+    layout.require_recovered()?;
+    require_original_base(layout)?;
     let mut plan = super::make_plan(pkg, layout, progress)?;
     progress.phase("Checking game paths");
     let base = layout.base_dir()?;

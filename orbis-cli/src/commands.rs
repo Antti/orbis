@@ -172,7 +172,7 @@ fn open(path: &Path, passcode_file: Option<&Path>) -> Result<Package> {
             .strip_suffix(b"\r\n")
             .or_else(|| bytes.strip_suffix(b"\n"))
             .unwrap_or(&bytes);
-        let result = pkg.load_passcode(passcode);
+        let result = pkg.load_passcode_with_diagnostics(passcode);
         bytes.fill(0);
         result?;
     }

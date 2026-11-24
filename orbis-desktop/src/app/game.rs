@@ -107,6 +107,7 @@ impl OrbisApp {
                 ui.add_enabled_ui(self.job.is_none() && self.notice.is_none(), |ui| {
                     if ui.button("Back").clicked() {
                         self.game = None;
+                        self.update_target_changed();
                     } else if ui.button("Refresh").clicked() {
                         self.open_game(base);
                     }

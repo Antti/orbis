@@ -451,6 +451,63 @@ fn install_reports_an_unsupported_slot_even_when_param_sfo_needs_a_passcode() {
 }
 
 #[test]
+fn locked_merge_reports_the_active_separate_update() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = base_game(dir.path());
+    let active = orbis_pkg::Pkg::new(update("01.10", "game.txt", b"ACTIVE")).unwrap();
+    orbis_cli::install::install(&active, &base, orbis_cli::SilentProgress).unwrap();
+    std::fs::write(dir.path().join("locked.pkg"), passcoded_pkg(2)).unwrap();
+    let out = run(
+        dir.path(),
+        &[
+            "install",
+            "locked.pkg",
+            "--base",
+            base.to_str().unwrap(),
+            "--merge",
+            "--dry-run",
+        ],
+    );
+    assert_code(&out, 1);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("merge requires an original base"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn locked_update_reports_unusable_entry_keys_before_requesting_a_passcode() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = base_game(dir.path());
+    std::fs::write(dir.path().join("passcode"), PASSCODE).unwrap();
+    for (offset, value, reason) in [
+        (0x1000, 0x16, "missing entry-key record"),
+        (0x1008, 0x80000000, "encrypted entry-key record"),
+        (0x1014, 24, "entry-key record size"),
+        (0x1010, u32::MAX, "entry-key record data"),
+        (0x1100, 0, "entry-key record does not match"),
+    ] {
+        let mut bytes = passcoded_pkg(2);
+        be32(&mut bytes, offset, value);
+        std::fs::write(dir.path().join("locked.pkg"), bytes).unwrap();
+        let args = [
+            "install",
+            "locked.pkg",
+            "--base",
+            base.to_str().unwrap(),
+            "--dry-run",
+        ];
+        for extra in [&[][..], &["--passcode-file", "passcode"][..]] {
+            let out = run(dir.path(), &[&args[..], extra].concat());
+            assert_code(&out, 1);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(stderr.contains(reason), "{stderr}");
+        }
+    }
+}
+
+#[test]
 fn passcodes_unlock_every_entry_slot_and_wrong_passcodes_never_fall_back() {
     let dir = tempfile::tempdir().unwrap();
     for slot in 0..7 {

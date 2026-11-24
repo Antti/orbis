@@ -62,19 +62,19 @@ fn passcodes_are_accepted_only_after_validation_and_cleared_for_another_package(
             .as_ref()
             .unwrap()
             .update
-            .package_error()
-            .is_none()
+            .readiness
+            .has_update_metadata()
     );
     app.action = Action::Update;
     app.clear_passcode();
     finish(&mut app);
     assert!(
-        app.package
+        !app.package
             .as_ref()
             .unwrap()
             .update
-            .package_error()
-            .is_some()
+            .readiness
+            .has_update_metadata()
     );
     assert!(app.action == Action::Extract);
     assert!(app.passcode.is_none());
@@ -494,10 +494,10 @@ fn assert_rejected_locked_update(app: &mut OrbisApp, reason: &str) {
         "expected {reason}"
     );
     assert!(
-        !tree.nodes.iter().any(|(_, n)| [n.label(), n.value()]
-            .into_iter()
-            .flatten()
-            .any(|s| s.contains("passcode"))),
+        !tree.nodes.iter().any(|(_, n)| matches!(
+            n.label(),
+            Some("Validate passcode" | "Package passcode required")
+        )),
         "unexpected passcode prompt for {reason}"
     );
 }
@@ -523,10 +523,14 @@ fn incompatible_packages_with_locked_entries_offer_a_replacement_without_a_passc
     let mut unsupported_entry = features::passcoded_pkg_with_entry(2, EntryId::PfsImageKey);
     common::be32(&mut unsupported_entry, 0x102c, 7 << 12);
 
+    let mut missing_keys = features::passcoded_pkg(2);
+    common::be32(&mut missing_keys, 0x1000, 0x16); // No EntryKeys record.
+
     for (file, bytes, reason) in [
         ("base.pkg", base_pkg, "expected a PS4 full-file"),
         ("delta.pkg", delta, "binary delta packages"),
         ("category.pkg", wrong_category, "CATEGORY must be gp"),
+        ("missing-keys.pkg", missing_keys, "missing entry-key record"),
         (
             "unsupported-sfo.pkg",
             unsupported_sfo,
@@ -595,7 +599,7 @@ fn choosing_a_different_base_rechecks_the_locked_package() {
     app.open(path);
     finish(&mut app);
     app.base = UpdateBase::Pick(Some(wrong));
-    app.update_base_changed();
+    app.update_target_changed();
     finish(&mut app);
     assert_rejected_locked_update(&mut app, "does not match");
 
@@ -609,7 +613,7 @@ fn choosing_a_different_base_rechecks_the_locked_package() {
     }
 
     app.base = UpdateBase::Pick(Some(base));
-    app.update_base_changed();
+    app.update_target_changed();
     finish(&mut app);
     app.passcode_input = String::from_utf8(features::PASSCODE.to_vec())
         .unwrap()
@@ -644,10 +648,103 @@ fn locked_updates_check_the_active_version_in_either_open_order() {
         app.open(path);
         finish(&mut app);
         app.base = UpdateBase::Pick(Some(base));
-        app.update_base_changed();
+        app.update_target_changed();
         finish(&mut app);
         assert_rejected_locked_update(&mut app, &reason);
     }
+}
+
+#[test]
+fn returning_to_a_locked_pkg_after_rollback_rechecks_the_active_version() {
+    use crate::common;
+    use orbis_cli::{SilentProgress, install};
+    let temp = tempfile::tempdir().unwrap();
+    let base = common::base_game(temp.path());
+    let active = orbis_pkg::Pkg::new(common::update("01.12", "game.txt", b"ACTIVE")).unwrap();
+    install::install(&active, &base, SilentProgress).unwrap();
+    let path = temp.path().join("locked.pkg");
+    fs::write(
+        &path,
+        features::passcoded_pkg_with_entry(2, orbis_pkg::entry::EntryId::PfsImageKey),
+    )
+    .unwrap();
+    let mut app = OrbisApp::default();
+    app.open_package(path, UpdateBase::Pick(Some(base.clone())));
+    finish(&mut app);
+    assert_rejected_locked_update(&mut app, "01.12 is not newer than installed 01.12");
+
+    app.open_game(base);
+    finish(&mut app);
+    click(&mut app, "Restore base 01.00…");
+    click(&mut app, "Confirm restore");
+    finish(&mut app);
+    click(&mut app, "Done");
+    finish(&mut app);
+    click(&mut app, "Back");
+    finish(&mut app);
+    app.passcode_input = String::from_utf8(features::PASSCODE.to_vec())
+        .unwrap()
+        .into();
+    click(&mut app, "Validate passcode");
+    finish(&mut app);
+    click(&mut app, "Check update");
+    finish(&mut app);
+    assert_eq!(app.preview.as_ref().unwrap().current_version, "01.00");
+}
+
+#[test]
+fn switching_install_modes_rechecks_a_locked_update_in_both_open_orders() {
+    use crate::common;
+    use orbis_cli::{SilentProgress, install};
+    let temp = tempfile::tempdir().unwrap();
+    let base = common::base_game(temp.path());
+    let active = orbis_pkg::Pkg::new(common::update("01.10", "game.txt", b"ACTIVE")).unwrap();
+    install::install(&active, &base, SilentProgress).unwrap();
+    let path = temp.path().join("locked.pkg");
+    use orbis_pkg::entry::EntryId;
+    for entry in [EntryId::ParamSfo, EntryId::PfsImageKey] {
+        fs::write(&path, features::passcoded_pkg_with_entry(2, entry)).unwrap();
+        for selection in [
+            UpdateBase::Game(base.clone()),
+            UpdateBase::Pick(Some(base.clone())),
+        ] {
+            let mut app = OrbisApp::default();
+            app.open_package(path.clone(), selection);
+            finish(&mut app);
+            if app.action != Action::Update {
+                click(&mut app, "Install update");
+            }
+            click(&mut app, "Merge into game folder");
+            finish(&mut app);
+            assert_rejected_locked_update(&mut app, "merge requires an original base");
+            click(&mut app, "Keep update separate");
+            finish(&mut app);
+            let tree = frame(&mut app, Default::default());
+            assert!(
+                tree.nodes
+                    .iter()
+                    .any(|(_, n)| n.label() == Some("Validate passcode"))
+            );
+        }
+    }
+}
+
+#[test]
+fn target_warnings_show_the_field_that_failed_validation() {
+    use crate::common;
+    let temp = tempfile::tempdir().unwrap();
+    let base = common::base_game(temp.path());
+    fs::write(
+        base.join("sce_sys/param.sfo"),
+        common::sfo("CUSA00000", "gd", "bad"),
+    )
+    .unwrap();
+    let path = temp.path().join("locked.pkg");
+    fs::write(&path, features::passcoded_pkg(2)).unwrap();
+    let mut app = OrbisApp::default();
+    app.open_package(path, UpdateBase::Game(base));
+    finish(&mut app);
+    assert_rejected_locked_update(&mut app, "APP_VER must use NN.NN");
 }
 
 #[test]
@@ -689,7 +786,7 @@ fn update_with_locked_metadata_requires_a_passcode_even_with_readable_sfo() {
     app.open_package(path.clone(), UpdateBase::Game(base.clone()));
     finish(&mut app);
     let info = app.package.as_ref().unwrap();
-    assert!(info.update.package_error().is_none());
+    assert!(info.update.readiness.has_update_metadata());
     assert_eq!(info.update.missing_keys, 1);
     assert!(app.preview.is_none());
     let tree = frame(&mut app, Default::default());
@@ -747,8 +844,8 @@ fn contextual_update_accepts_a_passcode_and_rereads_the_game_on_back() {
     finish(&mut app);
     assert!(app.preview.is_none() && app.action == Action::Update);
     assert!(matches!(
-        app.package.as_ref().unwrap().update.package_error(),
-        Some(orbis_cli::install::InstallError::MissingUpdateKey { slot: 2 })
+        app.package.as_ref().unwrap().update.readiness,
+        UpdateReadiness::NeedsPasscode(_)
     ));
     app.passcode_input = String::from_utf8(features::PASSCODE.to_vec())
         .unwrap()

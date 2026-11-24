@@ -113,7 +113,7 @@ fn passcode_unlocks_inspection_and_extraction_and_wrong_values_never_fall_back()
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("locked.pkg");
     fs::write(&path, features::passcoded_pkg(2)).unwrap();
-    let Outcome::Inspected(locked) = run(&path, Operation::Inspect(None), &SilentProgress).unwrap()
+    let Outcome::Inspected(locked) = run(&path, Operation::Inspect, &SilentProgress).unwrap()
     else {
         panic!()
     };
@@ -125,13 +125,9 @@ fn passcode_unlocks_inspection_and_extraction_and_wrong_values_never_fall_back()
     )
     .unwrap();
     assert!(!format!("{passcode:?}").contains("0123456789abcdef"));
-    let Outcome::Inspected(unlocked) = run_with_passcode(
-        &path,
-        Operation::Inspect(None),
-        Some(&passcode),
-        &SilentProgress,
-    )
-    .unwrap() else {
+    let Outcome::Inspected(unlocked) =
+        run_with_passcode(&path, Operation::Inspect, Some(&passcode), &SilentProgress).unwrap()
+    else {
         panic!()
     };
     assert_eq!(unlocked.update.missing_keys, 0);
@@ -491,8 +487,7 @@ fn complete_extraction_recognizes_a_base_sfo_from_the_inner_filesystem() {
 fn inspects_then_extracts_real_package_without_a_cli() {
     let dir = tempfile::tempdir().unwrap();
     let path = package(dir.path());
-    let Outcome::Inspected(info) = run(&path, Operation::Inspect(None), &SilentProgress).unwrap()
-    else {
+    let Outcome::Inspected(info) = run(&path, Operation::Inspect, &SilentProgress).unwrap() else {
         panic!()
     };
     assert_eq!(info.title_id, "CUSA00000");
@@ -503,7 +498,7 @@ fn inspects_then_extracts_real_package_without_a_cli() {
     assert_eq!(info.update.missing_keys, 0);
     assert!(info.required_system.is_none());
     assert!(info.artwork.is_none());
-    assert!(info.update.package_error().is_none());
+    assert!(info.update.readiness.has_update_metadata());
     let output = dir.path().join("output");
     let result = run(
         &path,
@@ -631,8 +626,7 @@ fn incomplete_extraction_is_not_reported_as_success() {
     // remains readable, so this must produce a partial result, not full success.
     common::be32(&mut bytes, 0x1048, 0x8000_0000);
     fs::write(&path, bytes).unwrap();
-    let Outcome::Inspected(info) = run(&path, Operation::Inspect(None), &SilentProgress).unwrap()
-    else {
+    let Outcome::Inspected(info) = run(&path, Operation::Inspect, &SilentProgress).unwrap() else {
         panic!()
     };
     assert_eq!(info.update.missing_keys, 1);
@@ -681,8 +675,8 @@ fn invalid_inputs_and_unsafe_folder_names_are_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("other.pkg");
     fs::write(&path, b"not a PS4 package").unwrap();
-    assert!(run(&path, Operation::Inspect(None), &SilentProgress).is_err());
-    assert!(run(dir.path(), Operation::Inspect(None), &SilentProgress).is_err());
+    assert!(run(&path, Operation::Inspect, &SilentProgress).is_err());
+    assert!(run(dir.path(), Operation::Inspect, &SilentProgress).is_err());
     for name in [
         "",
         "../base",
@@ -767,8 +761,7 @@ fn inspection_reads_display_metadata_and_optional_artwork() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("metadata.pkg");
     fs::write(&path, bytes).unwrap();
-    let Outcome::Inspected(info) = run(&path, Operation::Inspect(None), &SilentProgress).unwrap()
-    else {
+    let Outcome::Inspected(info) = run(&path, Operation::Inspect, &SilentProgress).unwrap() else {
         panic!()
     };
     assert_eq!(info.title, "A friendly application");

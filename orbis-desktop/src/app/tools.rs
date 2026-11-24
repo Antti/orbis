@@ -122,7 +122,7 @@ impl OrbisApp {
             self.verification = None;
             self.preview = None;
             self.refreshing_package = true;
-            self.inspect_package(path);
+            self.start(path, Operation::Inspect);
         }
     }
 

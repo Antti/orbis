@@ -85,7 +85,7 @@ pub(super) fn verify(
         }
         let mut pkg = unsafe { orbis_cli::inspect_pkg(path)? };
         if let Some(passcode) = passcode {
-            pkg.load_passcode(passcode.bytes())?;
+            pkg.load_passcode_with_diagnostics(passcode.bytes())?;
         }
         let _ = pkg.load_entry_keys();
         if !metadata_only {
