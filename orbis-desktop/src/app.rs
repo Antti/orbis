@@ -127,15 +127,24 @@ impl OrbisApp {
     }
 
     fn inspect_package(&mut self, path: PathBuf) {
-        let update_base = match &self.base {
-            UpdateBase::Game(base) => Some(base.clone()),
-            UpdateBase::Pick(_) => None,
-        };
-        self.start(path, Operation::Inspect(update_base));
+        self.start(path, Operation::Inspect(self.base.path().cloned()));
+    }
+
+    fn update_base_changed(&mut self) {
+        self.preview = None;
+        if let Some(info) = &self.package
+            && info.update.missing_keys > 0
+        {
+            self.refreshing_package = true;
+            self.inspect_package(info.path.clone());
+        }
     }
 
     fn preview_update(&mut self) {
-        if let Some(info) = self.package.as_ref().filter(|info| info.can_check_update())
+        if let Some(info) = self
+            .package
+            .as_ref()
+            .filter(|info| info.update.can_check_update())
             && let Some(base) = self.base.path().cloned()
         {
             self.preview = None;
@@ -209,18 +218,18 @@ impl OrbisApp {
                 if from_game {
                     self.action = Action::Update;
                 } else if !self.refreshing_package {
-                    self.action = if info.update_error.is_none() {
+                    self.action = if info.update.package_error().is_none() {
                         Action::Update
                     } else {
                         Action::Extract
                     };
                     self.folder_name = operations::suggested_folder(&info);
                     self.parent = info.path.parent().map(PathBuf::from);
-                } else if self.action == Action::Update && info.update_error.is_some() {
+                } else if self.action == Action::Update && info.update.package_error().is_some() {
                     self.action = Action::Extract;
                 }
                 self.refreshing_package = false;
-                self.package = Some(info);
+                self.package = Some(*info);
                 if from_game && !cancelled && !self.close_after_job {
                     self.preview_update();
                 }

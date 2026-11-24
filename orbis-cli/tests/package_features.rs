@@ -426,6 +426,31 @@ fn named_unknown_entries_extract_and_unsafe_names_fail_before_writes() {
 }
 
 #[test]
+fn install_reports_an_unsupported_slot_even_when_param_sfo_needs_a_passcode() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = base_game(dir.path());
+    let mut bytes = passcoded_pkg(2);
+    // PARAM.SFO uses slot 2. The PFS image key needs slot 7.
+    be32(&mut bytes, 0x1028, 0x80000000);
+    be32(&mut bytes, 0x102c, 7 << 12);
+    std::fs::write(dir.path().join("locked.pkg"), bytes).unwrap();
+    let output = run(
+        dir.path(),
+        &[
+            "install",
+            "locked.pkg",
+            "--base",
+            base.to_str().unwrap(),
+            "--dry-run",
+        ],
+    );
+    assert_code(&output, 1);
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("unsupported key slot 7"), "{error}");
+    assert!(!dir.path().join(".CUSA00000.orbis-install").exists());
+}
+
+#[test]
 fn passcodes_unlock_every_entry_slot_and_wrong_passcodes_never_fall_back() {
     let dir = tempfile::tempdir().unwrap();
     for slot in 0..7 {

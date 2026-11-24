@@ -61,13 +61,13 @@ pub(super) fn pending(layout: &Layout) -> Result<bool> {
 
 // Read-only status shares the writer's lock, including while PARAM.SFO is between
 // its backup and publish renames. Opening an untouched game creates no files.
-struct ReadLock(std::fs::File);
+pub(super) struct ReadLock(std::fs::File);
 impl Drop for ReadLock {
     fn drop(&mut self) {
         let _ = fs2::FileExt::unlock(&self.0);
     }
 }
-fn read_lock(layout: &Layout) -> Result<Option<ReadLock>> {
+pub(super) fn read_lock(layout: &Layout) -> Result<Option<ReadLock>> {
     let Some(root) = &layout.root else {
         return Ok(None);
     };

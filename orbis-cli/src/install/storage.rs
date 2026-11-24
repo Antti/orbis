@@ -386,7 +386,7 @@ pub(super) fn validate_manifest_metadata(
     dir: &Dir,
     manifest: &Manifest,
     base: &AppMetadata,
-) -> Result<()> {
+) -> Result<AppVersion> {
     if manifest.schema_version != 1
         || manifest.title_id != base.title_id
         || manifest.content_id != base.content_id
@@ -400,7 +400,7 @@ pub(super) fn validate_manifest_metadata(
     {
         return Err(invalid("installed update metadata has changed"));
     }
-    Ok(())
+    Ok(meta.version)
 }
 
 pub(super) fn compare_inventory(

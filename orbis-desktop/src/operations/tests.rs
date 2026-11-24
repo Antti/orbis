@@ -117,7 +117,7 @@ fn passcode_unlocks_inspection_and_extraction_and_wrong_values_never_fall_back()
     else {
         panic!()
     };
-    assert_eq!(locked.missing_keys, 1);
+    assert_eq!(locked.update.missing_keys, 1);
     let passcode = Passcode::new(
         String::from_utf8(features::PASSCODE.to_vec())
             .unwrap()
@@ -134,7 +134,7 @@ fn passcode_unlocks_inspection_and_extraction_and_wrong_values_never_fall_back()
     .unwrap() else {
         panic!()
     };
-    assert_eq!(unlocked.missing_keys, 0);
+    assert_eq!(unlocked.update.missing_keys, 0);
     assert_eq!(unlocked.version.as_deref(), Some("01.12"));
     let output = dir.path().join("output");
     let result = run_with_passcode(
@@ -500,10 +500,10 @@ fn inspects_then_extracts_real_package_without_a_cli() {
     assert_eq!(info.region, Some("North America"));
     assert_eq!(info.content_id, "UP0000-CUSA00000_00-0000000000000000");
     assert_eq!(info.metadata_entries, 3);
-    assert_eq!(info.missing_keys, 0);
+    assert_eq!(info.update.missing_keys, 0);
     assert!(info.required_system.is_none());
     assert!(info.artwork.is_none());
-    assert!(info.update_error.is_none());
+    assert!(info.update.package_error().is_none());
     let output = dir.path().join("output");
     let result = run(
         &path,
@@ -635,7 +635,7 @@ fn incomplete_extraction_is_not_reported_as_success() {
     else {
         panic!()
     };
-    assert_eq!(info.missing_keys, 1);
+    assert_eq!(info.update.missing_keys, 1);
     assert!(!info.warnings.is_empty());
     let result = run(
         &path,

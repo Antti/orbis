@@ -3,6 +3,9 @@
 //!
 //! Separate updates preserve the base. Merge mode journals per-file replacements
 //! and retains original files for restoration. Stop the emulator first.
+mod compatibility;
+use compatibility::check_update_version;
+pub use compatibility::{UpdateCheck, check_update_identity, inspect_update, update_metadata};
 mod directory;
 mod export;
 mod merge;
@@ -200,54 +203,6 @@ pub fn install_with_mode<R: AsRef<[u8]> + Sync, P: ExtractProgress>(
     }
 }
 
-/// Validates the supported update format and identity before opening the filesystem.
-pub fn update_metadata<R: AsRef<[u8]>>(pkg: &Pkg<R>) -> Result<AppMetadata> {
-    let header = pkg.header();
-    let flags = header.content_flags();
-    if header.content_type() == 0x1e || flags.intersects(ContentFlags::DELTA_PATCH_X) {
-        return Err(invalid(
-            "binary delta packages are not supported; provide a full-file update",
-        ));
-    }
-    if header.content_type() != 0x1a
-        || !(flags.contains(ContentFlags::CUMULATIVE_PATCH)
-            || (flags.contains(ContentFlags::FIRST_PATCH)
-                && !flags.contains(ContentFlags::SUBSEQUENT_PATCH)))
-    {
-        return Err(invalid(
-            "expected a PS4 full-file cumulative or first update package",
-        ));
-    }
-    let data = pkg
-        .param_sfo_data()
-        .map_err(|e| match e {
-            ParamSfoError::ReadData {
-                source: EntryDataError::NoDecryptionKey { key_index },
-            } => InstallError::missing_update_key(key_index),
-            other => invalid(other.to_string()),
-        })?
-        .ok_or_else(|| invalid("update has no PARAM.SFO"))?;
-    let metadata = AppMetadata::parse(&data)?;
-    if metadata.category != "gp" {
-        return Err(invalid("update PARAM.SFO CATEGORY must be gp"));
-    }
-    if metadata.content_id != header.content_id().as_str() {
-        return Err(invalid("PKG header and PARAM.SFO content IDs disagree"));
-    }
-    Ok(metadata)
-}
-
-/// Checks the header against the extracted base even when PARAM.SFO is locked.
-pub fn check_update_identity<R: AsRef<[u8]>>(pkg: &Pkg<R>, base: &AppMetadata) -> Result<()> {
-    let id = pkg.header().content_id();
-    if id.as_str() != base.content_id || id.title_id() != base.title_id {
-        return Err(invalid(
-            "update does not match the base game's title and content ID",
-        ));
-    }
-    Ok(())
-}
-
 fn make_plan<R: AsRef<[u8]> + Sync, P: ExtractProgress>(
     pkg: &Pkg<R>,
     location: &Layout,
@@ -259,30 +214,19 @@ fn make_plan<R: AsRef<[u8]> + Sync, P: ExtractProgress>(
     location.require_recovered()?;
     let base = location.base_metadata()?;
     check_update_identity(pkg, &base)?;
-    let update = update_metadata(pkg)?;
+    let update = compatibility::inspect_with_target(pkg, |version| {
+        compatibility::check_locked_version(location, &base, version)
+    })
+    .into_ready()?;
     let state = location.state()?;
     let current = location.active_manifest(&state, &base, progress)?;
     location.verify_previous(&state, &base, progress)?;
     let current_version = current
         .as_ref()
         .map_or(Ok(base.version), |m| m.app_version.parse::<AppVersion>())?;
-    if update.version <= current_version {
-        return Err(invalid(format!(
-            "update {} is not newer than installed {}; repeated installs and downgrades are refused",
-            update.version, current_version
-        )));
-    }
+    check_update_version(update.version, current_version)?;
     let extractor = PkgExtractor::new(pkg, SilentProgress, false);
     let entries = extractor.list_entries()?;
-    // Report an unsupported slot before any slot a passcode could unlock.
-    if let Some(slot) = entries
-        .iter()
-        .filter_map(|entry| entry.key_index)
-        .filter(|&slot| !pkg.has_entry_key(slot))
-        .max()
-    {
-        return Err(InstallError::missing_update_key(slot));
-    }
     if entries.iter().any(|e| e.path.is_none()) {
         return Err(invalid(
             "update contains unknown metadata entries; installation requires complete extraction",

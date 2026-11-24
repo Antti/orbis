@@ -18,7 +18,7 @@ pub(super) fn run(
 ) -> Result<u8> {
     let mut pkg = open(pkg_path, cli.passcode_file.as_deref())?;
     let _ = pkg.load_entry_keys();
-    orbis_cli::install::update_metadata(&pkg)?;
+    orbis_cli::install::inspect_update(&pkg, Some(base)).into_ready()?;
     prepare_filesystem(&mut pkg)?;
     if options.dry_run {
         let plan = orbis_cli::install::plan_with_mode(

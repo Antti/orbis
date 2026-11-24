@@ -27,24 +27,11 @@ pub struct PackageInfo {
     pub content_id: String,
     pub region: Option<&'static str>,
     pub metadata_entries: usize,
-    pub missing_keys: usize,
     pub artwork: Option<eframe::egui::ColorImage>,
     pub kind: String,
     pub size: u64,
-    pub update_error: Option<install::InstallError>,
+    pub update: install::UpdateCheck,
     pub warnings: Vec<String>,
-}
-
-impl PackageInfo {
-    pub fn can_check_update(&self) -> bool {
-        self.update_error.is_none() && self.missing_keys == 0
-    }
-
-    pub fn update_rejection(&self) -> Option<&install::InstallError> {
-        self.update_error
-            .as_ref()
-            .filter(|error| !matches!(error, install::InstallError::MissingUpdateKey { .. }))
-    }
 }
 
 #[derive(Debug)]
@@ -150,7 +137,7 @@ impl OutputFolder {
 
 #[derive(Debug)]
 pub enum Outcome {
-    Inspected(PackageInfo),
+    Inspected(Box<PackageInfo>),
     Verified(Box<VerificationReport>),
     ExportPreview(Box<install::ExportPreview>),
     Preview(install::InstallPlan),
@@ -364,11 +351,10 @@ fn execute(
             content_id: header.content_id().as_str().to_owned(),
             region: content_region(header.content_id().service_id()),
             metadata_entries: header.entry_count(),
-            missing_keys: 0,
             artwork: None,
             kind: header.content_type_name().to_owned(),
             size: header.pkg_size(),
-            update_error: install::update_metadata(&pkg).err(),
+            update: install::inspect_update(&pkg, update_base.as_deref()),
             warnings: Vec::new(),
         };
         match pkg.param_sfo_data() {
@@ -387,43 +373,19 @@ fn execute(
                 .warnings
                 .push(format!("Package details are unavailable: {e}")),
         }
-        for entry in pkg.entries() {
-            // A malformed table can declare billions of absent entries. Stop
-            // at the first error; param_sfo_data already reports that failure.
-            let Ok((_, entry)) = entry else { break };
-            let slot = entry.key_index();
-            if entry.is_encrypted() && !pkg.has_entry_key(slot) {
-                info.missing_keys += 1;
-                if slot >= orbis_pkg::passcode::ENTRY_KEY_COUNT && info.update_rejection().is_none()
-                {
-                    info.update_error = Some(install::InstallError::UnsupportedUpdateKey { slot });
-                }
-            }
-        }
-        // Unlocked updates go straight to the full preview. For locked updates,
-        // check the header against the base before asking for a passcode.
-        if let Some(base) = update_base
-            && info.missing_keys > 0
-            && info.update_rejection().is_none()
-            && let Err(error) = install::base_metadata(&base)
-                .and_then(|base| install::check_update_identity(&pkg, &base))
-        {
-            info.update_error = Some(error);
-        }
         if let Ok((entry, _)) = pkg.find_entry(EntryId::Icon0Png)
             && entry.data_size() <= 4 * 1024 * 1024
             && let Ok(bytes) = pkg.entry_data(&entry)
         {
             info.artwork = decode_artwork(&bytes);
         }
-        return Ok(Outcome::Inspected(info));
+        return Ok(Outcome::Inspected(Box::new(info)));
     }
 
-    if matches!(
-        operation,
-        Operation::PreviewUpdate { .. } | Operation::InstallUpdate { .. }
-    ) {
-        install::update_metadata(&pkg)?;
+    if let Operation::PreviewUpdate { base, .. } | Operation::InstallUpdate { base, .. } =
+        &operation
+    {
+        install::inspect_update(&pkg, Some(base)).into_ready()?;
     }
     let image = pkg.get_pfs_image().ok_or(ExtractError::NoPfsImage)?;
     if orbis_pfs::header::read_mode(image.data)?.is_encrypted() {

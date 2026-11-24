@@ -120,35 +120,41 @@ impl OrbisApp {
             return;
         }
         let Some(info) = &self.package else { return };
-        if matches!(self.base, UpdateBase::Game(_))
-            && let Some(error) = info.update_rejection()
-        {
+        let rejection = info
+            .update
+            .rejection()
+            .filter(|_| self.action == Action::Update);
+        let show_passcode = rejection.is_none();
+        let needs_passcode = self.action == Action::Update
+            && info.update.needs_passcode()
+            && self.passcode.is_none();
+        if let Some(error) = rejection {
             warning(ui, &error.to_string());
-            return;
-        }
-        let needs_passcode =
-            self.action == Action::Update && info.missing_keys > 0 && self.passcode.is_none();
-        if info.missing_keys > 0 {
-            let entries = if info.missing_keys == 1 {
+            if matches!(self.base, UpdateBase::Game(_)) {
+                return;
+            }
+        } else if info.update.missing_keys > 0 {
+            let entries = if info.update.missing_keys == 1 {
                 "entry"
             } else {
                 "entries"
             };
-            let guidance =
-                if let Some(InstallError::UnsupportedUpdateKey { slot }) = &info.update_error {
-                    format!("Key slot {slot} is unsupported. Extraction may be incomplete.")
-                } else if needs_passcode {
-                    "Validate the package passcode before installing this update.".into()
-                } else if self.action == Action::Update {
-                    "The validated passcode could not unlock this update.".into()
-                } else {
-                    "Extraction may be incomplete.".into()
-                };
+            let guidance = if let Some(InstallError::UnsupportedUpdateKey { slot }) =
+                info.update.package_error()
+            {
+                format!("Key slot {slot} is unsupported. Extraction may be incomplete.")
+            } else if needs_passcode {
+                "Validate the package passcode before installing this update.".into()
+            } else if self.action == Action::Update {
+                "The validated passcode could not unlock this update.".into()
+            } else {
+                "Extraction may be incomplete.".into()
+            };
             warning(
                 ui,
                 &format!(
                     "{} encrypted metadata {entries} cannot be read. {guidance}",
-                    info.missing_keys
+                    info.update.missing_keys
                 ),
             );
         }
@@ -158,7 +164,9 @@ impl OrbisApp {
         ui.separator();
         if self.notice.is_none() {
             ui.add_enabled_ui(idle, |ui| {
-                self.passcode_settings(ui, needs_passcode);
+                if show_passcode {
+                    self.passcode_settings(ui, needs_passcode);
+                }
                 self.settings(ui, frame);
             });
         }
@@ -226,14 +234,14 @@ impl OrbisApp {
             detail(ui, "Integrity", self.verification.as_ref().map_or("Not checked", |r| r.title()));
             detail(ui, "Package file", &info.path.display().to_string());
             ui.label(muted(ui, "Region is inferred from the content ID. The system version is declared by the package; neither establishes emulator compatibility.").size(12.0));
-            if let Some(error) = &info.update_error { ui.label(muted(ui, format!("Update installation: {error}")).size(12.0)); }
+            if let Some(error) = info.update.package_error() { ui.label(muted(ui, format!("Update installation: {error}")).size(12.0)); }
         });
     }
 
     fn settings(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
         let info = self.package.as_ref().unwrap();
         if matches!(self.base, UpdateBase::Game(_)) {
-            if info.update_error.is_some() {
+            if info.update.package_error().is_some() {
                 return;
             }
         } else {
@@ -244,13 +252,13 @@ impl OrbisApp {
                     Action::Extract,
                     heading("Extract files", 14.0),
                 );
-                ui.add_enabled_ui(info.update_error.is_none(), |ui| {
+                ui.add_enabled_ui(info.update.package_error().is_none(), |ui| {
                     let tab = ui.selectable_value(
                         &mut self.action,
                         Action::Update,
                         heading("Install update", 14.0),
                     );
-                    if let Some(error) = &info.update_error {
+                    if let Some(error) = info.update.package_error() {
                         tab.on_disabled_hover_text(error.to_string());
                     }
                 });
@@ -322,7 +330,7 @@ impl OrbisApp {
                 if let UpdateBase::Pick(base) = &mut self.base
                     && folder_picker(ui, frame, "Extracted base game", base)
                 {
-                    self.preview = None;
+                    self.update_base_changed();
                 }
                 if let Some(plan) = &self.preview {
                     ui.add_space(4.0);
@@ -486,7 +494,7 @@ impl OrbisApp {
             return;
         };
         let path = package.path.clone();
-        let can_check_update = package.can_check_update();
+        let can_check_update = package.update.can_check_update();
         ui.horizontal(|ui| {
             let caption = match self.action {
                 Action::Verify => "Verification does not write package data.",
