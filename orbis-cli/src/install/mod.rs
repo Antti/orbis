@@ -129,7 +129,7 @@ pub enum ChangeKind {
     RemoveFromUpdate,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct FileChange {
     pub path: String,
     pub change: ChangeKind,
@@ -159,6 +159,32 @@ pub struct InstallPlan {
     pub required_free_bytes: u64,
     pub available_bytes: u64,
     pub files: Vec<FileChange>,
+}
+
+impl InstallPlan {
+    /// Rebuilds the preview under the installation lock and applies it if the planned changes match.
+    pub fn apply<R: AsRef<[u8]> + Sync>(
+        &self,
+        pkg: &Pkg<R>,
+        base: &Path,
+        progress: impl ExtractProgress,
+    ) -> Result<InstallPlan> {
+        run_install(pkg, base, self.mode, Some(self), progress)
+    }
+
+    fn matches_preview(&self, preview: &Self) -> bool {
+        // Free space can change independently. Check the current value before staging.
+        self.mode == preview.mode
+            && self.title_id == preview.title_id
+            && self.content_id == preview.content_id
+            && self.current_version == preview.current_version
+            && self.update_version == preview.update_version
+            && self.destination == preview.destination
+            && self.backup_bytes == preview.backup_bytes
+            && self.extracted_bytes == preview.extracted_bytes
+            && self.required_free_bytes == preview.required_free_bytes
+            && self.files == preview.files
+    }
 }
 
 fn serialize_path<S: serde::Serializer>(
@@ -210,9 +236,30 @@ pub fn install_with_mode<R: AsRef<[u8]> + Sync, P: ExtractProgress>(
     mode: InstallMode,
     progress: P,
 ) -> Result<InstallPlan> {
+    run_install(pkg, base, mode, None, progress)
+}
+
+fn run_install<R: AsRef<[u8]> + Sync>(
+    pkg: &Pkg<R>,
+    base: &Path,
+    mode: InstallMode,
+    preview: Option<&InstallPlan>,
+    progress: impl ExtractProgress,
+) -> Result<InstallPlan> {
+    let layout = Layout::open(base, true)?;
+    let plan = match mode {
+        InstallMode::Separate => make_plan(pkg, &layout, &progress)?,
+        InstallMode::Merge => merge::make_plan(pkg, &layout, &progress)?,
+    };
+    if preview.is_some_and(|preview| !plan.matches_preview(preview)) {
+        return Err(invalid(
+            "The package or installed game changed after the preview. Check the update again before installing.",
+        ));
+    }
+    check_space(plan.required_free_bytes, plan.available_bytes)?;
     match mode {
-        InstallMode::Separate => install(pkg, base, progress),
-        InstallMode::Merge => merge::install(pkg, base, progress),
+        InstallMode::Separate => install_separate(pkg, layout, plan, progress),
+        InstallMode::Merge => merge::install_planned(pkg, layout, plan, progress),
     }
 }
 
@@ -347,10 +394,15 @@ pub fn install<R: AsRef<[u8]> + Sync, P: ExtractProgress>(
     base: &Path,
     progress: P,
 ) -> Result<InstallPlan> {
-    let location = Layout::open(base, true)?;
-    location.require_recovered()?;
-    let plan = make_plan(pkg, &location, &progress)?;
-    check_space(plan.required_free_bytes, plan.available_bytes)?;
+    install_with_mode(pkg, base, InstallMode::Separate, progress)
+}
+
+fn install_separate<R: AsRef<[u8]> + Sync>(
+    pkg: &Pkg<R>,
+    location: Layout,
+    plan: InstallPlan,
+    progress: impl ExtractProgress,
+) -> Result<InstallPlan> {
     location.clean_uncommitted()?;
     let manager = location.manager()?;
     manager.create_dir("staging")?;

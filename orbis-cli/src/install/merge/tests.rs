@@ -8,6 +8,9 @@ use std::{
 fn package(name: &str) -> Pkg<Vec<u8>> {
     Pkg::new(update("01.01", name, b"PATCH")).unwrap()
 }
+fn install(pkg: &Pkg<Vec<u8>>, base: &Path, progress: impl ExtractProgress) -> Result<InstallPlan> {
+    install_with_mode(pkg, base, InstallMode::Merge, progress)
+}
 fn manager(base: &Path) -> PathBuf {
     base.with_file_name(".CUSA00000.orbis-install")
 }

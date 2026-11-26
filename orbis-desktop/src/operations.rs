@@ -495,11 +495,7 @@ fn execute(
             install::plan_with_mode(&pkg, &base, mode, progress)?,
         )),
         Operation::InstallUpdate { base, preview } => {
-            let fresh = install::plan_with_mode(&pkg, &base, preview.mode, progress)?;
-            if !same_update(&preview, &fresh) {
-                return Err("The package or installed game changed after the preview. Check the update again before installing.".into());
-            }
-            let plan = install::install_with_mode(&pkg, &base, preview.mode, progress)?;
+            let plan = preview.apply(&pkg, &base, progress)?;
             if plan.mode == install::InstallMode::Merge {
                 return Ok(Outcome::GameChanged {
                     target: install::GameTarget::for_update(
@@ -575,22 +571,6 @@ fn decode_artwork(bytes: &[u8]) -> Option<eframe::egui::ColorImage> {
         [image.width() as usize, image.height() as usize],
         image.as_raw(),
     ))
-}
-
-fn same_update(a: &install::InstallPlan, b: &install::InstallPlan) -> bool {
-    a.mode == b.mode
-        && a.backup_bytes == b.backup_bytes
-        && a.title_id == b.title_id
-        && a.content_id == b.content_id
-        && a.current_version == b.current_version
-        && a.update_version == b.update_version
-        && a.destination == b.destination
-        && a.extracted_bytes == b.extracted_bytes
-        && a.files.len() == b.files.len()
-        && a.files
-            .iter()
-            .zip(&b.files)
-            .all(|(a, b)| a.path == b.path && a.change == b.change)
 }
 
 pub fn folder_name_valid(name: &str) -> bool {

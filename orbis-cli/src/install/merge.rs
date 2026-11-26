@@ -186,7 +186,7 @@ pub(super) fn require_original_base(layout: &Layout) -> Result<()> {
     Ok(())
 }
 
-fn make_plan<R: AsRef<[u8]> + Sync>(
+pub(super) fn make_plan<R: AsRef<[u8]> + Sync>(
     pkg: &Pkg<R>,
     layout: &Layout,
     progress: &impl ExtractProgress,
@@ -222,14 +222,12 @@ fn make_plan<R: AsRef<[u8]> + Sync>(
     Ok(plan)
 }
 
-pub(super) fn install<R: AsRef<[u8]> + Sync>(
+pub(super) fn install_planned<R: AsRef<[u8]> + Sync>(
     pkg: &Pkg<R>,
-    base: &Path,
+    layout: Layout,
+    plan: InstallPlan,
     progress: impl ExtractProgress,
 ) -> Result<InstallPlan> {
-    let layout = Layout::open(base, true)?;
-    let plan = make_plan(pkg, &layout, &progress)?;
-    check_space(plan.required_free_bytes, plan.available_bytes)?;
     cleanup(&layout)?;
     let root = layout.manager()?;
     root.create_dir(PREPARING)?;

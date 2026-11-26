@@ -598,33 +598,85 @@ fn previews_and_installs_updates_without_changing_the_base() {
 
 #[test]
 fn refuses_a_changed_update_after_preview() {
-    let dir = tempfile::tempdir().unwrap();
-    let base = common::base_game(dir.path());
-    let path = package(dir.path());
-    let Outcome::Preview(preview) = run(
-        &path,
-        Operation::PreviewUpdate {
-            package: readable_update(&path),
+    for mode in [install::InstallMode::Separate, install::InstallMode::Merge] {
+        let dir = tempfile::tempdir().unwrap();
+        let base = common::base_game(dir.path());
+        let path = package(dir.path());
+        let pkg = orbis_pkg::Pkg::new(fs::read(&path).unwrap()).unwrap();
+        let preview = install::plan_with_mode(&pkg, &base, mode, SilentProgress).unwrap();
+
+        fs::write(&path, common::update("01.02", "new.txt", b"NEW DATA")).unwrap();
+        let failure = run(
+            &path,
+            Operation::InstallUpdate {
+                base: base.clone(),
+                preview: Box::new(preview),
+            },
+            &SilentProgress,
+        )
+        .unwrap_err();
+        assert!(failure.details.contains("changed after the preview"));
+        assert!(!base.join("new.txt").exists());
+        assert!(!dir.path().join("CUSA00000-UPDATE").exists());
+        assert!(install::merge_status(&base).unwrap().is_none());
+    }
+}
+
+#[test]
+fn confirmed_install_scans_once_while_holding_the_write_lock() {
+    use std::sync::atomic::AtomicUsize;
+
+    struct ObserveScan {
+        phase: &'static str,
+        base: PathBuf,
+        scans: AtomicUsize,
+    }
+    impl ExtractProgress for ObserveScan {
+        fn phase(&self, name: &str) {
+            if name == self.phase {
+                // A status reader can share a preview lock, but cannot read during installation.
+                let error = install::merge_status(&self.base).unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("another installation operation holds the lock")
+                );
+                self.scans.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    for (mode, phase) in [
+        (install::InstallMode::Separate, "Checking installed update"),
+        (install::InstallMode::Merge, "Checking game paths"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let base = common::base_game(dir.path());
+        if mode == install::InstallMode::Separate {
+            let previous = orbis_pkg::Pkg::new(common::update("01.01", "old.txt", b"OLD")).unwrap();
+            install::install(&previous, &base, SilentProgress).unwrap();
+        }
+        let path = dir.path().join("next.pkg");
+        fs::write(&path, common::update("01.02", "new.txt", b"NEW")).unwrap();
+        let pkg = orbis_pkg::Pkg::new(fs::read(&path).unwrap()).unwrap();
+        let mut preview = install::plan_with_mode(&pkg, &base, mode, SilentProgress).unwrap();
+        preview.available_bytes = 0; // Space can be freed between preview and confirmation.
+        let progress = ObserveScan {
+            phase,
             base: base.clone(),
-            mode: install::InstallMode::Separate,
-        },
-        &SilentProgress,
-    )
-    .unwrap() else {
-        panic!()
-    };
-    fs::write(&path, common::update("01.02", "new.txt", b"NEW DATA")).unwrap();
-    let failure = run(
-        &path,
-        Operation::InstallUpdate {
-            base,
-            preview: Box::new(preview),
-        },
-        &SilentProgress,
-    )
-    .unwrap_err();
-    assert!(failure.details.contains("changed after the preview"));
-    assert!(!dir.path().join("CUSA00000-UPDATE").exists());
+            scans: AtomicUsize::new(0),
+        };
+        run(
+            &path,
+            Operation::InstallUpdate {
+                base,
+                preview: Box::new(preview),
+            },
+            &progress,
+        )
+        .unwrap();
+        assert_eq!(progress.scans.load(Ordering::Relaxed), 1);
+    }
 }
 
 #[test]
