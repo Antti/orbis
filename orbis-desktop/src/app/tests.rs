@@ -371,7 +371,7 @@ fn extracted_game_can_preview_retry_and_install_an_update() {
     finish(&mut app);
     click(&mut app, "Open game folder in Orbis");
     finish(&mut app);
-    assert_eq!(app.game.as_ref().unwrap().base, base);
+    assert_eq!(app.game.as_ref().unwrap().target.path, base);
     assert!(
         frame(&mut app, Default::default())
             .nodes
@@ -427,7 +427,7 @@ fn extracted_game_can_preview_retry_and_install_an_update() {
     click(&mut app, "Done");
     finish(&mut app);
     let game = app.game.as_ref().unwrap();
-    assert_eq!(game.base, base);
+    assert_eq!(game.target.path, base);
     assert_eq!(
         game.status.as_ref().unwrap().active_version.as_deref(),
         Some("01.12")
@@ -525,12 +525,21 @@ fn incompatible_packages_with_locked_entries_offer_a_replacement_without_a_passc
 
     let mut missing_keys = features::passcoded_pkg(2);
     common::be32(&mut missing_keys, 0x1000, 0x16); // No EntryKeys record.
+    let mut partial_sfo = features::passcoded_pkg(2);
+    partial_sfo.truncate(0x1a00); // The entry table and key record are complete.
+    let mut partial_key = features::passcoded_pkg_with_entry(2, EntryId::PfsImageKey);
+    // The logical byte is present at EOF, but the rest of the AES block is absent.
+    let last_byte = partial_key.len() as u32 - 1;
+    common::be32(&mut partial_key, 0x1030, last_byte);
+    common::be32(&mut partial_key, 0x1034, 1);
 
     for (file, bytes, reason) in [
         ("base.pkg", base_pkg, "expected a PS4 full-file"),
         ("delta.pkg", delta, "binary delta packages"),
         ("category.pkg", wrong_category, "CATEGORY must be gp"),
         ("missing-keys.pkg", missing_keys, "missing entry-key record"),
+        ("partial-sfo.pkg", partial_sfo, "extends beyond the end"),
+        ("partial-key.pkg", partial_key, "extends beyond the end"),
         (
             "unsupported-sfo.pkg",
             unsupported_sfo,
@@ -548,6 +557,28 @@ fn incompatible_packages_with_locked_entries_offer_a_replacement_without_a_passc
         finish(&mut app);
         assert_rejected_locked_update(&mut app, reason);
     }
+}
+
+#[test]
+fn opening_a_truncated_package_shows_the_damage_even_when_the_key_is_loaded() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("truncated.pkg");
+    let mut bytes = features::passcoded_pkg(3);
+    bytes.truncate(0x1a01);
+    fs::write(&path, bytes).unwrap();
+    let mut app = OrbisApp::default();
+    app.open(path);
+    finish(&mut app);
+    assert_eq!(app.package.as_ref().unwrap().update.missing_keys, 0);
+    let tree = frame(&mut app, Default::default());
+    assert!(tree.nodes.iter().any(|(_, n)| {
+        n.value()
+            .is_some_and(|v| v.contains("extends beyond the end"))
+    }));
+    assert!(!tree.nodes.iter().any(|(_, n)| matches!(
+        n.label(),
+        Some("Package passcode (optional)" | "Package passcode required" | "Validate passcode")
+    )));
 }
 
 #[test]
@@ -814,6 +845,7 @@ fn update_with_locked_metadata_requires_a_passcode_even_with_readable_sfo() {
     let error = operations::run(
         &path,
         Operation::PreviewUpdate {
+            package: UpdatePackage::Readable(app.package.as_ref().unwrap().content_id),
             base: base.clone(),
             mode: InstallMode::Separate,
         },
@@ -857,19 +889,114 @@ fn contextual_update_accepts_a_passcode_and_rereads_the_game_on_back() {
     assert!(app.preview.is_some());
     click(&mut app, "Back to game");
     finish(&mut app);
-    assert_eq!(app.game.as_ref().unwrap().base, base);
+    assert_eq!(app.game.as_ref().unwrap().target.path, base);
     assert!(app.package.is_none() && app.passcode.is_none() && app.preview.is_none());
+}
+
+fn merged_edition(parent: &std::path::Path, region: &[u8; 2]) -> PathBuf {
+    use crate::common;
+    use orbis_cli::{SilentProgress, install};
+    let base = common::base_game(parent);
+    let param = base.join("sce_sys/param.sfo");
+    let mut base_sfo = fs::read(&param).unwrap();
+    let mut active = common::update("01.10", "new.txt", b"ACTIVE");
+    active[0x40..0x42].copy_from_slice(region);
+    for sfo in [&mut base_sfo[..], &mut active[0x1a00..0x2000]] {
+        let offset = sfo.windows(7).position(|s| s == b"UP0000-").unwrap();
+        sfo[offset..offset + 2].copy_from_slice(region);
+    }
+    fs::write(param, base_sfo).unwrap();
+    let active = orbis_pkg::Pkg::new(active).unwrap();
+    install::install_with_mode(&active, &base, InstallMode::Merge, SilentProgress).unwrap();
+    base
+}
+
+#[test]
+fn update_checks_reject_a_merged_game_from_another_edition() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = merged_edition(temp.path(), b"EP");
+    let path = temp.path().join("update.pkg");
+    for bytes in [
+        features::passcoded_pkg(2),
+        crate::common::update("01.12", "new.txt", b"NEXT"),
+    ] {
+        fs::write(&path, bytes).unwrap();
+        let mut app = OrbisApp::default();
+        app.open_package(path.clone(), UpdateBase::Game(base.clone()));
+        finish(&mut app);
+        assert!(
+            app.game.is_none(),
+            "a mismatched PKG opened the recovery screen"
+        );
+        let tree = frame(&mut app, Default::default());
+        assert!(
+            tree.nodes
+                .iter()
+                .any(|(_, n)| n.value().is_some_and(|v| v.contains("does not match")))
+        );
+        assert!(
+            !tree
+                .nodes
+                .iter()
+                .any(|(_, n)| matches!(n.label(), Some("Restore base" | "Recover base")))
+        );
+    }
+    assert_eq!(fs::read(base.join("new.txt")).unwrap(), b"ACTIVE");
+}
+
+#[test]
+fn package_recovery_rechecks_the_edition_after_the_game_folder_is_replaced() {
+    for (pending, button) in [(false, "Restore base"), (true, "Recover base")] {
+        let temp = tempfile::tempdir().unwrap();
+        let live = temp.path().join("live");
+        let replacement = temp.path().join("replacement");
+        let base = merged_edition(&live, b"UP");
+        merged_edition(&replacement, b"EP");
+        if pending {
+            for parent in [&live, &replacement] {
+                fs::write(
+                    parent.join(".CUSA00000.orbis-install/merge/pending.json"),
+                    br#""restore""#,
+                )
+                .unwrap();
+            }
+        }
+        let path = temp.path().join("next.pkg");
+        fs::write(&path, crate::common::update("01.12", "new.txt", b"NEXT")).unwrap();
+        let mut app = OrbisApp::default();
+        app.open_package(path, UpdateBase::Game(base.clone()));
+        finish(&mut app);
+        fs::rename(&live, temp.path().join("original")).unwrap();
+        fs::rename(&replacement, &live).unwrap();
+
+        for action in [button, "Refresh"] {
+            click(&mut app, action);
+            finish(&mut app);
+            assert!(
+                app.notice
+                    .as_ref()
+                    .unwrap()
+                    .details
+                    .contains("does not match")
+            );
+            assert_eq!(fs::read(base.join("new.txt")).unwrap(), b"ACTIVE");
+            click(&mut app, "Done");
+        }
+        app.open_game(base.clone());
+        finish(&mut app);
+        click(&mut app, button);
+        finish(&mut app);
+        assert!(!app.notice.as_ref().unwrap().attention);
+        assert!(!base.join("new.txt").exists());
+    }
 }
 
 #[test]
 fn locked_update_can_restore_or_recover_a_merged_target_without_the_pkg() {
-    use crate::common;
-    use orbis_cli::{SilentProgress, install};
+    use orbis_cli::install;
     for (pending, button) in [(false, "Restore base"), (true, "Recover base")] {
         let dir = tempfile::tempdir().unwrap();
-        let base = common::base_game(dir.path());
-        let active = orbis_pkg::Pkg::new(common::update("01.10", "new.txt", b"ACTIVE")).unwrap();
-        install::install_with_mode(&active, &base, InstallMode::Merge, SilentProgress).unwrap();
+        let base = merged_edition(dir.path(), b"UP");
         if pending {
             fs::write(
                 dir.path()

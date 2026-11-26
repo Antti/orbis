@@ -14,6 +14,18 @@ fn invalid(message: impl Into<String>) -> io::Error {
 }
 
 impl<R: AsRef<[u8]>> Pkg<R> {
+    /// Borrows the complete on-disk payload, including AES padding, without loading a key.
+    pub fn stored_entry_data(&self, entry: &PkgEntry) -> io::Result<&[u8]> {
+        // Widen the u32 plaintext length before rounding to the stored block boundary.
+        let size = entry.data_size() as u64;
+        let stored_size = if entry.is_encrypted() {
+            size.next_multiple_of(16)
+        } else {
+            size
+        };
+        self.stored_range(entry.data_offset() as u64, stored_size)
+    }
+
     /// Checks the header, body, SC entry chains, digest table and entry payloads.
     /// With `include_pfs`, also checks the stored full/signed-region PFS digests.
     /// Hashes ciphertext as stored, without needing decryption keys.
@@ -49,24 +61,12 @@ impl<R: AsRef<[u8]>> Pkg<R> {
             .entries()
             .map(|e| e.map(|(_, e)| e).map_err(|e| invalid(e.to_string())))
             .collect::<io::Result<Vec<_>>>()?;
-        let bytes = |entry: &PkgEntry| {
-            let size = entry.data_size() as u64;
-            // Encrypted entry sizes describe the plaintext, but stored hashes
-            // cover whole AES blocks, including the final padding bytes.
-            // Widen the u32 size before rounding so it cannot overflow.
-            let stored_size = if entry.is_encrypted() {
-                (size + 15) & !15
-            } else {
-                size
-            };
-            self.stored_range(entry.data_offset() as u64, stored_size)
-        };
         let mut ids = HashSet::new();
         for entry in &entries {
             if !ids.insert(entry.id()) {
                 return Err(invalid("duplicate PKG entry ID"));
             }
-            bytes(entry)?;
+            self.stored_entry_data(entry)?;
         }
         let mut report = IntegrityReport::default();
         let mut check = |name: &str, expected: &[u8], parts: &[&[u8]]| -> io::Result<()> {
@@ -111,7 +111,7 @@ impl<R: AsRef<[u8]>> Pkg<R> {
         )?;
         let find = |id| entries.iter().find(|e| e.entry_id() == id);
         if let Some(digests) = find(EntryId::Digests) {
-            let table = bytes(digests)?;
+            let table = self.stored_entry_data(digests)?;
             if table.len() < entries.len() * 32 {
                 return Err(invalid("truncated PKG digest table"));
             }
@@ -125,7 +125,7 @@ impl<R: AsRef<[u8]>> Pkg<R> {
                     check(
                         &format!("entry 0x{:08X}", entry.id()),
                         &table[i * 32..i * 32 + 32],
-                        &[bytes(entry)?],
+                        &[self.stored_entry_data(entry)?],
                     )?;
                 }
             }
@@ -155,7 +155,7 @@ impl<R: AsRef<[u8]>> Pkg<R> {
                     }
                     continue;
                 };
-                let data = bytes(entry)?;
+                let data = self.stored_entry_data(entry)?;
                 parts.push(if second && *id == EntryId::Metas {
                     data.get(..usize::from(header.pkg_sc_entry_count.get()) * 32)
                         .ok_or_else(|| invalid("SC entry count exceeds metadata table"))?

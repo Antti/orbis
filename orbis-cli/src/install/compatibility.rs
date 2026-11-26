@@ -62,6 +62,10 @@ pub struct LockedUpdate {
 }
 
 impl LockedUpdate {
+    pub fn content_id(&self) -> ContentId {
+        self.id
+    }
+
     /// Reads installation metadata under a shared lock. Full preview verifies file contents.
     pub fn check_target(&self, path: &Path, mode: InstallMode) -> Result<()> {
         let location = Layout::open(path, false)?;
@@ -71,7 +75,7 @@ impl LockedUpdate {
             super::merge::require_original_base(&location)?;
         }
         let base = location.base_metadata()?;
-        check_identity(&self.id, &base)?;
+        check_identity(&self.id, &base.title_id, &base.content_id)?;
         self.check_version(&location, &base)
     }
 
@@ -93,16 +97,26 @@ impl LockedUpdate {
 pub fn inspect_update<R: AsRef<[u8]>>(pkg: &Pkg<R>) -> UpdateCheck {
     let mut missing_keys = 0;
     let mut highest_slot = None;
+    let mut truncated_entry = None;
     for (_, entry) in pkg.entries().map_while(|entry| entry.ok()) {
+        if !entry.is_encrypted() {
+            continue;
+        }
+        if truncated_entry.is_none() && pkg.stored_entry_data(&entry).is_err() {
+            truncated_entry = Some(entry.id());
+        }
         let slot = entry.key_index();
-        if entry.is_encrypted() && !pkg.has_entry_key(slot) {
+        if !pkg.has_entry_key(slot) {
             missing_keys += 1;
             highest_slot = highest_slot.max(Some(slot));
         }
     }
     UpdateCheck {
         missing_keys,
-        readiness: classify_update(pkg, highest_slot),
+        readiness: match truncated_entry {
+            Some(id) => UpdateReadiness::Rejected(InstallError::TruncatedEntry { id }),
+            None => classify_update(pkg, highest_slot),
+        },
     }
 }
 
@@ -182,14 +196,12 @@ pub fn update_metadata<R: AsRef<[u8]>>(pkg: &Pkg<R>) -> Result<AppMetadata> {
 
 /// Checks the header against the extracted base even when PARAM.SFO is locked.
 pub fn check_update_identity<R: AsRef<[u8]>>(pkg: &Pkg<R>, base: &AppMetadata) -> Result<()> {
-    check_identity(pkg.header().content_id(), base)
+    check_identity(pkg.header().content_id(), &base.title_id, &base.content_id)
 }
 
-fn check_identity(id: &ContentId, base: &AppMetadata) -> Result<()> {
-    if id.as_str() != base.content_id || id.title_id() != base.title_id {
-        return Err(invalid(
-            "update does not match the base game's title and content ID",
-        ));
+pub(super) fn check_identity(id: &ContentId, title_id: &str, content_id: &str) -> Result<()> {
+    if id.as_str() != content_id || id.title_id() != title_id {
+        return Err(InstallError::UpdateIdentityMismatch);
     }
     Ok(())
 }

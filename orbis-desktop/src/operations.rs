@@ -2,6 +2,7 @@
 use orbis_cli::{ExtractError, ExtractOptions, ExtractProgress, PkgExtractor, install};
 use orbis_pkg::{
     entry::EntryId,
+    header::ContentId,
     sfo::{Sfo, Value},
 };
 use std::{
@@ -24,7 +25,7 @@ pub struct PackageInfo {
     pub version: Option<String>,
     pub package_version: Option<String>,
     pub required_system: Option<String>,
-    pub content_id: String,
+    pub content_id: ContentId,
     pub region: Option<&'static str>,
     pub metadata_entries: usize,
     pub artwork: Option<eframe::egui::ColorImage>,
@@ -35,13 +36,24 @@ pub struct PackageInfo {
 }
 
 #[derive(Debug)]
+pub enum UpdatePackage {
+    Readable(ContentId),
+    Locked(install::LockedUpdate),
+}
+
+impl UpdatePackage {
+    fn game_target(&self, base: &Path) -> install::GameTarget {
+        let id = match self {
+            Self::Readable(id) => *id,
+            Self::Locked(update) => update.content_id(),
+        };
+        install::GameTarget::for_update(base.to_owned(), id)
+    }
+}
+
+#[derive(Debug)]
 pub enum Operation {
     Inspect,
-    CheckUpdateTarget {
-        update: install::LockedUpdate,
-        base: PathBuf,
-        mode: install::InstallMode,
-    },
     Verify {
         metadata_only: bool,
     },
@@ -56,21 +68,22 @@ pub enum Operation {
         resume: bool,
     },
     PreviewUpdate {
+        package: UpdatePackage,
         base: PathBuf,
         mode: install::InstallMode,
     },
     CheckGame {
-        base: PathBuf,
+        target: install::GameTarget,
     },
     RestoreBase {
-        base: PathBuf,
+        target: install::GameTarget,
     },
     RollbackSeparate {
-        base: PathBuf,
+        target: install::GameTarget,
         plan: install::SeparateRollback,
     },
     RecoverBase {
-        base: PathBuf,
+        target: install::GameTarget,
     },
     InstallUpdate {
         base: PathBuf,
@@ -86,7 +99,7 @@ impl Operation {
             Self::PreviewExport { .. } => "Checking export",
             Self::Export(_) => "Exporting merged game",
             Self::Extract { .. } => "Extracting package",
-            Self::CheckUpdateTarget { .. } | Self::PreviewUpdate { .. } => "Checking update",
+            Self::PreviewUpdate { .. } => "Checking update",
             Self::InstallUpdate { .. } => "Installing update",
             Self::CheckGame { .. } => "Checking game folder",
             Self::RestoreBase { .. } => "Restoring base game",
@@ -109,7 +122,7 @@ impl Operation {
             Self::Extract { .. } => {
                 "Completed files remain in the destination. To retry, select the same folder and enable Resume. Conflicting files are preserved; choose a new folder if needed."
             }
-            Self::CheckUpdateTarget { .. } | Self::PreviewUpdate { .. } => {
+            Self::PreviewUpdate { .. } => {
                 "Use a newer full-file update PKG with the same title and content IDs as the base game."
             }
             Self::CheckGame { .. } => {
@@ -147,12 +160,12 @@ pub enum Outcome {
     ExportPreview(Box<install::ExportPreview>),
     Preview(install::InstallPlan),
     GameStatus {
-        base: PathBuf,
+        target: install::GameTarget,
         status: Box<install::InstallationStatus>,
         rollback: Option<install::SeparateRollback>,
     },
     GameChanged {
-        base: PathBuf,
+        target: install::GameTarget,
         title: &'static str,
         message: String,
     },
@@ -299,39 +312,62 @@ fn execute(
                 incomplete,
             });
         }
-        Operation::CheckUpdateTarget { base, .. } | Operation::PreviewUpdate { base, .. }
-            if install::merge_status(base)?.is_some() =>
-        {
-            return game_status(base, progress);
+        Operation::PreviewUpdate {
+            package,
+            base,
+            mode,
+        } => {
+            let target = package.game_target(base);
+            match target.merged_status(progress) {
+                Ok(Some(status)) => {
+                    return Ok(Outcome::GameStatus {
+                        target,
+                        status: Box::new(status),
+                        rollback: None,
+                    });
+                }
+                Err(error @ install::InstallError::UpdateIdentityMismatch) => {
+                    return Ok(Outcome::UpdateTarget(Err(error)));
+                }
+                Err(error) => return Err(error.into()),
+                Ok(None) => {}
+            }
+            if let UpdatePackage::Locked(update) = package {
+                return Ok(Outcome::UpdateTarget(update.check_target(base, *mode)));
+            }
         }
-        Operation::CheckUpdateTarget { update, base, mode } => {
-            return Ok(Outcome::UpdateTarget(update.check_target(base, *mode)));
+        Operation::CheckGame { target } => {
+            let (status, rollback) = target.status_with_rollback(progress)?;
+            return Ok(Outcome::GameStatus {
+                target: target.clone(),
+                status: Box::new(status),
+                rollback,
+            });
         }
-        Operation::CheckGame { base } => return game_status(base, progress),
-        Operation::RollbackSeparate { base, plan } => {
-            plan.apply(base, progress)?;
+        Operation::RollbackSeparate { target, plan } => {
+            plan.apply(&target.path, progress)?;
             return Ok(Outcome::GameChanged {
-                base: base.clone(),
+                target: target.clone(),
                 title: "Rollback complete",
                 message: format!("Version {} is now active.", plan.target_version()),
             });
         }
-        Operation::RestoreBase { base } | Operation::RecoverBase { base } => {
+        Operation::RestoreBase { target } | Operation::RecoverBase { target } => {
             let (title, message) = if matches!(operation, Operation::RestoreBase { .. }) {
-                install::restore_merged(base, progress)?;
+                target.restore_merged(progress)?;
                 (
                     "Base restored",
                     "The original game files have been restored.",
                 )
             } else {
-                install::recover_with_progress(base, progress)?;
+                target.recover(progress)?;
                 (
                     "Recovery complete",
                     "Recovery finished for this game folder.",
                 )
             };
             return Ok(Outcome::GameChanged {
-                base: base.clone(),
+                target: target.clone(),
                 title,
                 message: message.into(),
             });
@@ -358,7 +394,7 @@ fn execute(
             version: None,
             package_version: None,
             required_system: None,
-            content_id: header.content_id().as_str().to_owned(),
+            content_id: *header.content_id(),
             region: content_region(header.content_id().service_id()),
             metadata_entries: header.entry_count(),
             artwork: None,
@@ -393,7 +429,7 @@ fn execute(
     }
 
     let target = match &operation {
-        Operation::PreviewUpdate { base, mode } => Some((base, *mode)),
+        Operation::PreviewUpdate { base, mode, .. } => Some((base, *mode)),
         Operation::InstallUpdate { base, preview } => Some((base, preview.mode)),
         _ => None,
     };
@@ -411,7 +447,6 @@ fn execute(
     }
     match operation {
         Operation::Inspect
-        | Operation::CheckUpdateTarget { .. }
         | Operation::Verify { .. }
         | Operation::PreviewExport { .. }
         | Operation::Export(_)
@@ -456,9 +491,9 @@ fn execute(
                 incomplete,
             })
         }
-        Operation::PreviewUpdate { base, mode } => Ok(Outcome::Preview(install::plan_with_mode(
-            &pkg, &base, mode, progress,
-        )?)),
+        Operation::PreviewUpdate { base, mode, .. } => Ok(Outcome::Preview(
+            install::plan_with_mode(&pkg, &base, mode, progress)?,
+        )),
         Operation::InstallUpdate { base, preview } => {
             let fresh = install::plan_with_mode(&pkg, &base, preview.mode, progress)?;
             if !same_update(&preview, &fresh) {
@@ -467,7 +502,10 @@ fn execute(
             let plan = install::install_with_mode(&pkg, &base, preview.mode, progress)?;
             if plan.mode == install::InstallMode::Merge {
                 return Ok(Outcome::GameChanged {
-                    base: plan.destination,
+                    target: install::GameTarget::for_update(
+                        plan.destination,
+                        *pkg.header().content_id(),
+                    ),
                     title: "Update merged",
                     message: format!(
                         "{} is now at version {} in the game folder. Keep the adjacent backup folder.",
@@ -486,15 +524,6 @@ fn execute(
             })
         }
     }
-}
-
-fn game_status(base: &Path, progress: &impl ExtractProgress) -> Result<Outcome> {
-    let (status, rollback) = install::status_with_rollback(base, progress)?;
-    Ok(Outcome::GameStatus {
-        base: base.to_owned(),
-        status: Box::new(status),
-        rollback,
-    })
 }
 
 fn apply_sfo(info: &mut PackageInfo, sfo: &Sfo<'_>) {

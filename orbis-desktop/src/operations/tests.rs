@@ -11,6 +11,11 @@ fn package(root: &Path) -> PathBuf {
     path
 }
 
+fn readable_update(path: &Path) -> UpdatePackage {
+    let pkg = orbis_pkg::Pkg::parse(fs::read(path).unwrap()).unwrap();
+    UpdatePackage::Readable(*pkg.header().content_id())
+}
+
 fn verify_report(
     path: &Path,
     metadata_only: bool,
@@ -493,7 +498,10 @@ fn inspects_then_extracts_real_package_without_a_cli() {
     assert_eq!(info.title_id, "CUSA00000");
     assert_eq!(info.version.as_deref(), Some("01.01"));
     assert_eq!(info.region, Some("North America"));
-    assert_eq!(info.content_id, "UP0000-CUSA00000_00-0000000000000000");
+    assert_eq!(
+        info.content_id.as_str(),
+        "UP0000-CUSA00000_00-0000000000000000"
+    );
     assert_eq!(info.metadata_entries, 3);
     assert_eq!(info.update.missing_keys, 0);
     assert!(info.required_system.is_none());
@@ -552,6 +560,7 @@ fn previews_and_installs_updates_without_changing_the_base() {
     let Outcome::Preview(preview) = run(
         &path,
         Operation::PreviewUpdate {
+            package: readable_update(&path),
             base: base.clone(),
             mode: install::InstallMode::Separate,
         },
@@ -595,6 +604,7 @@ fn refuses_a_changed_update_after_preview() {
     let Outcome::Preview(preview) = run(
         &path,
         Operation::PreviewUpdate {
+            package: readable_update(&path),
             base: base.clone(),
             mode: install::InstallMode::Separate,
         },
@@ -798,6 +808,7 @@ fn merge_preview_install_and_restore_work_without_the_original_package() {
     let Outcome::Preview(preview) = run(
         &path,
         Operation::PreviewUpdate {
+            package: readable_update(&path),
             base: base.clone(),
             mode: install::InstallMode::Merge,
         },
@@ -808,7 +819,7 @@ fn merge_preview_install_and_restore_work_without_the_original_package() {
     };
     assert_eq!(preview.mode, install::InstallMode::Merge);
     assert_eq!(preview.destination, fs::canonicalize(&base).unwrap());
-    let Outcome::GameChanged { base: output, .. } = run(
+    let Outcome::GameChanged { target, .. } = run(
         &path,
         Operation::InstallUpdate {
             base: base.clone(),
@@ -819,11 +830,13 @@ fn merge_preview_install_and_restore_work_without_the_original_package() {
     .unwrap() else {
         panic!()
     };
-    assert_eq!(fs::read(output.join("new.txt")).unwrap(), b"NEW DATA");
+    assert_eq!(fs::read(target.path.join("new.txt")).unwrap(), b"NEW DATA");
     fs::remove_file(&path).unwrap();
     let Outcome::GameStatus { status, .. } = run(
         &path,
-        Operation::CheckGame { base: base.clone() },
+        Operation::CheckGame {
+            target: install::GameTarget::open(base.clone()),
+        },
         &SilentProgress,
     )
     .unwrap() else {
@@ -835,7 +848,9 @@ fn merge_preview_install_and_restore_work_without_the_original_package() {
     assert!(matches!(
         run(
             &path,
-            Operation::RestoreBase { base: base.clone() },
+            Operation::RestoreBase {
+                target: install::GameTarget::open(base.clone())
+            },
             &SilentProgress
         )
         .unwrap(),
@@ -846,7 +861,16 @@ fn merge_preview_install_and_restore_work_without_the_original_package() {
         original_sfo
     );
     assert!(!base.join("new.txt").exists());
-    assert!(run(&path, Operation::RestoreBase { base }, &SilentProgress).is_err());
+    assert!(
+        run(
+            &path,
+            Operation::RestoreBase {
+                target: install::GameTarget::open(base)
+            },
+            &SilentProgress
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -866,6 +890,7 @@ fn checking_an_existing_merge_needs_no_package_and_offers_recovery() {
     let Outcome::GameStatus { status, .. } = run(
         &path,
         Operation::PreviewUpdate {
+            package: UpdatePackage::Readable(*pkg.header().content_id()),
             base: base.clone(),
             mode: install::InstallMode::Separate,
         },
@@ -877,7 +902,9 @@ fn checking_an_existing_merge_needs_no_package_and_offers_recovery() {
     assert!(status.pending_recovery);
     run(
         &path,
-        Operation::RecoverBase { base: base.clone() },
+        Operation::RecoverBase {
+            target: install::GameTarget::open(base.clone()),
+        },
         &SilentProgress,
     )
     .unwrap();

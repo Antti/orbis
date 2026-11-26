@@ -20,7 +20,7 @@ mod status;
 mod storage;
 mod transaction;
 pub use rollback::{SeparateRollback, rollback, rollback_with_progress};
-pub use status::{InstallationStatus, status, status_with_rollback};
+pub use status::{GameTarget, InstallationStatus, status, status_with_rollback};
 
 pub use export::{
     ExportEstimate, ExportPlan, ExportPreview, ExportReport, ExportedDirectory, ResumePlan,
@@ -32,7 +32,7 @@ use crate::{ExtractError, ExtractOptions, ExtractProgress, PkgExtractor, SilentP
 use cap_std::fs::Dir;
 use orbis_pkg::{
     EntryDataError, ParamSfoError, Pkg,
-    header::ContentFlags,
+    header::{ContentFlags, ContentId},
     sfo::{AppMetadata, AppVersion},
 };
 use serde::{Deserialize, Serialize};
@@ -47,12 +47,18 @@ pub(crate) type Result<T> = std::result::Result<T, InstallError>;
 
 #[derive(Debug, Snafu)]
 pub enum InstallError {
+    #[snafu(display("update does not match the base game's title and content ID"))]
+    UpdateIdentityMismatch,
     #[snafu(display("{message}"))]
     Invalid { message: String },
     #[snafu(display("update metadata needs a decryption key for slot {slot}"))]
     MissingUpdateKey { slot: usize },
     #[snafu(display("update metadata uses unsupported key slot {slot}"))]
     UnsupportedUpdateKey { slot: usize },
+    #[snafu(display(
+        "PKG entry 0x{id:08x} extends beyond the end of the file. The package is incomplete or damaged."
+    ))]
+    TruncatedEntry { id: u32 },
     #[snafu(display("cannot unlock update metadata"))]
     PasscodeMetadata {
         source: orbis_pkg::passcode::PasscodeValidationError,
@@ -413,12 +419,7 @@ pub fn install<R: AsRef<[u8]> + Sync, P: ExtractProgress>(
 /// Restores a merged game's originals. Refuses separate updates and pending
 /// merges; use [`recover`] to finish an interrupted merge or restoration.
 pub fn restore_merged(base: &Path, progress: impl ExtractProgress) -> Result<()> {
-    let location = Layout::open(base, true)?;
-    location.require_recovered()?;
-    if !merge::present(&location)? {
-        return Err(invalid("this game has no merged update to restore"));
-    }
-    merge::restore(&location, &progress)
+    GameTarget::open(base.to_owned()).restore_merged(&progress)
 }
 
 /// Recovers an interrupted activation/rollback and removes abandoned staging data.
@@ -430,10 +431,7 @@ pub fn recover(base: &Path) -> Result<()> {
 /// Recovers with non-fatal warnings through [`ExtractProgress::warning`].
 /// Recovery is not cancellable once directory restoration begins.
 pub fn recover_with_progress<P: ExtractProgress>(base: &Path, progress: P) -> Result<()> {
-    let location = Layout::open(base, true)?;
-    merge::recover(&location, &progress)?;
-    location.recover_transaction(&progress)?;
-    location.clean_uncommitted()
+    GameTarget::open(base.to_owned()).recover(&progress)
 }
 
 #[cfg(test)]

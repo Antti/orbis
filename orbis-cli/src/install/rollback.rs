@@ -88,7 +88,7 @@ pub fn rollback_with_progress<P: ExtractProgress>(base: &Path, progress: P) -> R
     let location = Layout::open(base, true)?;
     location.require_recovered()?;
     if merge::present(&location)? {
-        return merge::restore(&location, &progress);
+        return merge::restore(&location, None, &progress);
     }
     rollback_separate(&location, None, &progress)
 }

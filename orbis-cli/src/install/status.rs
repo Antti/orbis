@@ -1,4 +1,4 @@
-//! Diagnose installations without creating state or attempting recovery.
+//! Inspect installations and bind recovery actions to the game selected for an update.
 use super::{
     Result, SeparateRollback,
     rollback::VerifiedUpdate,
@@ -6,6 +6,7 @@ use super::{
 };
 use crate::ExtractProgress;
 use fs2::FileExt;
+use orbis_pkg::header::ContentId;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -32,8 +33,68 @@ impl Drop for ReadLock {
     }
 }
 
+/// A game opened directly, or selected as the destination for a specific update PKG.
+#[derive(Clone, Debug)]
+pub struct GameTarget {
+    pub path: PathBuf,
+    update: Option<ContentId>,
+}
+
+impl GameTarget {
+    pub fn open(path: PathBuf) -> Self {
+        Self { path, update: None }
+    }
+
+    pub fn for_update(path: PathBuf, id: ContentId) -> Self {
+        Self {
+            path,
+            update: Some(id),
+        }
+    }
+
+    pub fn merged_status(
+        &self,
+        progress: &impl ExtractProgress,
+    ) -> Result<Option<InstallationStatus>> {
+        super::merge::status(&self.path, self.update.as_ref(), progress)
+    }
+
+    pub fn status_with_rollback(
+        &self,
+        progress: &impl ExtractProgress,
+    ) -> Result<(InstallationStatus, Option<SeparateRollback>)> {
+        scan(&self.path, self.update.as_ref(), progress, true)
+    }
+
+    // A PKG can only lead here through an existing merge. Never create state
+    // in a replacement folder while trying to restore the selected edition.
+    fn lock_for_recovery(&self) -> Result<Layout> {
+        if self.update.is_some() {
+            Layout::open_locked_existing(&self.path)
+        } else {
+            Layout::open(&self.path, true)
+        }
+    }
+
+    pub fn restore_merged(&self, progress: &impl ExtractProgress) -> Result<()> {
+        let location = self.lock_for_recovery()?;
+        location.require_recovered()?;
+        if !super::merge::present(&location)? {
+            return Err(super::invalid("this game has no merged update to restore"));
+        }
+        super::merge::restore(&location, self.update.as_ref(), progress)
+    }
+
+    pub fn recover(&self, progress: &impl ExtractProgress) -> Result<()> {
+        let location = self.lock_for_recovery()?;
+        super::merge::recover(&location, self.update.as_ref(), progress)?;
+        location.recover_transaction(progress)?;
+        location.clean_uncommitted()
+    }
+}
+
 pub fn status(base: &Path, progress: impl ExtractProgress) -> Result<InstallationStatus> {
-    Ok(scan(base, &progress, false)?.0)
+    Ok(scan(base, None, &progress, false)?.0)
 }
 
 /// Returns the status and an optional separate rollback from the same verified scan.
@@ -41,19 +102,23 @@ pub fn status_with_rollback(
     base: &Path,
     progress: impl ExtractProgress,
 ) -> Result<(InstallationStatus, Option<SeparateRollback>)> {
-    scan(base, &progress, true)
+    scan(base, None, &progress, true)
 }
 
 fn scan(
     base: &Path,
+    update: Option<&ContentId>,
     progress: &impl ExtractProgress,
     prepare_rollback: bool,
 ) -> Result<(InstallationStatus, Option<SeparateRollback>)> {
-    if let Some(report) = super::merge::status(base, progress)? {
+    if let Some(report) = super::merge::status(base, update, progress)? {
         return Ok((report, None));
     }
     let layout = Layout::inspect(base)?;
     let (base_dir, metadata) = layout.original_base()?;
+    if let Some(id) = update {
+        super::compatibility::check_identity(id, &metadata.title_id, &metadata.content_id)?;
+    }
     let mut report = InstallationStatus {
         schema_version: 1,
         mode: super::InstallMode::Separate,

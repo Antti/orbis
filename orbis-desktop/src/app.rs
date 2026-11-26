@@ -1,5 +1,5 @@
 use crate::{
-    operations::{self, Operation, Outcome, OutputFolder, PackageInfo, human_size},
+    operations::{self, Operation, Outcome, OutputFolder, PackageInfo, UpdatePackage, human_size},
     worker::{Details, Job},
 };
 use eframe::egui;
@@ -9,7 +9,7 @@ mod game;
 mod tests;
 mod tools;
 mod view;
-use orbis_cli::install::{InstallError, InstallMode, InstallPlan, UpdateReadiness};
+use orbis_cli::install::{GameTarget, InstallError, InstallMode, InstallPlan, UpdateReadiness};
 use std::{
     path::PathBuf,
     sync::{Arc, atomic::Ordering},
@@ -137,11 +137,13 @@ impl OrbisApp {
     }
 
     fn update_step<'a>(&'a self, readiness: &'a UpdateReadiness) -> UpdateStep<'a> {
+        if let Some(Err(error)) = &self.target_check {
+            return UpdateStep::TargetRejected(error);
+        }
         match readiness {
             UpdateReadiness::Ready(_) => UpdateStep::Preview,
             UpdateReadiness::Rejected(error) => UpdateStep::PackageRejected(error),
             UpdateReadiness::NeedsPasscode(_) => match &self.target_check {
-                Some(Err(error)) => UpdateStep::TargetRejected(error),
                 None if self.base.path().is_some() => UpdateStep::CheckTarget,
                 _ => UpdateStep::EnterPasscode,
             },
@@ -170,19 +172,20 @@ impl OrbisApp {
         };
         let mode = self.mode;
         self.preview = None;
-        match info.update.readiness {
-            UpdateReadiness::Ready(_) => {
-                self.start(info.path.clone(), Operation::PreviewUpdate { base, mode })
-            }
-            UpdateReadiness::NeedsPasscode(update) => {
-                self.target_check = None;
-                self.start(
-                    PathBuf::new(),
-                    Operation::CheckUpdateTarget { update, base, mode },
-                );
-            }
-            UpdateReadiness::Rejected(_) => {}
-        }
+        self.target_check = None;
+        let package = match info.update.readiness {
+            UpdateReadiness::Ready(_) => UpdatePackage::Readable(info.content_id),
+            UpdateReadiness::NeedsPasscode(update) => UpdatePackage::Locked(update),
+            UpdateReadiness::Rejected(_) => return,
+        };
+        self.start(
+            info.path.clone(),
+            Operation::PreviewUpdate {
+                package,
+                base,
+                mode,
+            },
+        );
     }
 
     fn start(&mut self, path: PathBuf, operation: Operation) {
@@ -282,15 +285,15 @@ impl OrbisApp {
             }
             Ok(Outcome::Preview(plan)) => self.preview = Some(plan),
             Ok(Outcome::GameStatus {
-                base,
+                target,
                 status,
                 rollback,
             }) => {
                 self.preview = None;
-                self.game = Some(game::GameFolder::new(base, Some(status), rollback));
+                self.game = Some(game::GameFolder::new(target, Some(status), rollback));
             }
             Ok(Outcome::GameChanged {
-                base,
+                target,
                 title,
                 message,
             }) => {
@@ -299,7 +302,8 @@ impl OrbisApp {
                 if self.game.is_none() && matches!(self.base, UpdateBase::Game(_)) {
                     self.reset_package(UpdateBase::default());
                 }
-                self.game = Some(game::GameFolder::new(base.clone(), None, None));
+                let base = target.path.clone();
+                self.game = Some(game::GameFolder::new(target, None, None));
                 self.invalidate_update_check();
                 self.notice = Some(Notice {
                     title: title.into(),

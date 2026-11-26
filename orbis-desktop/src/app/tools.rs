@@ -389,7 +389,7 @@ mod tests {
         click(&mut app, "Done");
         click(&mut app, "Back");
         assert!(app.export.is_none());
-        assert_eq!(app.game.as_ref().unwrap().base, base);
+        assert_eq!(app.game.as_ref().unwrap().target.path, base);
     }
 
     #[test]

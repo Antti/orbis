@@ -24,6 +24,15 @@ struct MergeManifest {
     files: Vec<Replacement>,
     created_directories: Vec<String>,
 }
+
+impl MergeManifest {
+    fn check_update(&self, update: Option<&ContentId>) -> Result<()> {
+        if let Some(id) = update {
+            compatibility::check_identity(id, &self.title_id, &self.content_id)?;
+        }
+        Ok(())
+    }
+}
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Replacement {
@@ -102,6 +111,7 @@ pub fn merge_status(base: &Path) -> Result<Option<MergeStatus>> {
 
 pub(super) fn status(
     base: &Path,
+    update: Option<&ContentId>,
     progress: &impl ExtractProgress,
 ) -> Result<Option<InstallationStatus>> {
     let layout = Layout::inspect(base)?;
@@ -116,6 +126,7 @@ pub(super) fn status(
         return Ok(None);
     }
     let (dir, manifest) = load(&layout)?;
+    manifest.check_update(update)?;
     let pending_recovery = pending(&layout)?;
     let mut issues = Vec::new();
     if pending_recovery {
@@ -322,7 +333,7 @@ pub(super) fn install<R: AsRef<[u8]> + Sync>(
         Ok(())
     })();
     if let Err(error) = result {
-        if let Err(recovery) = recover(&layout, &NonCancelling(&progress)) {
+        if let Err(recovery) = recover(&layout, None, &NonCancelling(&progress)) {
             return Err(invalid(format!(
                 "{error}; automatic restoration could not finish: {recovery}. Keep the game closed and run recover --base <DIR>"
             )));
@@ -525,8 +536,13 @@ fn verify(
     Ok(states)
 }
 
-pub(super) fn restore(layout: &Layout, progress: &impl ExtractProgress) -> Result<()> {
+pub(super) fn restore(
+    layout: &Layout,
+    update: Option<&ContentId>,
+    progress: &impl ExtractProgress,
+) -> Result<()> {
     let (dir, manifest) = load(layout)?;
+    manifest.check_update(update)?;
     let states = verify(layout, &dir, &manifest, true, progress)?;
     cancelled(progress)?;
     write_json(&dir, "pending.json", &Pending::Restore)?;
@@ -535,12 +551,19 @@ pub(super) fn restore(layout: &Layout, progress: &impl ExtractProgress) -> Resul
     cleanup(layout)
 }
 
-pub(super) fn recover(layout: &Layout, progress: &impl ExtractProgress) -> Result<()> {
+pub(super) fn recover(
+    layout: &Layout,
+    update: Option<&ContentId>,
+    progress: &impl ExtractProgress,
+) -> Result<()> {
     if present(layout)? && pending(layout)? {
         let progress = NonCancelling(progress);
         let (dir, manifest) = load(layout)?;
+        manifest.check_update(update)?;
         let states = verify(layout, &dir, &manifest, false, &progress)?;
         restore_checked(layout, dir, &manifest, states, &progress)?;
+    } else if update.is_some() {
+        return Err(invalid("this game has no interrupted merge to recover"));
     }
     cleanup(layout)
 }

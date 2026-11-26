@@ -124,6 +124,7 @@ impl OrbisApp {
         let step = self.update_step(readiness);
         let installing = self.action == Action::Update;
         let rejection = match step {
+            UpdateStep::PackageRejected(error @ InstallError::TruncatedEntry { .. }) => Some(error),
             UpdateStep::PackageRejected(error) | UpdateStep::TargetRejected(error)
                 if installing =>
             {
@@ -135,10 +136,11 @@ impl OrbisApp {
         let show_passcode = if installing {
             matches!(step, UpdateStep::Preview | UpdateStep::EnterPasscode)
         } else {
-            !matches!(
-                step,
-                UpdateStep::PackageRejected(InstallError::PasscodeMetadata { .. })
-            )
+            rejection.is_none()
+                && !matches!(
+                    step,
+                    UpdateStep::PackageRejected(InstallError::PasscodeMetadata { .. })
+                )
         };
         if let Some(error) = rejection {
             warning(ui, &operations::Failure::from_error(error).details);
@@ -245,7 +247,7 @@ impl OrbisApp {
             });
         });
         egui::CollapsingHeader::new("Package details").show(ui, |ui| {
-            detail(ui, "Content ID", &info.content_id);
+            detail(ui, "Content ID", info.content_id.as_str());
             detail(ui, "Package version", info.package_version.as_deref().unwrap_or("Unavailable"));
             detail(ui, "Region from ID", info.region.unwrap_or("Unknown"));
             detail(ui, "Metadata entries", &info.metadata_entries.to_string());
@@ -483,7 +485,7 @@ impl OrbisApp {
                     && let Some(game) = &self.game
                     && game.status.is_none()
                 {
-                    self.refresh_game(game.base.clone());
+                    self.refresh_game(game.target.clone());
                 } else if refresh && let UpdateBase::Game(base) = &self.base {
                     self.open_game(base.clone());
                 }

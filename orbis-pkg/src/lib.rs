@@ -239,32 +239,13 @@ impl<R: AsRef<[u8]>> Pkg<R> {
     /// # }
     /// ```
     pub fn entry_data(&self, entry: &PkgEntry) -> Result<Vec<u8>, EntryDataError> {
-        // Check if we have a decryption key for encrypted entries.
-        if entry.is_encrypted() && self.entry_key(entry.key_index()).is_none() {
-            return Err(EntryDataError::NoDecryptionKey {
-                key_index: entry.key_index(),
-            });
-        }
-
-        // Get entry data offset and size.
-        let offset = entry.data_offset();
-        let padded_size = if entry.is_encrypted() {
-            (entry.data_size() + 15) & !15 // Include padding for decryption.
-        } else {
-            entry.data_size()
-        };
-
         let raw_data = self
-            .raw
-            .as_ref()
-            .get(offset..(offset + padded_size))
-            .ok_or(EntryDataError::InvalidDataOffset)?;
-
-        // Decrypt if needed.
+            .stored_entry_data(entry)
+            .map_err(|_| EntryDataError::InvalidDataOffset)?;
         if entry.is_encrypted() {
-            if raw_data.len() % 16 != 0 {
-                return Err(EntryDataError::MisalignedData {
-                    size: raw_data.len(),
+            if self.entry_key(entry.key_index()).is_none() {
+                return Err(EntryDataError::NoDecryptionKey {
+                    key_index: entry.key_index(),
                 });
             }
 
