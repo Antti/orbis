@@ -61,6 +61,10 @@ pub enum InstallError {
     TruncatedEntry { id: u32 },
     #[snafu(display("The package filesystem image is missing or incomplete."))]
     IncompletePfsImage,
+    #[snafu(display("Cannot read the package filesystem image header."))]
+    InvalidPfsHeader {
+        source: orbis_pfs::header::ReadError,
+    },
     #[snafu(display("cannot unlock update metadata"))]
     PasscodeMetadata {
         source: orbis_pkg::passcode::PasscodeValidationError,

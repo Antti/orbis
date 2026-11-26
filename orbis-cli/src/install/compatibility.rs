@@ -108,21 +108,29 @@ pub fn inspect_update<R: AsRef<[u8]>>(pkg: &Pkg<R>) -> UpdateCheck {
             highest_slot = highest_slot.max(Some(slot));
         }
     }
-    let has_image = pkg
-        .get_pfs_image()
-        .is_some_and(|image| !image.data.is_empty());
     let readiness = match (truncated_entry, classify_update(pkg, highest_slot)) {
         // A partial ciphertext block is damaged even when its key is missing.
         (Some((id, true)), _) => UpdateReadiness::Rejected(InstallError::TruncatedEntry { id }),
         (_, rejected @ UpdateReadiness::Rejected(_)) => rejected,
         (Some((id, false)), _) => UpdateReadiness::Rejected(InstallError::TruncatedEntry { id }),
-        (None, _) if !has_image => UpdateReadiness::Rejected(InstallError::IncompletePfsImage),
-        (None, readiness) => readiness,
+        (None, readiness) => match check_filesystem_header(pkg) {
+            Ok(()) => readiness,
+            Err(error) => UpdateReadiness::Rejected(error),
+        },
     };
     UpdateCheck {
         missing_keys,
         readiness,
     }
+}
+
+fn check_filesystem_header<R: AsRef<[u8]>>(pkg: &Pkg<R>) -> Result<()> {
+    let image = pkg
+        .get_pfs_image()
+        .ok_or(InstallError::IncompletePfsImage)?;
+    orbis_pfs::header::read_mode(image.data)
+        .map_err(|source| InstallError::InvalidPfsHeader { source })?;
+    Ok(())
 }
 
 fn classify_update<R: AsRef<[u8]>>(pkg: &Pkg<R>, missing_slot: Option<usize>) -> UpdateReadiness {

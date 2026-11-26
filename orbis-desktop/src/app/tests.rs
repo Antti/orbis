@@ -537,6 +537,10 @@ fn incompatible_packages_with_locked_entries_offer_a_replacement_without_a_passc
     common::be32(&mut partial_key, 0x1034, 1);
     let mut partial_image = features::passcoded_pkg(2);
     partial_image.truncate(partial_image.len() - 1);
+    let mut short_header = features::passcoded_pkg(2);
+    common::be64(&mut short_header, 0x418, 1); // In bounds, too small for the outer PFS header.
+    let mut invalid_header = features::passcoded_pkg(2);
+    invalid_header[0x2000] = 0; // Unsupported outer PFS version.
     let mut partial_plain_entry = features::passcoded_pkg(2);
     let end = partial_plain_entry.len() as u32;
     common::be32(&mut partial_plain_entry, 0x1030, end); // Unencrypted PfsImageKey.
@@ -555,6 +559,12 @@ fn incompatible_packages_with_locked_entries_offer_a_replacement_without_a_passc
         ),
         ("partial-image.pkg", partial_image, "filesystem image"),
         (
+            "short-header.pkg",
+            short_header,
+            "too short to read the header",
+        ),
+        ("invalid-header.pkg", invalid_header, "invalid version"),
+        (
             "unsupported-sfo.pkg",
             unsupported_sfo,
             "unsupported key slot 7",
@@ -571,6 +581,50 @@ fn incompatible_packages_with_locked_entries_offer_a_replacement_without_a_passc
         finish(&mut app);
         assert_rejected_locked_update(&mut app, reason);
     }
+}
+
+#[test]
+fn metadata_only_verification_can_unlock_entries_when_the_filesystem_is_incomplete() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("partial-image.pkg");
+    let mut bytes = features::passcoded_pkg(2);
+    bytes.truncate(bytes.len() - 1);
+    fs::write(&path, bytes).unwrap();
+
+    let mut app = OrbisApp::default();
+    app.open(path);
+    finish(&mut app);
+    click(&mut app, "Verify package");
+    click(&mut app, "Metadata only (quicker)");
+    let tree = frame(&mut app, Default::default());
+    assert!(tree.nodes.iter().any(|(_, node)| {
+        node.value()
+            .is_some_and(|text| text.contains("filesystem image"))
+    }));
+    click(&mut app, "Package passcode (optional)");
+    app.passcode_input = String::from_utf8(features::PASSCODE.to_vec())
+        .unwrap()
+        .into();
+    click(&mut app, "Validate passcode");
+    finish(&mut app);
+    assert!(app.passcode.is_some());
+    assert!(
+        app.package
+            .as_ref()
+            .unwrap()
+            .update
+            .readiness
+            .rejection()
+            .is_some()
+    );
+
+    click(&mut app, "Verify package");
+    finish(&mut app);
+    let report = app.verification.as_ref().unwrap();
+    assert!(report.metadata_only);
+    let readability = report.readability.as_ref().unwrap();
+    assert_eq!(readability.files, 3);
+    assert!(readability.skipped.is_empty());
 }
 
 #[test]

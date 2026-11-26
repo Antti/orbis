@@ -125,30 +125,26 @@ impl OrbisApp {
             .update_target
             .step(readiness, self.base.path().is_some());
         let installing = self.action == Action::Update;
-        let rejection = match step {
+        let (rejection, show_passcode) = match step {
             UpdateStep::PackageRejected(
-                error @ (InstallError::TruncatedEntry { .. } | InstallError::IncompletePfsImage),
-            ) => Some(error),
+                error @ (InstallError::IncompletePfsImage | InstallError::InvalidPfsHeader { .. }),
+            ) => (
+                Some(error),
+                self.action == Action::Verify && self.metadata_only,
+            ),
+            UpdateStep::PackageRejected(error @ InstallError::TruncatedEntry { .. }) => {
+                (Some(error), false)
+            }
             UpdateStep::PackageRejected(error) | UpdateStep::TargetRejected(error)
                 if installing =>
             {
-                Some(error)
+                (Some(error), false)
             }
-            _ => None,
+            UpdateStep::PackageRejected(InstallError::PasscodeMetadata { .. }) => (None, false),
+            UpdateStep::CheckTarget if installing => (None, false),
+            _ => (None, true),
         };
         let needs_passcode = installing && matches!(step, UpdateStep::EnterPasscode);
-        let show_passcode = if installing {
-            matches!(
-                step,
-                UpdateStep::CheckUpdate | UpdateStep::Install(_) | UpdateStep::EnterPasscode
-            )
-        } else {
-            rejection.is_none()
-                && !matches!(
-                    step,
-                    UpdateStep::PackageRejected(InstallError::PasscodeMetadata { .. })
-                )
-        };
         if let Some(error) = rejection {
             warning(ui, &operations::Failure::from_error(error).details);
             if matches!(step, UpdateStep::PackageRejected(_))
