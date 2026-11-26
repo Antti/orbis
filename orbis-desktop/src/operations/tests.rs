@@ -580,18 +580,14 @@ fn previews_and_installs_updates_without_changing_the_base() {
         &SilentProgress,
     )
     .unwrap();
-    let Outcome::Finished {
-        output,
-        incomplete: false,
-        ..
-    } = result
-    else {
+    let Outcome::UpdateInstalled { target, plan } = result else {
         panic!()
     };
     assert_eq!(
-        fs::read(output.path().join("new.txt")).unwrap(),
+        fs::read(plan.destination.join("new.txt")).unwrap(),
         b"NEW DATA"
     );
+    assert_eq!(target.path, base);
     assert_eq!(fs::read(base.join("base.txt")).unwrap(), b"BASE");
     assert!(!base.join("new.txt").exists());
 }
@@ -871,7 +867,7 @@ fn merge_preview_install_and_restore_work_without_the_original_package() {
     };
     assert_eq!(preview.mode, install::InstallMode::Merge);
     assert_eq!(preview.destination, fs::canonicalize(&base).unwrap());
-    let Outcome::GameChanged { target, .. } = run(
+    let Outcome::UpdateInstalled { target, .. } = run(
         &path,
         Operation::InstallUpdate {
             base: base.clone(),

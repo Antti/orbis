@@ -303,17 +303,18 @@ impl<R: AsRef<[u8]>> Pkg<R> {
         Err(FindEntryError::NotFound)
     }
 
-    fn load_ekpfs(&mut self) -> Result<(), OpenError> {
-        // Locate image key entry.
-        let (entry, _) = match self.find_entry(EntryId::PfsImageKey) {
-            Ok(v) => v,
-            Err(e) => match e {
-                FindEntryError::NotFound => return Err(OpenError::PfsImageKeyNotFound),
-                _ => return Err(OpenError::FindPfsImageKeyFailed { source: e }),
-            },
-        };
+    /// Locates the filesystem image key record without requiring its entry decryption key.
+    pub fn pfs_image_key_entry(&self) -> Result<PkgEntry, OpenError> {
+        self.find_entry(EntryId::PfsImageKey)
+            .map(|(entry, _)| entry)
+            .map_err(|source| match source {
+                FindEntryError::NotFound => OpenError::PfsImageKeyNotFound,
+                source => OpenError::FindPfsImageKeyFailed { source },
+            })
+    }
 
-        // Get and decrypt the entry data.
+    fn load_ekpfs(&mut self) -> Result<(), OpenError> {
+        let entry = self.pfs_image_key_entry()?;
         let data = self
             .entry_data(&entry)
             .context(open_error::GetPfsImageKeyFailedSnafu)?;

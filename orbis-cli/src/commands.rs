@@ -3,6 +3,7 @@ use crate::output::{diagnostic, error_message, escaped, human_size};
 use clap::CommandFactory;
 use orbis_cli::{
     ConsoleProgress, ExtractError, ExtractOptions, ListedItem, PkgExtractor, SilentProgress,
+    prepare_filesystem,
 };
 use serde_json::{Value, json};
 use snafu::{ResultExt, Snafu};
@@ -179,16 +180,6 @@ fn open(path: &Path, passcode_file: Option<&Path>) -> Result<Package> {
     Ok(pkg)
 }
 
-fn prepare_filesystem(pkg: &mut Package) -> Result<()> {
-    let image = pkg.get_pfs_image().ok_or(ExtractError::NoPfsImage)?;
-    if orbis_pfs::header::read_mode(image.data)?.is_encrypted() {
-        // An unencrypted IMAGE_KEY can be usable even if entry slot 3 is not.
-        let _ = pkg.load_entry_keys();
-        pkg.load_pfs_key()?;
-    }
-    Ok(())
-}
-
 fn process(
     path: &Path,
     operation: Operation<'_>,
@@ -280,6 +271,7 @@ fn list(
     let mut warnings = Vec::new();
     if !entries_only {
         let filesystem = prepare_filesystem(&mut pkg)
+            .map_err(Box::<dyn StdError>::from)
             .and_then(|()| Ok(PkgExtractor::new(&pkg, SilentProgress, false).list_files()?));
         match filesystem {
             Ok(files) => items.extend(files),

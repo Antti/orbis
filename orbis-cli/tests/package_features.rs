@@ -426,6 +426,41 @@ fn named_unknown_entries_extract_and_unsafe_names_fail_before_writes() {
 }
 
 #[test]
+fn install_only_requires_an_image_key_record_for_an_encrypted_filesystem() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = base_game(dir.path());
+    std::fs::write(dir.path().join("passcode"), PASSCODE).unwrap();
+    let args = [
+        "install",
+        "update.pkg",
+        "--base",
+        base.to_str().unwrap(),
+        "--dry-run",
+    ];
+    let mut bytes = passcoded_pkg(2);
+    be32(
+        &mut bytes,
+        0x1020,
+        orbis_pkg::entry::EntryId::Icon0Png.as_u32(),
+    );
+    let path = dir.path().join("update.pkg");
+
+    // The plaintext filesystem can be installed once the SFO is unlocked.
+    std::fs::write(&path, &bytes).unwrap();
+    let unlocked = [&args[..], &["--passcode-file", "passcode"]].concat();
+    assert_code(&run(dir.path(), &unlocked), 0);
+
+    bytes[0x201c] |= 4;
+    std::fs::write(path, bytes).unwrap();
+    for args in [&args[..], &unlocked] {
+        let output = run(dir.path(), args);
+        assert_code(&output, 1);
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("no PFS image key"), "{error}");
+    }
+}
+
+#[test]
 fn install_reports_an_unsupported_slot_even_when_param_sfo_needs_a_passcode() {
     let dir = tempfile::tempdir().unwrap();
     let base = base_game(dir.path());

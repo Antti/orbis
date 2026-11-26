@@ -59,11 +59,9 @@ pub enum InstallError {
         "PKG entry 0x{id:08x} extends beyond the end of the file. The package is incomplete or damaged."
     ))]
     TruncatedEntry { id: u32 },
-    #[snafu(display("The package filesystem image is missing or incomplete."))]
-    IncompletePfsImage,
-    #[snafu(display("Cannot read the package filesystem image header."))]
-    InvalidPfsHeader {
-        source: orbis_pfs::header::ReadError,
+    #[snafu(transparent)]
+    PackageFilesystem {
+        source: crate::PackageFilesystemError,
     },
     #[snafu(display("cannot unlock update metadata"))]
     PasscodeMetadata {
@@ -191,6 +189,20 @@ impl InstallPlan {
             && self.required_free_bytes == preview.required_free_bytes
             && self.files == preview.files
     }
+
+    fn check_target(&self, layout: &Layout, id: &ContentId) -> Result<()> {
+        if self.destination != layout.install_destination(self.mode)
+            || self.content_id != id.as_str()
+        {
+            return Err(invalid(
+                "The update destination or package changed after the preview. Check the update again before installing.",
+            ));
+        }
+        let _guard = merge::read_lock(layout)?;
+        layout.require_recovered()?;
+        let base = layout.base_metadata()?;
+        compatibility::check_identity(id, &base.title_id, &base.content_id)
+    }
 }
 
 fn serialize_path<S: serde::Serializer>(
@@ -218,7 +230,7 @@ pub fn plan_with_progress<R: AsRef<[u8]> + Sync, P: ExtractProgress>(
     base: &Path,
     progress: P,
 ) -> Result<InstallPlan> {
-    let location = Layout::open(base, false)?;
+    let location = Layout::open(base)?;
     let _guard = merge::read_lock(&location)?;
     make_plan(pkg, &location, &progress)
 }
@@ -254,7 +266,11 @@ fn run_install<R: AsRef<[u8]> + Sync>(
     preview: Option<&InstallPlan>,
     progress: impl ExtractProgress,
 ) -> Result<InstallPlan> {
-    let layout = Layout::open(base, true)?;
+    let layout = Layout::open(base)?;
+    if let Some(preview) = preview {
+        preview.check_target(&layout, pkg.header().content_id())?;
+    }
+    let layout = layout.lock_for_write()?;
     let plan = match mode {
         InstallMode::Separate => make_plan(pkg, &layout, &progress)?,
         InstallMode::Merge => merge::make_plan(pkg, &layout, &progress)?,
@@ -377,7 +393,7 @@ fn make_plan<R: AsRef<[u8]> + Sync, P: ExtractProgress>(
         content_id: update.content_id,
         current_version: current_version.to_string(),
         update_version: update.version.to_string(),
-        destination: location.active_path(),
+        destination: location.install_destination(InstallMode::Separate),
         extracted_bytes: bytes,
         required_free_bytes: required,
         available_bytes: fs2::available_space(&location.parent_path)?,

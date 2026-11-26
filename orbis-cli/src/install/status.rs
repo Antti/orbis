@@ -72,7 +72,7 @@ impl GameTarget {
         if self.update.is_some() {
             Layout::open_locked_existing(&self.path)
         } else {
-            Layout::open(&self.path, true)
+            Layout::open_for_write(&self.path)
         }
     }
 

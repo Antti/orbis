@@ -163,7 +163,7 @@ pub(super) fn plan<R: AsRef<[u8]> + Sync>(
     base: &Path,
     progress: impl ExtractProgress,
 ) -> Result<InstallPlan> {
-    let layout = Layout::open(base, false)?;
+    let layout = Layout::open(base)?;
     let _guard = read_lock(&layout)?;
     make_plan(pkg, &layout, &progress)
 }
@@ -218,7 +218,7 @@ pub(super) fn make_plan<R: AsRef<[u8]> + Sync>(
     }
     plan.mode = InstallMode::Merge;
     plan.backup_bytes = backup_bytes;
-    plan.destination = layout.parent_path.join(&layout.base);
+    plan.destination = layout.install_destination(InstallMode::Merge);
     Ok(plan)
 }
 

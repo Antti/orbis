@@ -188,7 +188,7 @@ impl OrbisApp {
                     output: destination
                         .parent()
                         .map(|p| OutputFolder::Directory(p.to_owned())),
-                    attention: false,
+                    kind: NoticeKind::Success,
                 });
             }
         }
@@ -344,6 +344,8 @@ mod tests {
         click(&mut app, "Install update");
         finish(&mut app);
         assert_eq!(app.notice.as_ref().unwrap().title, "Update installed");
+        click(&mut app, "Done");
+        assert!(app.package.is_some() && app.game.is_none() && app.job.is_none());
 
         frame(
             &mut app,

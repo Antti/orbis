@@ -126,9 +126,7 @@ impl OrbisApp {
             .step(readiness, self.base.path().is_some());
         let installing = self.action == Action::Update;
         let (rejection, operation_passcode) = match step {
-            UpdateStep::PackageRejected(
-                error @ (InstallError::IncompletePfsImage | InstallError::InvalidPfsHeader { .. }),
-            ) => (
+            UpdateStep::PackageRejected(error @ InstallError::PackageFilesystem { .. }) => (
                 Some(error),
                 self.action == Action::Verify && self.metadata_only,
             ),
@@ -455,11 +453,13 @@ impl OrbisApp {
             let mut reveal_error = None;
             let mut open_game = None;
             ui.horizontal_wrapped(|ui| {
-                ui.label(heading(&notice.title, 14.0).color(if notice.attention {
-                    theme::attention(ui)
-                } else {
-                    ui.visuals().text_color()
-                }));
+                ui.label(
+                    heading(&notice.title, 14.0).color(if notice.needs_attention() {
+                        theme::attention(ui)
+                    } else {
+                        ui.visuals().text_color()
+                    }),
+                );
                 if let Some(OutputFolder::ExtractedGame(path)) = &notice.output
                     && ui
                         .add(theme::primary("Open game folder in Orbis"))
@@ -483,17 +483,7 @@ impl OrbisApp {
             if let Some(base) = open_game {
                 self.open_game(base);
             } else if done {
-                let refresh = !notice.attention && self.export.is_none();
-                self.notice = None;
-                self.warnings = Details::default();
-                if refresh
-                    && let Some(game) = &self.game
-                    && game.status.is_none()
-                {
-                    self.refresh_game(game.target.clone());
-                } else if refresh && let UpdateBase::Game(base) = &self.base {
-                    self.open_game(base.clone());
-                }
+                self.dismiss_notice();
             }
             if let Some(error) = reveal_error {
                 self.local_error("Could not open the folder", error);

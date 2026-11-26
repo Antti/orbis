@@ -106,7 +106,7 @@ fn prepare_preview(
     progress: &impl ExtractProgress,
 ) -> Result<(ExportEstimate, Option<ExportManifest>)> {
     check_cancelled(progress)?;
-    let location = storage::Layout::open(base, false)?;
+    let location = storage::Layout::open(base)?;
     let destination = destination(&location, output, resume)?;
     let prepared = PreparedExport::new(&location, destination.path(), progress)?;
     if resume && storage::exists(&destination.parent, &destination.name)? {
@@ -240,10 +240,10 @@ fn export_impl<P: ExtractProgress>(
 ) -> Result<ExportedDirectory> {
     check_cancelled(&progress)?;
     // Validate the destination before creating the state directory/lock.
-    let preview = storage::Layout::open(base, false)?;
+    let preview = storage::Layout::open(base)?;
     let destination = destination(&preview, output, resume)?;
     drop(preview);
-    let location = storage::Layout::open(base, true)?;
+    let location = storage::Layout::open_for_write(base)?;
     let mut prepared = PreparedExport::new(&location, destination.path(), &progress)?;
     if !resume || !storage::exists(&destination.parent, &destination.name)? {
         prepared

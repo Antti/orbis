@@ -172,6 +172,10 @@ pub enum Outcome {
         title: &'static str,
         message: String,
     },
+    UpdateInstalled {
+        target: install::GameTarget,
+        plan: Box<install::InstallPlan>,
+    },
     Finished {
         title: String,
         message: String,
@@ -450,10 +454,7 @@ fn execute(
             .readiness
             .require_readable_for(base, mode)?;
     }
-    let image = pkg.get_pfs_image().ok_or(ExtractError::NoPfsImage)?;
-    if orbis_pfs::header::read_mode(image.data)?.is_encrypted() {
-        pkg.load_pfs_key()?;
-    }
+    orbis_cli::prepare_filesystem(&mut pkg)?;
     if progress.is_cancelled() {
         return Err(ExtractError::Cancelled.into());
     }
@@ -508,27 +509,9 @@ fn execute(
         )),
         Operation::InstallUpdate { base, preview } => {
             let plan = preview.apply(&pkg, &base, progress)?;
-            if plan.mode == install::InstallMode::Merge {
-                return Ok(Outcome::GameChanged {
-                    target: install::GameTarget::for_update(
-                        plan.destination,
-                        *pkg.header().content_id(),
-                    ),
-                    title: "Update merged",
-                    message: format!(
-                        "{} is now at version {} in the game folder. Keep the adjacent backup folder.",
-                        plan.title_id, plan.update_version
-                    ),
-                });
-            }
-            Ok(Outcome::Finished {
-                title: "Update installed".into(),
-                message: format!(
-                    "{} is now at version {}. You can restore the previous version from the game folder.",
-                    plan.title_id, plan.update_version
-                ),
-                output: OutputFolder::Directory(plan.destination),
-                incomplete: false,
+            Ok(Outcome::UpdateInstalled {
+                target: install::GameTarget::for_update(base, *pkg.header().content_id()),
+                plan: Box::new(plan),
             })
         }
     }

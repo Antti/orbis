@@ -31,6 +31,7 @@ pub mod extract;
 mod fs_output;
 pub mod install;
 mod inventory;
+mod package_filesystem;
 pub mod progress;
 
 #[cfg(test)]
@@ -42,6 +43,7 @@ pub use self::extract::{
     SkippedEntry,
 };
 pub use self::fs_output::save_new_json;
+pub use self::package_filesystem::{PackageFilesystemError, prepare_filesystem};
 pub use self::progress::{ExtractProgress, SilentProgress};
 
 #[cfg(feature = "cli")]

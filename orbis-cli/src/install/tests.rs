@@ -21,6 +21,30 @@ fn active(base: &Path) -> PathBuf {
 fn manager(base: &Path) -> PathBuf {
     base.with_file_name(".CUSA00000.orbis-install")
 }
+
+#[test]
+fn confirming_a_preview_rejects_a_different_target_before_creating_state() {
+    for mode in [InstallMode::Separate, InstallMode::Merge] {
+        let tmp = tempfile::tempdir().unwrap();
+        let selected = base_game(&tmp.path().join("selected"));
+        let other = base_game(&tmp.path().join("other"));
+        let pkg = package("01.12", "next.txt");
+        let preview = plan_with_mode(&pkg, &selected, mode, SilentProgress).unwrap();
+
+        // Same edition, different destination.
+        assert!(preview.apply(&pkg, &other, SilentProgress).is_err());
+        assert!(!manager(&other).exists());
+
+        // Same destination, different game.
+        fs::write(
+            selected.join("sce_sys/param.sfo"),
+            sfo("CUSA12345", "gd", "01.00"),
+        )
+        .unwrap();
+        assert!(preview.apply(&pkg, &selected, SilentProgress).is_err());
+        assert!(!manager(&selected).exists());
+    }
+}
 fn version(base: &Path) -> String {
     let dir = Dir::open_ambient_dir(active(base), cap_std::ambient_authority()).unwrap();
     storage::app_metadata(&dir).unwrap().version.to_string()
@@ -471,7 +495,7 @@ fn recovery_restores_prior_installation_at_every_rollback_boundary() {
 fn lock_prevents_simultaneous_installation_and_recovery() {
     let tmp = tempfile::tempdir().unwrap();
     let base = base_game(tmp.path());
-    let guard = Layout::open(&base, true).unwrap();
+    let guard = Layout::open_for_write(&base).unwrap();
     assert!(
         install(&package("01.01", "one"), &base, SilentProgress)
             .unwrap_err()
@@ -520,7 +544,7 @@ fn separate_preview_shares_the_installation_lock_during_the_scan() {
 fn separate_status_preserves_structured_diagnostics_while_a_writer_holds_the_lock() {
     let tmp = tempfile::tempdir().unwrap();
     let base = base_game(tmp.path());
-    let writer = Layout::open(&base, true).unwrap();
+    let writer = Layout::open_for_write(&base).unwrap();
 
     // Status previously returned a report here, allowing --json callers to
     // receive an actionable issue with exit 3 while an update is in progress.

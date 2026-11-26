@@ -68,7 +68,7 @@ impl LockedUpdate {
 
     /// Reads installation metadata under a shared lock. Full preview verifies file contents.
     pub fn check_target(&self, path: &Path, mode: InstallMode) -> Result<()> {
-        let location = Layout::open(path, false)?;
+        let location = Layout::open(path)?;
         let _guard = super::merge::read_lock(&location)?;
         location.require_recovered()?;
         if mode == InstallMode::Merge {
@@ -113,24 +113,15 @@ pub fn inspect_update<R: AsRef<[u8]>>(pkg: &Pkg<R>) -> UpdateCheck {
         (Some((id, true)), _) => UpdateReadiness::Rejected(InstallError::TruncatedEntry { id }),
         (_, rejected @ UpdateReadiness::Rejected(_)) => rejected,
         (Some((id, false)), _) => UpdateReadiness::Rejected(InstallError::TruncatedEntry { id }),
-        (None, readiness) => match check_filesystem_header(pkg) {
-            Ok(()) => readiness,
-            Err(error) => UpdateReadiness::Rejected(error),
+        (None, readiness) => match crate::package_filesystem::inspect(pkg) {
+            Ok(_) => readiness,
+            Err(error) => UpdateReadiness::Rejected(error.into()),
         },
     };
     UpdateCheck {
         missing_keys,
         readiness,
     }
-}
-
-fn check_filesystem_header<R: AsRef<[u8]>>(pkg: &Pkg<R>) -> Result<()> {
-    let image = pkg
-        .get_pfs_image()
-        .ok_or(InstallError::IncompletePfsImage)?;
-    orbis_pfs::header::read_mode(image.data)
-        .map_err(|source| InstallError::InvalidPfsHeader { source })?;
-    Ok(())
 }
 
 fn classify_update<R: AsRef<[u8]>>(pkg: &Pkg<R>, missing_slot: Option<usize>) -> UpdateReadiness {

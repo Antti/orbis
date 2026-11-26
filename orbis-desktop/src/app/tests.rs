@@ -36,7 +36,7 @@ fn passcodes_are_accepted_only_after_validation_and_cleared_for_another_package(
     app.passcode_input = "x".repeat(32).into();
     app.validate_passcode();
     finish(&mut app);
-    assert!(app.notice.as_ref().unwrap().attention);
+    assert!(app.notice.as_ref().unwrap().needs_attention());
     assert!(app.pending_passcode.is_none());
     // A rejected replacement does not discard the previous validated value.
     assert!(app.passcode.is_some());
@@ -110,7 +110,7 @@ fn cancelled_verification_keeps_a_report_and_resets_the_worker() {
     app.job.as_ref().unwrap().cancel();
     finish(&mut app);
     assert_eq!(app.verification.as_ref().unwrap().status, "interrupted");
-    assert!(app.notice.as_ref().unwrap().attention);
+    assert!(app.notice.as_ref().unwrap().needs_attention());
     assert!(app.job.is_none());
 }
 
@@ -210,7 +210,7 @@ fn passcode_editor_forgets_history_after_rejected_input() {
     assert_passcode_editor_reset(&"é".repeat(16), |app| {
         app.validate_passcode();
         assert!(app.pending_passcode.is_none());
-        assert!(app.notice.as_ref().unwrap().attention);
+        assert!(app.notice.as_ref().unwrap().needs_attention());
     });
 }
 
@@ -541,6 +541,9 @@ fn incompatible_packages_with_locked_entries_offer_a_replacement_without_a_passc
     common::be64(&mut short_header, 0x418, 1); // In bounds, too small for the outer PFS header.
     let mut invalid_header = features::passcoded_pkg(2);
     invalid_header[0x2000] = 0; // Unsupported outer PFS version.
+    let mut missing_image_key = features::passcoded_pkg(2);
+    missing_image_key[0x201c] |= 4; // Encrypted PFS requires a PfsImageKey record.
+    common::be32(&mut missing_image_key, 0x1020, EntryId::Icon0Png.as_u32());
     let mut partial_plain_entry = features::passcoded_pkg(2);
     let end = partial_plain_entry.len() as u32;
     common::be32(&mut partial_plain_entry, 0x1030, end); // Unencrypted PfsImageKey.
@@ -564,6 +567,11 @@ fn incompatible_packages_with_locked_entries_offer_a_replacement_without_a_passc
             "too short to read the header",
         ),
         ("invalid-header.pkg", invalid_header, "invalid version"),
+        (
+            "missing-image-key.pkg",
+            missing_image_key,
+            "no PFS image key",
+        ),
         (
             "unsupported-sfo.pkg",
             unsupported_sfo,
@@ -1000,7 +1008,7 @@ fn contextual_update_accepts_a_passcode_and_rereads_the_game_on_back() {
     app.passcode_input = "x".repeat(32).into();
     click(&mut app, "Validate passcode");
     finish(&mut app);
-    assert!(app.notice.as_ref().unwrap().attention);
+    assert!(app.notice.as_ref().unwrap().needs_attention());
     click(&mut app, "Done");
     assert!(matches!(
         app.update_target,
@@ -1072,6 +1080,42 @@ fn update_checks_reject_a_merged_game_from_another_edition() {
 }
 
 #[test]
+fn done_after_a_separate_install_rechecks_the_confirmed_edition() {
+    let temp = tempfile::tempdir().unwrap();
+    let live = temp.path().join("live");
+    let replacement = temp.path().join("replacement");
+    let base = crate::common::base_game(&live);
+    merged_edition(&replacement, b"EP");
+    let path = temp.path().join("update.pkg");
+    fs::write(&path, crate::common::update("01.12", "next.txt", b"NEXT")).unwrap();
+    let mut app = OrbisApp::default();
+    app.open_package(path, UpdateBase::Game(base));
+    finish(&mut app);
+    click(&mut app, "Install update");
+    finish(&mut app);
+    assert_eq!(app.notice.as_ref().unwrap().title, "Update installed");
+
+    fs::rename(&live, temp.path().join("original")).unwrap();
+    fs::rename(&replacement, &live).unwrap();
+    click(&mut app, "Done");
+    finish(&mut app);
+    assert!(
+        app.notice
+            .as_ref()
+            .is_some_and(|n| n.details.contains("does not match"))
+    );
+    assert!(app.game.as_ref().unwrap().status.is_none());
+    click(&mut app, "Done");
+    let tree = frame(&mut app, Default::default());
+    assert!(
+        !tree
+            .nodes
+            .iter()
+            .any(|(_, node)| node.label() == Some("Restore base"))
+    );
+}
+
+#[test]
 fn package_recovery_rechecks_the_edition_after_the_game_folder_is_replaced() {
     for (pending, button) in [(false, "Restore base"), (true, "Recover base")] {
         let temp = tempfile::tempdir().unwrap();
@@ -1113,7 +1157,7 @@ fn package_recovery_rechecks_the_edition_after_the_game_folder_is_replaced() {
         finish(&mut app);
         click(&mut app, button);
         finish(&mut app);
-        assert!(!app.notice.as_ref().unwrap().attention);
+        assert!(!app.notice.as_ref().unwrap().needs_attention());
         assert!(!base.join("new.txt").exists());
     }
 }

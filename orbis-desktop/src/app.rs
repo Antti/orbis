@@ -77,7 +77,19 @@ struct Notice {
     message: String,
     details: String,
     output: Option<OutputFolder>,
-    attention: bool,
+    kind: NoticeKind,
+}
+
+enum NoticeKind {
+    Success,
+    Attention,
+    RefreshGame(GameTarget),
+}
+
+impl Notice {
+    fn needs_attention(&self) -> bool {
+        matches!(self.kind, NoticeKind::Attention)
+    }
 }
 
 enum UpdateBase {
@@ -240,7 +252,42 @@ impl OrbisApp {
             message: String::new(),
             details,
             output: None,
-            attention: true,
+            kind: NoticeKind::Attention,
+        });
+    }
+
+    fn dismiss_notice(&mut self) {
+        self.warnings = Details::default();
+        if let Some(Notice {
+            kind: NoticeKind::RefreshGame(target),
+            ..
+        }) = self.notice.take()
+        {
+            self.refresh_game(target);
+        }
+    }
+
+    fn finish_game_action(
+        &mut self,
+        title: &str,
+        message: String,
+        output: PathBuf,
+        refresh: Option<GameTarget>,
+    ) {
+        self.update_target = UpdateTargetState::Unchecked;
+        let kind = match refresh {
+            Some(target) => {
+                self.game = Some(game::GameFolder::new(target.clone(), None, None));
+                NoticeKind::RefreshGame(target)
+            }
+            None => NoticeKind::Success,
+        };
+        self.notice = Some(Notice {
+            title: title.into(),
+            message,
+            details: String::new(),
+            output: Some(OutputFolder::Directory(output)),
+            kind,
         });
     }
 
@@ -299,7 +346,11 @@ impl OrbisApp {
                     message: String::new(),
                     details: report.error.clone().unwrap_or_default(),
                     output: None,
-                    attention: report.status != "complete",
+                    kind: if report.status == "complete" {
+                        NoticeKind::Success
+                    } else {
+                        NoticeKind::Attention
+                    },
                 });
                 self.verification = Some(report);
             }
@@ -324,21 +375,29 @@ impl OrbisApp {
                 title,
                 message,
             }) => {
-                // A completed contextual install leaves the package. A restore
-                // from the game screen keeps the package that led to recovery.
-                if self.game.is_none() && matches!(self.base, UpdateBase::Game(_)) {
+                self.finish_game_action(title, message, target.path.clone(), Some(target));
+            }
+            Ok(Outcome::UpdateInstalled { target, plan }) => {
+                let from_game = matches!(self.base, UpdateBase::Game(_));
+                if from_game {
                     self.reset_package(UpdateBase::default());
                 }
-                let base = target.path.clone();
-                self.game = Some(game::GameFolder::new(target, None, None));
-                self.update_target = UpdateTargetState::Unchecked;
-                self.notice = Some(Notice {
-                    title: title.into(),
-                    message,
-                    output: Some(OutputFolder::Directory(base)),
-                    details: String::new(),
-                    attention: false,
-                });
+                let (title, detail) = match plan.mode {
+                    InstallMode::Separate => (
+                        "Update installed",
+                        "You can restore the previous version from the game folder.",
+                    ),
+                    InstallMode::Merge => (
+                        "Update merged",
+                        "Keep the adjacent backup folder to restore the base.",
+                    ),
+                };
+                let message = format!(
+                    "{} is now at version {}. {detail}",
+                    plan.title_id, plan.update_version
+                );
+                let refresh = (from_game || plan.mode == InstallMode::Merge).then_some(target);
+                self.finish_game_action(title, message, plan.destination, refresh);
             }
             Ok(Outcome::Finished {
                 title,
@@ -352,7 +411,11 @@ impl OrbisApp {
                     message,
                     output: Some(output),
                     details: String::new(),
-                    attention: incomplete,
+                    kind: if incomplete {
+                        NoticeKind::Attention
+                    } else {
+                        NoticeKind::Success
+                    },
                 });
             }
             Err(failure) => {
@@ -371,7 +434,7 @@ impl OrbisApp {
                     message: help.into(),
                     details: failure.details,
                     output: None,
-                    attention: true,
+                    kind: NoticeKind::Attention,
                 });
             }
         }
