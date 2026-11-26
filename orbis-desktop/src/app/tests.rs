@@ -628,25 +628,70 @@ fn metadata_only_verification_can_unlock_entries_when_the_filesystem_is_incomple
 }
 
 #[test]
-fn opening_a_truncated_package_shows_the_damage_even_when_the_key_is_loaded() {
+fn standalone_inspection_unlocks_intact_details_despite_a_truncated_entry() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("truncated.pkg");
-    let mut bytes = features::passcoded_pkg(3);
-    bytes.truncate(0x1a01);
+    let path = dir.path().join("partial-entry.pkg");
+    let mut bytes = features::passcoded_pkg(2);
+    let end = bytes.len() as u32;
+    crate::common::be32(&mut bytes, 0x1030, end); // Only the PfsImageKey entry is out of bounds.
     fs::write(&path, bytes).unwrap();
     let mut app = OrbisApp::default();
     app.open(path);
     finish(&mut app);
-    assert_eq!(app.package.as_ref().unwrap().update.missing_keys, 0);
+    assert!(app.package.as_ref().unwrap().version.is_none());
+
+    click(&mut app, "Package passcode (optional)");
+    app.passcode_input = String::from_utf8(features::PASSCODE.to_vec())
+        .unwrap()
+        .into();
+    click(&mut app, "Validate passcode");
+    finish(&mut app);
+    assert_eq!(
+        app.package.as_ref().unwrap().version.as_deref(),
+        Some("01.12")
+    );
     let tree = frame(&mut app, Default::default());
     assert!(tree.nodes.iter().any(|(_, n)| {
         n.value()
             .is_some_and(|v| v.contains("extends beyond the end"))
     }));
-    assert!(!tree.nodes.iter().any(|(_, n)| matches!(
-        n.label(),
-        Some("Package passcode (optional)" | "Package passcode required" | "Validate passcode")
-    )));
+    assert!(
+        tree.nodes
+            .iter()
+            .any(|(_, n)| n.label() == Some("Install update") && n.is_disabled())
+    );
+
+    click(&mut app, "Package passcode · validated");
+    click(&mut app, "Clear passcode");
+    finish(&mut app);
+    assert!(app.package.as_ref().unwrap().version.is_none());
+}
+
+#[test]
+fn truncated_details_show_the_damage_with_or_without_a_loaded_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("truncated.pkg");
+    for (slot, missing_keys) in [(2, 1), (3, 0)] {
+        let mut bytes = features::passcoded_pkg(slot);
+        bytes.truncate(0x1a01);
+        fs::write(&path, bytes).unwrap();
+        let mut app = OrbisApp::default();
+        app.open(path.clone());
+        finish(&mut app);
+        assert_eq!(
+            app.package.as_ref().unwrap().update.missing_keys,
+            missing_keys
+        );
+        let tree = frame(&mut app, Default::default());
+        assert!(tree.nodes.iter().any(|(_, n)| {
+            n.value()
+                .is_some_and(|v| v.contains("extends beyond the end"))
+        }));
+        assert!(!tree.nodes.iter().any(|(_, n)| matches!(
+            n.label(),
+            Some("Package passcode (optional)" | "Package passcode required" | "Validate passcode")
+        )));
+    }
 }
 
 #[test]

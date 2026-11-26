@@ -1,8 +1,10 @@
 //! Desktop operations use the same parser, extractor, and installer as the CLI.
 use orbis_cli::{ExtractError, ExtractOptions, ExtractProgress, PkgExtractor, install};
 use orbis_pkg::{
+    EntryDataError, ParamSfoError,
     entry::EntryId,
     header::ContentId,
+    passcode::ENTRY_KEY_COUNT,
     sfo::{Sfo, Value},
 };
 use std::{
@@ -29,6 +31,7 @@ pub struct PackageInfo {
     pub region: Option<&'static str>,
     pub metadata_entries: usize,
     pub artwork: Option<eframe::egui::ColorImage>,
+    pub can_unlock_details: bool,
     pub kind: String,
     pub size: u64,
     pub update: install::UpdateCheck,
@@ -398,11 +401,13 @@ fn execute(
             region: content_region(header.content_id().service_id()),
             metadata_entries: header.entry_count(),
             artwork: None,
+            can_unlock_details: false,
             kind: header.content_type_name().to_owned(),
             size: header.pkg_size(),
             update: install::inspect_update(&pkg),
             warnings: Vec::new(),
         };
+        let mut locked_details = false;
         match pkg.param_sfo_data() {
             Ok(Some(data)) => match Sfo::parse(&data) {
                 Ok(sfo) => {
@@ -415,16 +420,23 @@ fn execute(
             Ok(None) => info
                 .warnings
                 .push("This package has no application metadata.".into()),
-            Err(e) => info
-                .warnings
-                .push(format!("Package details are unavailable: {e}")),
+            Err(e) => {
+                if let ParamSfoError::ReadData { source } = &e {
+                    locked_details = passcode_supplies_key(source);
+                }
+                info.warnings
+                    .push(format!("Package details are unavailable: {e}"));
+            }
         }
         if let Ok((entry, _)) = pkg.find_entry(EntryId::Icon0Png)
             && entry.data_size() <= 4 * 1024 * 1024
-            && let Ok(bytes) = pkg.entry_data(&entry)
         {
-            info.artwork = decode_artwork(&bytes);
+            match pkg.entry_data(&entry) {
+                Ok(bytes) => info.artwork = decode_artwork(&bytes),
+                Err(error) => locked_details |= passcode_supplies_key(&error),
+            }
         }
+        info.can_unlock_details = locked_details && pkg.check_passcode_metadata().is_ok();
         return Ok(Outcome::Inspected(Box::new(info)));
     }
 
@@ -520,6 +532,10 @@ fn execute(
             })
         }
     }
+}
+
+fn passcode_supplies_key(error: &EntryDataError) -> bool {
+    matches!(error, EntryDataError::NoDecryptionKey { key_index } if *key_index < ENTRY_KEY_COUNT)
 }
 
 fn apply_sfo(info: &mut PackageInfo, sfo: &Sfo<'_>) {

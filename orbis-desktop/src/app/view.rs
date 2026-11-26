@@ -125,7 +125,7 @@ impl OrbisApp {
             .update_target
             .step(readiness, self.base.path().is_some());
         let installing = self.action == Action::Update;
-        let (rejection, show_passcode) = match step {
+        let (rejection, operation_passcode) = match step {
             UpdateStep::PackageRejected(
                 error @ (InstallError::IncompletePfsImage | InstallError::InvalidPfsHeader { .. }),
             ) => (
@@ -144,6 +144,8 @@ impl OrbisApp {
             UpdateStep::CheckTarget if installing => (None, false),
             _ => (None, true),
         };
+        let inspection_passcode =
+            !installing && (info.can_unlock_details || self.passcode.is_some());
         let needs_passcode = installing && matches!(step, UpdateStep::EnterPasscode);
         if let Some(error) = rejection {
             warning(ui, &operations::Failure::from_error(error).details);
@@ -187,7 +189,7 @@ impl OrbisApp {
         ui.separator();
         if self.notice.is_none() {
             ui.add_enabled_ui(idle, |ui| {
-                if show_passcode {
+                if inspection_passcode || operation_passcode {
                     self.passcode_settings(ui, needs_passcode);
                 }
                 self.settings(ui, frame);
