@@ -126,7 +126,9 @@ impl OrbisApp {
             .step(readiness, self.base.path().is_some());
         let installing = self.action == Action::Update;
         let rejection = match step {
-            UpdateStep::PackageRejected(error @ InstallError::TruncatedEntry { .. }) => Some(error),
+            UpdateStep::PackageRejected(
+                error @ (InstallError::TruncatedEntry { .. } | InstallError::IncompletePfsImage),
+            ) => Some(error),
             UpdateStep::PackageRejected(error) | UpdateStep::TargetRejected(error)
                 if installing =>
             {

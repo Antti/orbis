@@ -535,6 +535,11 @@ fn incompatible_packages_with_locked_entries_offer_a_replacement_without_a_passc
     let last_byte = partial_key.len() as u32 - 1;
     common::be32(&mut partial_key, 0x1030, last_byte);
     common::be32(&mut partial_key, 0x1034, 1);
+    let mut partial_image = features::passcoded_pkg(2);
+    partial_image.truncate(partial_image.len() - 1);
+    let mut partial_plain_entry = features::passcoded_pkg(2);
+    let end = partial_plain_entry.len() as u32;
+    common::be32(&mut partial_plain_entry, 0x1030, end); // Unencrypted PfsImageKey.
 
     for (file, bytes, reason) in [
         ("base.pkg", base_pkg, "expected a PS4 full-file"),
@@ -543,6 +548,12 @@ fn incompatible_packages_with_locked_entries_offer_a_replacement_without_a_passc
         ("missing-keys.pkg", missing_keys, "missing entry-key record"),
         ("partial-sfo.pkg", partial_sfo, "extends beyond the end"),
         ("partial-key.pkg", partial_key, "extends beyond the end"),
+        (
+            "partial-plain-entry.pkg",
+            partial_plain_entry,
+            "extends beyond the end",
+        ),
+        ("partial-image.pkg", partial_image, "filesystem image"),
         (
             "unsupported-sfo.pkg",
             unsupported_sfo,

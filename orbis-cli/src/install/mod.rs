@@ -59,6 +59,8 @@ pub enum InstallError {
         "PKG entry 0x{id:08x} extends beyond the end of the file. The package is incomplete or damaged."
     ))]
     TruncatedEntry { id: u32 },
+    #[snafu(display("The package filesystem image is missing or incomplete."))]
+    IncompletePfsImage,
     #[snafu(display("cannot unlock update metadata"))]
     PasscodeMetadata {
         source: orbis_pkg::passcode::PasscodeValidationError,
@@ -199,7 +201,8 @@ pub fn base_metadata(base: &Path) -> Result<AppMetadata> {
     Layout::inspect(base)?.base_metadata()
 }
 
-/// Inspects compatibility and affected paths without creating directories or locks.
+/// Inspects compatibility and affected paths under the existing installation's shared lock.
+/// Previewing an untouched game creates no files.
 /// `pkg` must have the keys required to read its metadata and list its filesystem.
 pub fn plan<R: AsRef<[u8]> + Sync>(pkg: &Pkg<R>, base: &Path) -> Result<InstallPlan> {
     plan_with_progress(pkg, base, SilentProgress)
@@ -212,6 +215,7 @@ pub fn plan_with_progress<R: AsRef<[u8]> + Sync, P: ExtractProgress>(
     progress: P,
 ) -> Result<InstallPlan> {
     let location = Layout::open(base, false)?;
+    let _guard = merge::read_lock(&location)?;
     make_plan(pkg, &location, &progress)
 }
 

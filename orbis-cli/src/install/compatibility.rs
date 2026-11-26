@@ -1,5 +1,5 @@
 use super::*;
-use orbis_pkg::header::ContentId;
+use orbis_pkg::{entry::EntryId, header::ContentId};
 
 /// Package facts stay valid when the user changes the target folder or installation mode.
 #[derive(Debug)]
@@ -99,24 +99,29 @@ pub fn inspect_update<R: AsRef<[u8]>>(pkg: &Pkg<R>) -> UpdateCheck {
     let mut highest_slot = None;
     let mut truncated_entry = None;
     for (_, entry) in pkg.entries().map_while(|entry| entry.ok()) {
-        if !entry.is_encrypted() {
-            continue;
-        }
         if truncated_entry.is_none() && pkg.stored_entry_data(&entry).is_err() {
-            truncated_entry = Some(entry.id());
+            truncated_entry = Some((entry.id(), entry.is_encrypted()));
         }
         let slot = entry.key_index();
-        if !pkg.has_entry_key(slot) {
+        if entry.is_encrypted() && !pkg.has_entry_key(slot) {
             missing_keys += 1;
             highest_slot = highest_slot.max(Some(slot));
         }
     }
+    let has_image = pkg
+        .get_pfs_image()
+        .is_some_and(|image| !image.data.is_empty());
+    let readiness = match (truncated_entry, classify_update(pkg, highest_slot)) {
+        // A partial ciphertext block is damaged even when its key is missing.
+        (Some((id, true)), _) => UpdateReadiness::Rejected(InstallError::TruncatedEntry { id }),
+        (_, rejected @ UpdateReadiness::Rejected(_)) => rejected,
+        (Some((id, false)), _) => UpdateReadiness::Rejected(InstallError::TruncatedEntry { id }),
+        (None, _) if !has_image => UpdateReadiness::Rejected(InstallError::IncompletePfsImage),
+        (None, readiness) => readiness,
+    };
     UpdateCheck {
         missing_keys,
-        readiness: match truncated_entry {
-            Some(id) => UpdateReadiness::Rejected(InstallError::TruncatedEntry { id }),
-            None => classify_update(pkg, highest_slot),
-        },
+        readiness,
     }
 }
 
@@ -181,6 +186,11 @@ pub fn update_metadata<R: AsRef<[u8]>>(pkg: &Pkg<R>) -> Result<AppMetadata> {
             ParamSfoError::ReadData {
                 source: EntryDataError::NoDecryptionKey { key_index },
             } => InstallError::missing_update_key(key_index),
+            ParamSfoError::ReadData {
+                source: EntryDataError::InvalidDataOffset,
+            } => InstallError::TruncatedEntry {
+                id: EntryId::ParamSfo.as_u32(),
+            },
             other => invalid(other.to_string()),
         })?
         .ok_or_else(|| invalid("update has no PARAM.SFO"))?;

@@ -484,6 +484,39 @@ fn lock_prevents_simultaneous_installation_and_recovery() {
 }
 
 #[test]
+fn separate_preview_shares_the_installation_lock_during_the_scan() {
+    struct ObserveScan<'a> {
+        base: &'a Path,
+        scanned: AtomicBool,
+    }
+    impl ExtractProgress for ObserveScan<'_> {
+        fn phase(&self, name: &str) {
+            if name == "Checking installed update" {
+                assert!(merge_status(self.base).unwrap().is_none());
+                assert!(Layout::open_locked_existing(self.base).is_err());
+                self.scanned.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let base = base_game(tmp.path());
+    install(&package("01.01", "old"), &base, SilentProgress).unwrap();
+    let next = package("01.02", "new");
+    let writer = Layout::open_locked_existing(&base).unwrap();
+    assert!(plan(&next, &base).unwrap_err().to_string().contains("lock"));
+    drop(writer);
+
+    let progress = ObserveScan {
+        base: &base,
+        scanned: AtomicBool::new(false),
+    };
+    plan_with_mode(&next, &base, InstallMode::Separate, &progress).unwrap();
+    assert!(progress.scanned.load(Ordering::Relaxed));
+    Layout::open_locked_existing(&base).unwrap();
+}
+
+#[test]
 fn separate_status_preserves_structured_diagnostics_while_a_writer_holds_the_lock() {
     let tmp = tempfile::tempdir().unwrap();
     let base = base_game(tmp.path());
