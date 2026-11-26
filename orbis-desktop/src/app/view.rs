@@ -121,7 +121,9 @@ impl OrbisApp {
         }
         let Some(info) = &self.package else { return };
         let readiness = &info.update.readiness;
-        let step = self.update_step(readiness);
+        let step = self
+            .update_target
+            .step(readiness, self.base.path().is_some());
         let installing = self.action == Action::Update;
         let rejection = match step {
             UpdateStep::PackageRejected(error @ InstallError::TruncatedEntry { .. }) => Some(error),
@@ -134,7 +136,10 @@ impl OrbisApp {
         };
         let needs_passcode = installing && matches!(step, UpdateStep::EnterPasscode);
         let show_passcode = if installing {
-            matches!(step, UpdateStep::Preview | UpdateStep::EnterPasscode)
+            matches!(
+                step,
+                UpdateStep::CheckUpdate | UpdateStep::Install(_) | UpdateStep::EnterPasscode
+            )
         } else {
             rejection.is_none()
                 && !matches!(
@@ -285,7 +290,7 @@ impl OrbisApp {
                 );
             });
             if old_action != self.action {
-                self.preview = None;
+                self.update_target.discard_preview();
             }
         }
         ui.add_space(8.0);
@@ -345,7 +350,7 @@ impl OrbisApp {
                 {
                     self.update_target_changed();
                 }
-                if let Some(plan) = &self.preview {
+                if let Some(plan) = self.update_target.preview() {
                     ui.add_space(4.0);
                     ui.columns(2, |columns| {
                         metric(&mut columns[0], "Installed version", &plan.current_version);
@@ -507,21 +512,13 @@ impl OrbisApp {
             return;
         };
         let path = package.path.clone();
-        let step = self.update_step(&package.update.readiness);
-        let can_check_update = matches!(
-            step,
-            UpdateStep::Preview | UpdateStep::CheckTarget | UpdateStep::TargetRejected(_)
-        );
-        let check_label = if matches!(step, UpdateStep::TargetRejected(_)) {
-            "Check again"
-        } else {
-            "Check update"
-        };
         ui.horizontal(|ui| {
             let caption = match self.action {
                 Action::Verify => "Verification does not write package data.",
                 Action::Extract => "Existing files are preserved.",
-                Action::Update if self.preview.is_some() => "Close the emulator before installing.",
+                Action::Update if self.update_target.preview().is_some() => {
+                    "Close the emulator before installing."
+                }
                 Action::Update => "Check compatibility before installing.",
             };
             ui.label(muted(ui, caption).size(12.0));
@@ -557,42 +554,46 @@ impl OrbisApp {
                             );
                         }
                     }
-                    Action::Update => {
-                        if let Some(plan) = &self.preview {
-                            let enough = plan.available_bytes >= plan.required_free_bytes;
-                            if enough
-                                && ui
-                                    .add(theme::primary(if plan.mode == InstallMode::Merge {
-                                        "Merge update"
-                                    } else {
-                                        "Install update"
-                                    }))
-                                    .clicked()
-                            {
-                                let preview = Box::new(self.preview.take().unwrap());
-                                self.start(
-                                    path,
-                                    Operation::InstallUpdate {
-                                        base: self.base.path().unwrap().clone(),
-                                        preview,
-                                    },
-                                );
-                            } else if !enough && ui.add(theme::primary("Check again")).clicked() {
-                                self.check_update();
-                            }
-                        } else if ui
-                            .add_enabled(
-                                self.base.path().is_some() && can_check_update,
-                                theme::primary(check_label),
-                            )
-                            .clicked()
-                        {
-                            self.check_update();
-                        }
-                    }
+                    Action::Update => self.update_button(ui),
                 },
             );
         });
+    }
+
+    fn update_button(&mut self, ui: &mut egui::Ui) {
+        let Some(info) = &self.package else { return };
+        let base = self.base.path();
+        let step = self
+            .update_target
+            .step(&info.update.readiness, base.is_some());
+        let (label, enabled) = match step {
+            UpdateStep::Install(plan) if plan.available_bytes >= plan.required_free_bytes => {
+                let label = match plan.mode {
+                    InstallMode::Separate => "Install update",
+                    InstallMode::Merge => "Merge update",
+                };
+                if ui.add(theme::primary(label)).clicked()
+                    && let Some(base) = base.cloned()
+                    && let UpdateTargetState::Preview(preview) =
+                        std::mem::take(&mut self.update_target)
+                {
+                    self.start(
+                        info.path.clone(),
+                        Operation::InstallUpdate { base, preview },
+                    );
+                }
+                return;
+            }
+            UpdateStep::Install(_) | UpdateStep::TargetRejected(_) => ("Check again", true),
+            UpdateStep::CheckUpdate | UpdateStep::CheckTarget => ("Check update", true),
+            UpdateStep::EnterPasscode | UpdateStep::PackageRejected(_) => ("Check update", false),
+        };
+        if ui
+            .add_enabled(base.is_some() && enabled, theme::primary(label))
+            .clicked()
+        {
+            self.check_update();
+        }
     }
 
     fn result_details(&self, ui: &mut egui::Ui) {

@@ -107,7 +107,7 @@ impl OrbisApp {
                 ui.add_enabled_ui(self.job.is_none() && self.notice.is_none(), |ui| {
                     if ui.button("Back").clicked() {
                         self.game = None;
-                        self.invalidate_update_check();
+                        self.update_target = UpdateTargetState::Unchecked;
                     } else if ui.button("Refresh").clicked() {
                         self.refresh_game(target);
                     }
@@ -128,7 +128,7 @@ impl OrbisApp {
     }
 
     pub(super) fn refresh_game(&mut self, target: GameTarget) {
-        self.invalidate_update_check();
+        self.update_target = UpdateTargetState::Unchecked;
         self.game = Some(GameFolder::new(target.clone(), None, None));
         self.start(PathBuf::new(), Operation::CheckGame { target });
     }

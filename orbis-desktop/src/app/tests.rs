@@ -394,7 +394,7 @@ fn extracted_game_can_preview_retry_and_install_an_update() {
             .details
             .contains("does not match")
     );
-    assert!(app.preview.is_none());
+    assert!(app.update_target.preview().is_none());
     assert!(
         frame(&mut app, Default::default())
             .nodes
@@ -412,7 +412,7 @@ fn extracted_game_can_preview_retry_and_install_an_update() {
         },
     );
     finish(&mut app);
-    let plan = app.preview.as_ref().unwrap();
+    let plan = app.update_target.preview().unwrap();
     assert_eq!(plan.current_version, "01.00");
     assert_eq!(plan.update_version, "01.12");
     assert_eq!(
@@ -456,12 +456,15 @@ fn replacing_a_pkg_in_the_same_game_rechecks_the_selected_install_mode() {
     finish(&mut app);
     click(&mut app, "Merge into game folder");
     finish(&mut app);
-    assert_eq!(app.preview.as_ref().unwrap().mode, InstallMode::Merge);
+    assert_eq!(
+        app.update_target.preview().unwrap().mode,
+        InstallMode::Merge
+    );
 
     app.open_package(replacement.clone(), UpdateBase::Game(base.clone()));
-    assert!(app.preview.is_none());
+    assert!(app.update_target.preview().is_none());
     finish(&mut app);
-    let plan = app.preview.as_ref().unwrap();
+    let plan = app.update_target.preview().unwrap();
     assert_eq!(plan.mode, InstallMode::Merge);
     assert_eq!(plan.update_version, "01.12");
     assert_eq!(plan.destination, base.canonicalize().unwrap());
@@ -474,7 +477,7 @@ fn replacing_a_pkg_in_the_same_game_rechecks_the_selected_install_mode() {
 
 fn assert_rejected_locked_update(app: &mut OrbisApp, reason: &str) {
     assert_eq!(app.package.as_ref().unwrap().update.missing_keys, 1);
-    assert!(app.preview.is_none());
+    assert!(app.update_target.preview().is_none());
     let replace = match app.base {
         UpdateBase::Game(_) => "Choose another PKG…",
         UpdateBase::Pick(_) => "Browse…",
@@ -653,7 +656,7 @@ fn choosing_a_different_base_rechecks_the_locked_package() {
     finish(&mut app);
     click(&mut app, "Check update");
     finish(&mut app);
-    assert_eq!(app.preview.as_ref().unwrap().update_version, "01.12");
+    assert_eq!(app.update_target.preview().unwrap().update_version, "01.12");
 }
 
 #[test]
@@ -712,7 +715,7 @@ fn returning_to_a_locked_pkg_after_rollback_rechecks_the_active_version() {
     click(&mut app, "Done");
     finish(&mut app);
     click(&mut app, "Back");
-    assert!(app.job.is_none() && app.target_check.is_none());
+    assert!(app.job.is_none() && matches!(app.update_target, UpdateTargetState::Unchecked));
     click(&mut app, "Check update");
     finish(&mut app);
     app.passcode_input = String::from_utf8(features::PASSCODE.to_vec())
@@ -722,7 +725,10 @@ fn returning_to_a_locked_pkg_after_rollback_rechecks_the_active_version() {
     finish(&mut app);
     click(&mut app, "Check update");
     finish(&mut app);
-    assert_eq!(app.preview.as_ref().unwrap().current_version, "01.00");
+    assert_eq!(
+        app.update_target.preview().unwrap().current_version,
+        "01.00"
+    );
 }
 
 #[test]
@@ -798,7 +804,7 @@ fn a_locked_update_version_is_checked_after_the_passcode_reveals_it() {
         .into();
     click(&mut app, "Validate passcode");
     finish(&mut app);
-    assert!(app.preview.is_none());
+    assert!(app.update_target.preview().is_none());
     assert!(
         app.notice
             .as_ref()
@@ -821,7 +827,7 @@ fn update_with_locked_metadata_requires_a_passcode_even_with_readable_sfo() {
     let info = app.package.as_ref().unwrap();
     assert!(info.update.readiness.has_update_metadata());
     assert_eq!(info.update.missing_keys, 1);
-    assert!(app.preview.is_none());
+    assert!(app.update_target.preview().is_none());
     let tree = frame(&mut app, Default::default());
     assert!(
         tree.nodes
@@ -861,7 +867,7 @@ fn update_with_locked_metadata_requires_a_passcode_even_with_readable_sfo() {
     click(&mut app, "Validate passcode");
     finish(&mut app);
     assert_eq!(app.package.as_ref().unwrap().update.missing_keys, 0);
-    assert_eq!(app.preview.as_ref().unwrap().update_version, "01.12");
+    assert_eq!(app.update_target.preview().unwrap().update_version, "01.12");
     click(&mut app, "Install update");
     finish(&mut app);
     assert_eq!(app.notice.as_ref().unwrap().title, "Update installed");
@@ -876,21 +882,32 @@ fn contextual_update_accepts_a_passcode_and_rereads_the_game_on_back() {
     let mut app = OrbisApp::default();
     app.open_package(path, UpdateBase::Game(base.clone()));
     finish(&mut app);
-    assert!(app.preview.is_none() && app.action == Action::Update);
+    assert!(app.update_target.preview().is_none() && app.action == Action::Update);
     assert!(matches!(
         app.package.as_ref().unwrap().update.readiness,
         UpdateReadiness::NeedsPasscode(_)
+    ));
+    app.passcode_input = "x".repeat(32).into();
+    click(&mut app, "Validate passcode");
+    finish(&mut app);
+    assert!(app.notice.as_ref().unwrap().attention);
+    click(&mut app, "Done");
+    assert!(matches!(
+        app.update_target,
+        UpdateTargetState::AwaitingPasscode
     ));
     app.passcode_input = String::from_utf8(features::PASSCODE.to_vec())
         .unwrap()
         .into();
     click(&mut app, "Validate passcode");
     finish(&mut app);
-    assert!(app.preview.is_some());
+    assert!(app.update_target.preview().is_some());
     click(&mut app, "Back to game");
     finish(&mut app);
     assert_eq!(app.game.as_ref().unwrap().target.path, base);
-    assert!(app.package.is_none() && app.passcode.is_none() && app.preview.is_none());
+    assert!(
+        app.package.is_none() && app.passcode.is_none() && app.update_target.preview().is_none()
+    );
 }
 
 fn merged_edition(parent: &std::path::Path, region: &[u8; 2]) -> PathBuf {
@@ -1052,7 +1069,7 @@ fn back_from_a_merged_target_waits_for_an_explicit_update_check() {
     app.open_package(path.clone(), UpdateBase::Game(base.clone()));
     finish(&mut app);
     click(&mut app, "Back");
-    assert!(app.game.is_none() && app.job.is_none() && app.preview.is_none());
+    assert!(app.game.is_none() && app.job.is_none() && app.update_target.preview().is_none());
     assert_eq!(app.package.as_ref().unwrap().path, path);
     assert_eq!(app.base.path(), Some(&base));
     click(&mut app, "Check update");
@@ -1070,7 +1087,10 @@ fn back_from_a_merged_target_waits_for_an_explicit_update_check() {
     click(&mut app, "Back");
     click(&mut app, "Check update");
     finish(&mut app);
-    assert_eq!(app.preview.as_ref().unwrap().current_version, "01.00");
+    assert_eq!(
+        app.update_target.preview().unwrap().current_version,
+        "01.00"
+    );
 }
 
 #[test]

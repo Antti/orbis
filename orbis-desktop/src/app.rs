@@ -25,11 +25,51 @@ enum Action {
 }
 
 enum UpdateStep<'a> {
-    Preview,
+    CheckUpdate,
     CheckTarget,
     EnterPasscode,
+    Install(&'a InstallPlan),
     PackageRejected(&'a InstallError),
     TargetRejected(&'a InstallError),
+}
+
+/// The last check of the selected package against this folder and install mode.
+#[derive(Default)]
+enum UpdateTargetState {
+    #[default]
+    Unchecked,
+    AwaitingPasscode,
+    Rejected(InstallError),
+    Preview(Box<InstallPlan>),
+}
+
+impl UpdateTargetState {
+    fn preview(&self) -> Option<&InstallPlan> {
+        match self {
+            Self::Preview(plan) => Some(plan),
+            _ => None,
+        }
+    }
+
+    fn discard_preview(&mut self) {
+        if matches!(self, Self::Preview(_)) {
+            *self = Self::Unchecked;
+        }
+    }
+
+    fn step<'a>(&'a self, readiness: &'a UpdateReadiness, has_base: bool) -> UpdateStep<'a> {
+        match self {
+            Self::Preview(plan) => UpdateStep::Install(plan),
+            Self::Rejected(error) => UpdateStep::TargetRejected(error),
+            Self::AwaitingPasscode => UpdateStep::EnterPasscode,
+            Self::Unchecked => match readiness {
+                UpdateReadiness::Ready(_) => UpdateStep::CheckUpdate,
+                UpdateReadiness::Rejected(error) => UpdateStep::PackageRejected(error),
+                UpdateReadiness::NeedsPasscode(_) if has_base => UpdateStep::CheckTarget,
+                UpdateReadiness::NeedsPasscode(_) => UpdateStep::EnterPasscode,
+            },
+        }
+    }
 }
 
 struct Notice {
@@ -70,9 +110,7 @@ pub struct OrbisApp {
     folder_name: String,
     resume: bool,
     base: UpdateBase,
-    // The result belongs to the current folder and mode. None means it needs checking.
-    target_check: Option<Result<(), InstallError>>,
-    preview: Option<InstallPlan>,
+    update_target: UpdateTargetState,
     mode: InstallMode,
     game: Option<game::GameFolder>,
     job: Option<Job>,
@@ -125,7 +163,7 @@ impl OrbisApp {
             self.mode = InstallMode::Separate;
         }
         self.base = base;
-        self.invalidate_update_check();
+        self.update_target = UpdateTargetState::Unchecked;
         self.game = None;
         self.folder_name.clear();
         self.resume = false;
@@ -136,43 +174,24 @@ impl OrbisApp {
         self.start(path, Operation::Inspect);
     }
 
-    fn update_step<'a>(&'a self, readiness: &'a UpdateReadiness) -> UpdateStep<'a> {
-        if let Some(Err(error)) = &self.target_check {
-            return UpdateStep::TargetRejected(error);
-        }
-        match readiness {
-            UpdateReadiness::Ready(_) => UpdateStep::Preview,
-            UpdateReadiness::Rejected(error) => UpdateStep::PackageRejected(error),
-            UpdateReadiness::NeedsPasscode(_) => match &self.target_check {
-                None if self.base.path().is_some() => UpdateStep::CheckTarget,
-                _ => UpdateStep::EnterPasscode,
-            },
-        }
-    }
-
-    fn invalidate_update_check(&mut self) {
-        self.preview = None;
-        self.target_check = None;
-    }
-
     fn update_target_changed(&mut self) {
-        self.invalidate_update_check();
         if let Some(info) = &self.package
             && self.action == Action::Update
             && (matches!(self.base, UpdateBase::Game(_))
                 || matches!(info.update.readiness, UpdateReadiness::NeedsPasscode(_)))
         {
             self.check_update();
+        } else {
+            self.update_target = UpdateTargetState::Unchecked;
         }
     }
 
     fn check_update(&mut self) {
+        self.update_target = UpdateTargetState::Unchecked;
         let (Some(info), Some(base)) = (&self.package, self.base.path().cloned()) else {
             return;
         };
         let mode = self.mode;
-        self.preview = None;
-        self.target_check = None;
         let package = match info.update.readiness {
             UpdateReadiness::Ready(_) => UpdatePackage::Readable(info.content_id),
             UpdateReadiness::NeedsPasscode(update) => UpdatePackage::Locked(update),
@@ -261,13 +280,19 @@ impl OrbisApp {
                     self.action = Action::Extract;
                 }
                 self.refreshing_package = false;
-                self.target_check = None;
                 self.package = Some(*info);
                 if !cancelled && !self.close_after_job {
                     self.update_target_changed();
+                } else {
+                    self.update_target = UpdateTargetState::Unchecked;
                 }
             }
-            Ok(Outcome::UpdateTarget(result)) => self.target_check = Some(result),
+            Ok(Outcome::UpdateTarget(result)) => {
+                self.update_target = match result {
+                    Ok(()) => UpdateTargetState::AwaitingPasscode,
+                    Err(error) => UpdateTargetState::Rejected(error),
+                };
+            }
             Ok(Outcome::Verified(report)) => {
                 self.notice = Some(Notice {
                     title: report.title().into(),
@@ -283,13 +308,15 @@ impl OrbisApp {
                     export.preview = Some(plan);
                 }
             }
-            Ok(Outcome::Preview(plan)) => self.preview = Some(plan),
+            Ok(Outcome::Preview(plan)) => {
+                self.update_target = UpdateTargetState::Preview(Box::new(plan))
+            }
             Ok(Outcome::GameStatus {
                 target,
                 status,
                 rollback,
             }) => {
-                self.preview = None;
+                self.update_target = UpdateTargetState::Unchecked;
                 self.game = Some(game::GameFolder::new(target, Some(status), rollback));
             }
             Ok(Outcome::GameChanged {
@@ -304,7 +331,7 @@ impl OrbisApp {
                 }
                 let base = target.path.clone();
                 self.game = Some(game::GameFolder::new(target, None, None));
-                self.invalidate_update_check();
+                self.update_target = UpdateTargetState::Unchecked;
                 self.notice = Some(Notice {
                     title: title.into(),
                     message,
@@ -319,7 +346,7 @@ impl OrbisApp {
                 output,
                 incomplete,
             }) => {
-                self.preview = None;
+                self.update_target.discard_preview();
                 self.notice = Some(Notice {
                     title,
                     message,
@@ -334,7 +361,7 @@ impl OrbisApp {
                 if let Some(export) = &mut self.export {
                     export.preview = None;
                 }
-                self.preview = None;
+                self.update_target.discard_preview();
                 self.notice = Some(Notice {
                     title: if failure.cancelled {
                         "Operation cancelled".into()

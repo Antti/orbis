@@ -120,7 +120,7 @@ impl OrbisApp {
         if let Some(info) = &self.package {
             let path = info.path.clone();
             self.verification = None;
-            self.preview = None;
+            self.update_target.discard_preview();
             self.refreshing_package = true;
             self.start(path, Operation::Inspect);
         }
