@@ -166,6 +166,21 @@ pub struct InstallPlan {
 }
 
 impl InstallPlan {
+    /// Whether the free space measured during planning covers the estimated installation size.
+    pub fn has_sufficient_space(&self) -> bool {
+        self.available_bytes >= self.required_free_bytes
+    }
+
+    fn check_space(&self) -> Result<()> {
+        if self.has_sufficient_space() {
+            return Ok(());
+        }
+        Err(invalid(format!(
+            "insufficient free space: need approximately {} bytes, available {}",
+            self.required_free_bytes, self.available_bytes
+        )))
+    }
+
     /// Rebuilds the preview under the installation lock and applies it if the planned changes match.
     pub fn apply<R: AsRef<[u8]> + Sync>(
         &self,
@@ -280,7 +295,7 @@ fn run_install<R: AsRef<[u8]> + Sync>(
             "The package or installed game changed after the preview. Check the update again before installing.",
         ));
     }
-    check_space(plan.required_free_bytes, plan.available_bytes)?;
+    plan.check_space()?;
     match mode {
         InstallMode::Separate => install_separate(pkg, layout, plan, progress),
         InstallMode::Merge => merge::install_planned(pkg, layout, plan, progress),
@@ -399,15 +414,6 @@ fn make_plan<R: AsRef<[u8]> + Sync, P: ExtractProgress>(
         available_bytes: fs2::available_space(&location.parent_path)?,
         files: changes,
     })
-}
-
-fn check_space(required: u64, available: u64) -> Result<()> {
-    if available < required {
-        return Err(invalid(format!(
-            "insufficient free space: need approximately {required} bytes, available {available}"
-        )));
-    }
-    Ok(())
 }
 
 /// Installs a complete update. A failed extraction never changes the active update.

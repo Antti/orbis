@@ -10,6 +10,7 @@ use orbis_pkg::{
 use std::{
     error::Error,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 mod passcode;
@@ -38,16 +39,60 @@ pub struct PackageInfo {
     pub warnings: Vec<String>,
 }
 
+/// A package file and the credential used to open it for this operation.
+#[derive(Clone, Debug)]
+pub struct PackageSource {
+    path: PathBuf,
+    passcode: Option<Arc<Passcode>>,
+}
+
+impl PackageSource {
+    pub fn new(path: PathBuf, passcode: Option<Arc<Passcode>>) -> Self {
+        Self { path, passcode }
+    }
+
+    fn open(&self) -> Result<orbis_cli::MappedPackage> {
+        // The selected input must stay unchanged during the operation. Orbis never writes to it.
+        let mut pkg = unsafe { orbis_cli::inspect_pkg(&self.path)? };
+        if let Some(passcode) = &self.passcode {
+            pkg.load_passcode_with_diagnostics(passcode.bytes())?;
+        }
+        let _ = pkg.load_entry_keys();
+        Ok(pkg)
+    }
+
+    fn open_filesystem(
+        &self,
+        update: Option<(&Path, install::InstallMode)>,
+        progress: &impl ExtractProgress,
+    ) -> Result<orbis_cli::MappedPackage> {
+        let mut pkg = self.open()?;
+        if let Some((base, mode)) = update {
+            install::inspect_update(&pkg)
+                .readiness
+                .require_readable_for(base, mode)?;
+        }
+        orbis_cli::prepare_filesystem(&mut pkg)?;
+        if progress.is_cancelled() {
+            return Err(ExtractError::Cancelled.into());
+        }
+        Ok(pkg)
+    }
+}
+
 #[derive(Debug)]
 pub enum UpdatePackage {
-    Readable(ContentId),
+    Readable {
+        source: PackageSource,
+        id: ContentId,
+    },
     Locked(install::LockedUpdate),
 }
 
 impl UpdatePackage {
     fn game_target(&self, base: &Path) -> install::GameTarget {
         let id = match self {
-            Self::Readable(id) => *id,
+            Self::Readable { id, .. } => *id,
             Self::Locked(update) => update.content_id(),
         };
         install::GameTarget::for_update(base.to_owned(), id)
@@ -56,8 +101,9 @@ impl UpdatePackage {
 
 #[derive(Debug)]
 pub enum Operation {
-    Inspect,
+    Inspect(PackageSource),
     Verify {
+        source: PackageSource,
         metadata_only: bool,
     },
     PreviewExport {
@@ -67,6 +113,7 @@ pub enum Operation {
     },
     Export(Box<install::ExportPreview>),
     Extract {
+        source: PackageSource,
         output: PathBuf,
         resume: bool,
     },
@@ -89,6 +136,7 @@ pub enum Operation {
         target: install::GameTarget,
     },
     InstallUpdate {
+        source: PackageSource,
         base: PathBuf,
         preview: Box<install::InstallPlan>,
     },
@@ -97,7 +145,7 @@ pub enum Operation {
 impl Operation {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Inspect => "Reading package",
+            Self::Inspect(_) => "Reading package",
             Self::Verify { .. } => "Verifying package",
             Self::PreviewExport { .. } => "Checking export",
             Self::Export(_) => "Exporting merged game",
@@ -119,7 +167,7 @@ impl Operation {
             Self::PreviewExport { .. } | Self::Export(_) => {
                 "Choose an original base with a managed separate update, or the base alone. Close the emulator. Resume checks existing files and preserves conflicts. Do not use an export until verification succeeds."
             }
-            Self::Inspect => {
+            Self::Inspect(_) => {
                 "Choose a PlayStation 4 PKG file. Other .pkg formats are not supported."
             }
             Self::Extract { .. } => {
@@ -238,283 +286,263 @@ impl Failure {
     }
 }
 
-#[cfg(test)]
 pub fn run(
-    path: &Path,
     operation: Operation,
     progress: &impl ExtractProgress,
 ) -> std::result::Result<Outcome, Failure> {
-    run_with_passcode(path, operation, None, progress)
+    execute(operation, progress).map_err(|error| Failure::from_error(error.as_ref()))
 }
 
-pub fn run_with_passcode(
-    path: &Path,
-    operation: Operation,
-    passcode: Option<&Passcode>,
-    progress: &impl ExtractProgress,
-) -> std::result::Result<Outcome, Failure> {
-    if let Operation::Verify { metadata_only } = operation {
-        return Ok(Outcome::Verified(Box::new(verification::verify(
-            path,
+fn execute(operation: Operation, progress: &impl ExtractProgress) -> Result<Outcome> {
+    match operation {
+        // Verification records cancellation in its report, including before it opens the file.
+        Operation::Verify {
+            source,
             metadata_only,
-            passcode,
+        } => Ok(Outcome::Verified(Box::new(verification::verify(
+            &source,
+            metadata_only,
             progress,
-        ))));
-    }
-    execute(path, operation, passcode, progress).map_err(|e| Failure::from_error(e.as_ref()))
-}
-
-fn execute(
-    path: &Path,
-    operation: Operation,
-    passcode: Option<&Passcode>,
-    progress: &impl ExtractProgress,
-) -> Result<Outcome> {
-    if progress.is_cancelled() {
-        return Err(ExtractError::Cancelled.into());
-    }
-    // Restoring and recovering a game never require the original package.
-    match &operation {
+        )))),
+        _ if progress.is_cancelled() => Err(ExtractError::Cancelled.into()),
+        Operation::Inspect(source) => Ok(Outcome::Inspected(Box::new(inspect(&source)?))),
+        Operation::Extract {
+            source,
+            output,
+            resume,
+        } => extract(source, output, resume, progress),
         Operation::PreviewExport {
             base,
             output,
             resume,
-        } => {
-            return Ok(Outcome::ExportPreview(Box::new(
-                install::ExportPreview::new(base, output, *resume, progress)?,
-            )));
-        }
-        Operation::Export(preview) => {
-            let exported = preview.export(progress)?;
-            let checked = exported
-                .verify(progress)
-                .map_err(|source| ExportVerificationError {
-                    output: exported.report().destination.clone(),
-                    source,
-                })?;
-            let exported = exported.into_report();
-            let incomplete = !checked.complete || !checked.issues.is_empty();
-            return Ok(Outcome::Finished {
-                title: if incomplete {
-                    "Export verification failed"
-                } else {
-                    "Export complete and verified"
-                }
-                .into(),
-                message: if incomplete {
-                    format!(
-                        "The exported directory has {} verification issues. Preserve it and review it with verify-dir before use.",
-                        checked.issues.len()
-                    )
-                } else {
-                    format!(
-                        "{} version {}: {} files ({}), verified against the export manifest. The base and installed update were preserved.",
-                        exported.title_id,
-                        exported.app_version,
-                        checked.checked_files,
-                        human_size(exported.bytes)
-                    )
-                },
-                output: OutputFolder::Directory(exported.destination),
-                incomplete,
-            });
-        }
+        } => Ok(Outcome::ExportPreview(Box::new(
+            install::ExportPreview::new(&base, &output, resume, progress)?,
+        ))),
+        Operation::Export(preview) => export(&preview, progress),
         Operation::PreviewUpdate {
             package,
             base,
             mode,
+        } => preview_update(package, base, mode, progress),
+        Operation::InstallUpdate {
+            source,
+            base,
+            preview,
         } => {
-            let target = package.game_target(base);
-            match target.merged_status(progress) {
-                Ok(Some(status)) => {
-                    return Ok(Outcome::GameStatus {
-                        target,
-                        status: Box::new(status),
-                        rollback: None,
-                    });
-                }
-                Err(error @ install::InstallError::UpdateIdentityMismatch) => {
-                    return Ok(Outcome::UpdateTarget(Err(error)));
-                }
-                Err(error) => return Err(error.into()),
-                Ok(None) => {}
-            }
-            if let UpdatePackage::Locked(update) = package {
-                return Ok(Outcome::UpdateTarget(update.check_target(base, *mode)));
-            }
-        }
-        Operation::CheckGame { target } => {
-            let (status, rollback) = target.status_with_rollback(progress)?;
-            return Ok(Outcome::GameStatus {
-                target: target.clone(),
-                status: Box::new(status),
-                rollback,
-            });
-        }
-        Operation::RollbackSeparate { target, plan } => {
-            plan.apply(&target.path, progress)?;
-            return Ok(Outcome::GameChanged {
-                target: target.clone(),
-                title: "Rollback complete",
-                message: format!("Version {} is now active.", plan.target_version()),
-            });
-        }
-        Operation::RestoreBase { target } | Operation::RecoverBase { target } => {
-            let (title, message) = if matches!(operation, Operation::RestoreBase { .. }) {
-                target.restore_merged(progress)?;
-                (
-                    "Base restored",
-                    "The original game files have been restored.",
-                )
-            } else {
-                target.recover(progress)?;
-                (
-                    "Recovery complete",
-                    "Recovery finished for this game folder.",
-                )
-            };
-            return Ok(Outcome::GameChanged {
-                target: target.clone(),
-                title,
-                message: message.into(),
-            });
-        }
-        _ => {}
-    }
-    // Same mmap contract as the CLI: the selected input must remain unchanged
-    // during an operation. The GUI never writes to the input package.
-    let mut pkg = unsafe { orbis_cli::inspect_pkg(path)? };
-    if let Some(passcode) = passcode {
-        pkg.load_passcode_with_diagnostics(passcode.bytes())?;
-    }
-    let _ = pkg.load_entry_keys();
-    if matches!(operation, Operation::Inspect) {
-        let header = pkg.header();
-        let mut info = PackageInfo {
-            path: path.to_owned(),
-            title: path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned(),
-            title_id: header.content_id().title_id().to_owned(),
-            version: None,
-            package_version: None,
-            required_system: None,
-            content_id: *header.content_id(),
-            region: content_region(header.content_id().service_id()),
-            metadata_entries: header.entry_count(),
-            artwork: None,
-            can_unlock_details: false,
-            kind: header.content_type_name().to_owned(),
-            size: header.pkg_size(),
-            update: install::inspect_update(&pkg),
-            warnings: Vec::new(),
-        };
-        let mut locked_details = false;
-        match pkg.param_sfo_data() {
-            Ok(Some(data)) => match Sfo::parse(&data) {
-                Ok(sfo) => {
-                    apply_sfo(&mut info, &sfo);
-                }
-                Err(e) => info
-                    .warnings
-                    .push(format!("Package details are unavailable: {e}")),
-            },
-            Ok(None) => info
-                .warnings
-                .push("This package has no application metadata.".into()),
-            Err(e) => {
-                if let ParamSfoError::ReadData { source } = &e {
-                    locked_details = passcode_supplies_key(source);
-                }
-                info.warnings
-                    .push(format!("Package details are unavailable: {e}"));
-            }
-        }
-        if let Ok((entry, _)) = pkg.find_entry(EntryId::Icon0Png)
-            && entry.data_size() <= 4 * 1024 * 1024
-        {
-            match pkg.entry_data(&entry) {
-                Ok(bytes) => info.artwork = decode_artwork(&bytes),
-                Err(error) => locked_details |= passcode_supplies_key(&error),
-            }
-        }
-        info.can_unlock_details = locked_details && pkg.check_passcode_metadata().is_ok();
-        return Ok(Outcome::Inspected(Box::new(info)));
-    }
-
-    let target = match &operation {
-        Operation::PreviewUpdate { base, mode, .. } => Some((base, *mode)),
-        Operation::InstallUpdate { base, preview } => Some((base, preview.mode)),
-        _ => None,
-    };
-    if let Some((base, mode)) = target {
-        install::inspect_update(&pkg)
-            .readiness
-            .require_readable_for(base, mode)?;
-    }
-    orbis_cli::prepare_filesystem(&mut pkg)?;
-    if progress.is_cancelled() {
-        return Err(ExtractError::Cancelled.into());
-    }
-    match operation {
-        Operation::Inspect
-        | Operation::Verify { .. }
-        | Operation::PreviewExport { .. }
-        | Operation::Export(_)
-        | Operation::CheckGame { .. }
-        | Operation::RestoreBase { .. }
-        | Operation::RollbackSeparate { .. }
-        | Operation::RecoverBase { .. } => unreachable!(),
-        Operation::Extract { output, resume } => {
-            // Never overwrite a different file, including when resuming.
-            let report = PkgExtractor::new(&pkg, progress, false)
-                .with_resume(resume)
-                .extract_with_options(&output, &ExtractOptions::default())?;
-            let incomplete = !report.skipped.is_empty();
-            let is_base = !incomplete
-                && install::base_metadata(&output)
-                    .is_ok_and(|base| base.content_id == pkg.header().content_id().as_str());
-            Ok(Outcome::Finished {
-                title: if incomplete {
-                    "Extraction incomplete"
-                } else {
-                    "Extraction complete"
-                }
-                .into(),
-                message: if incomplete {
-                    format!(
-                        "Extracted {} files. Skipped entries: {}. Review the warnings; this output is incomplete.",
-                        report.files,
-                        report.skipped.len()
-                    )
-                } else {
-                    format!(
-                        "Extracted {} files ({}).",
-                        report.files,
-                        human_size(report.bytes)
-                    )
-                },
-                output: if is_base {
-                    OutputFolder::ExtractedGame(output)
-                } else {
-                    OutputFolder::Directory(output)
-                },
-                incomplete,
-            })
-        }
-        Operation::PreviewUpdate { base, mode, .. } => Ok(Outcome::Preview(
-            install::plan_with_mode(&pkg, &base, mode, progress)?,
-        )),
-        Operation::InstallUpdate { base, preview } => {
+            let pkg = source.open_filesystem(Some((&base, preview.mode)), progress)?;
             let plan = preview.apply(&pkg, &base, progress)?;
             Ok(Outcome::UpdateInstalled {
                 target: install::GameTarget::for_update(base, *pkg.header().content_id()),
                 plan: Box::new(plan),
             })
         }
+        Operation::CheckGame { target } => {
+            let (status, rollback) = target.status_with_rollback(progress)?;
+            Ok(Outcome::GameStatus {
+                target,
+                status: Box::new(status),
+                rollback,
+            })
+        }
+        Operation::RollbackSeparate { target, plan } => {
+            plan.apply(&target.path, progress)?;
+            Ok(Outcome::GameChanged {
+                target,
+                title: "Rollback complete",
+                message: format!("Version {} is now active.", plan.target_version()),
+            })
+        }
+        Operation::RestoreBase { target } => {
+            target.restore_merged(progress)?;
+            Ok(Outcome::GameChanged {
+                target,
+                title: "Base restored",
+                message: "The original game files have been restored.".into(),
+            })
+        }
+        Operation::RecoverBase { target } => {
+            target.recover(progress)?;
+            Ok(Outcome::GameChanged {
+                target,
+                title: "Recovery complete",
+                message: "Recovery finished for this game folder.".into(),
+            })
+        }
     }
+}
+
+fn preview_update(
+    package: UpdatePackage,
+    base: PathBuf,
+    mode: install::InstallMode,
+    progress: &impl ExtractProgress,
+) -> Result<Outcome> {
+    // A merged game can be recovered even if the selected package is no longer available.
+    let target = package.game_target(&base);
+    match target.merged_status(progress) {
+        Ok(Some(status)) => {
+            return Ok(Outcome::GameStatus {
+                target,
+                status: Box::new(status),
+                rollback: None,
+            });
+        }
+        Err(error @ install::InstallError::UpdateIdentityMismatch) => {
+            return Ok(Outcome::UpdateTarget(Err(error)));
+        }
+        Err(error) => return Err(error.into()),
+        Ok(None) => {}
+    }
+
+    match package {
+        UpdatePackage::Locked(update) => {
+            Ok(Outcome::UpdateTarget(update.check_target(&base, mode)))
+        }
+        UpdatePackage::Readable { source, .. } => {
+            let pkg = source.open_filesystem(Some((&base, mode)), progress)?;
+            Ok(Outcome::Preview(install::plan_with_mode(
+                &pkg, &base, mode, progress,
+            )?))
+        }
+    }
+}
+
+fn export(preview: &install::ExportPreview, progress: &impl ExtractProgress) -> Result<Outcome> {
+    let exported = preview.export(progress)?;
+    let checked = exported
+        .verify(progress)
+        .map_err(|source| ExportVerificationError {
+            output: exported.report().destination.clone(),
+            source,
+        })?;
+    let exported = exported.into_report();
+    let incomplete = !checked.complete || !checked.issues.is_empty();
+    Ok(Outcome::Finished {
+        title: if incomplete {
+            "Export verification failed"
+        } else {
+            "Export complete and verified"
+        }
+        .into(),
+        message: if incomplete {
+            format!(
+                "The exported directory has {} verification issues. Preserve it and review it with verify-dir before use.",
+                checked.issues.len()
+            )
+        } else {
+            format!(
+                "{} version {}: {} files ({}), verified against the export manifest. The base and installed update were preserved.",
+                exported.title_id,
+                exported.app_version,
+                checked.checked_files,
+                human_size(exported.bytes)
+            )
+        },
+        output: OutputFolder::Directory(exported.destination),
+        incomplete,
+    })
+}
+
+fn inspect(source: &PackageSource) -> Result<PackageInfo> {
+    let path = &source.path;
+    let pkg = source.open()?;
+    let header = pkg.header();
+    let mut info = PackageInfo {
+        path: path.to_owned(),
+        title: path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
+        title_id: header.content_id().title_id().to_owned(),
+        version: None,
+        package_version: None,
+        required_system: None,
+        content_id: *header.content_id(),
+        region: content_region(header.content_id().service_id()),
+        metadata_entries: header.entry_count(),
+        artwork: None,
+        can_unlock_details: false,
+        kind: header.content_type_name().to_owned(),
+        size: header.pkg_size(),
+        update: install::inspect_update(&pkg),
+        warnings: Vec::new(),
+    };
+    let mut locked_details = false;
+    match pkg.param_sfo_data() {
+        Ok(Some(data)) => match Sfo::parse(&data) {
+            Ok(sfo) => {
+                apply_sfo(&mut info, &sfo);
+            }
+            Err(e) => info
+                .warnings
+                .push(format!("Package details are unavailable: {e}")),
+        },
+        Ok(None) => info
+            .warnings
+            .push("This package has no application metadata.".into()),
+        Err(e) => {
+            if let ParamSfoError::ReadData { source } = &e {
+                locked_details = passcode_supplies_key(source);
+            }
+            info.warnings
+                .push(format!("Package details are unavailable: {e}"));
+        }
+    }
+    if let Ok((entry, _)) = pkg.find_entry(EntryId::Icon0Png)
+        && entry.data_size() <= 4 * 1024 * 1024
+    {
+        match pkg.entry_data(&entry) {
+            Ok(bytes) => info.artwork = decode_artwork(&bytes),
+            Err(error) => locked_details |= passcode_supplies_key(&error),
+        }
+    }
+    info.can_unlock_details = locked_details && pkg.check_passcode_metadata().is_ok();
+    Ok(info)
+}
+
+fn extract(
+    source: PackageSource,
+    output: PathBuf,
+    resume: bool,
+    progress: &impl ExtractProgress,
+) -> Result<Outcome> {
+    let pkg = source.open_filesystem(None, progress)?;
+    // Never overwrite a different file, including when resuming.
+    let report = PkgExtractor::new(&pkg, progress, false)
+        .with_resume(resume)
+        .extract_with_options(&output, &ExtractOptions::default())?;
+    let incomplete = !report.skipped.is_empty();
+    let is_base = !incomplete
+        && install::base_metadata(&output)
+            .is_ok_and(|base| base.content_id == pkg.header().content_id().as_str());
+    Ok(Outcome::Finished {
+        title: if incomplete {
+            "Extraction incomplete"
+        } else {
+            "Extraction complete"
+        }
+        .into(),
+        message: if incomplete {
+            format!(
+                "Extracted {} files. Skipped entries: {}. Review the warnings; this output is incomplete.",
+                report.files,
+                report.skipped.len()
+            )
+        } else {
+            format!(
+                "Extracted {} files ({}).",
+                report.files,
+                human_size(report.bytes)
+            )
+        },
+        output: if is_base {
+            OutputFolder::ExtractedGame(output)
+        } else {
+            OutputFolder::Directory(output)
+        },
+        incomplete,
+    })
 }
 
 fn passcode_supplies_key(error: &EntryDataError) -> bool {

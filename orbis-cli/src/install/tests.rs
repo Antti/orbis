@@ -722,7 +722,7 @@ fn retains_unknown_metadata_and_rejects_reserved_paths_and_insufficient_space() 
     let base = base_game(tmp.path());
     let mut bytes = update("01.01", "file", b"NEW");
     be32(&mut bytes, 0x1000, 0xfeedcafe);
-    let planned = plan(&Pkg::parse(bytes).unwrap(), &base).unwrap();
+    let mut planned = plan(&Pkg::parse(bytes).unwrap(), &base).unwrap();
     assert!(
         planned
             .files
@@ -732,13 +732,16 @@ fn retains_unknown_metadata_and_rejects_reserved_paths_and_insufficient_space() 
     for name in [".orbis-install.json", "NUL", "bad.", "bad:stream"] {
         assert!(plan(&package("01.01", name), &base).is_err());
     }
+    planned.available_bytes = planned.required_free_bytes - 1;
     assert!(
-        check_space(100, 99)
+        planned
+            .check_space()
             .unwrap_err()
             .to_string()
             .contains("insufficient free space")
     );
-    assert!(check_space(100, 100).is_ok());
+    planned.available_bytes = planned.required_free_bytes;
+    assert!(planned.check_space().is_ok());
     assert!(!active(&base).exists());
 }
 

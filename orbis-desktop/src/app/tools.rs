@@ -69,7 +69,11 @@ impl OrbisApp {
             .data_mut(|data| data.remove::<egui::text_edit::TextEditState>(id));
     }
 
-    pub(super) fn passcode_settings(&mut self, ui: &mut egui::Ui, required: bool) {
+    pub(super) fn passcode_settings(&mut self, ui: &mut egui::Ui, prompt: PasscodePrompt) {
+        if prompt == PasscodePrompt::Hidden {
+            return;
+        }
+        let required = prompt == PasscodePrompt::Required;
         let label = if self.passcode.is_some() {
             "Package passcode · validated"
         } else if required {
@@ -122,7 +126,11 @@ impl OrbisApp {
             self.verification = None;
             self.update_target.discard_preview();
             self.refreshing_package = true;
-            self.start(path, Operation::Inspect);
+            let passcode = self
+                .pending_passcode
+                .clone()
+                .or_else(|| self.passcode.clone());
+            self.start(Operation::Inspect(PackageSource::new(path, passcode)));
         }
     }
 
@@ -306,7 +314,7 @@ impl OrbisApp {
             ui.label(muted(ui, "The original game and update stay unchanged.").size(12.0));
         });
         if let Some(operation) = operation {
-            self.start(PathBuf::new(), operation);
+            self.start(operation);
         }
     }
 }

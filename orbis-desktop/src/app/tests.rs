@@ -1,6 +1,7 @@
 use super::*;
 use eframe::App;
 use egui::accesskit::{Action as AccessibilityAction, ActionRequest, TreeId, TreeUpdate};
+use orbis_cli::install::UpdateReadiness;
 use std::{fs, time::Instant};
 
 use crate::features;
@@ -40,12 +41,10 @@ fn passcodes_are_accepted_only_after_validation_and_cleared_for_another_package(
     assert!(app.pending_passcode.is_none());
     // A rejected replacement does not discard the previous validated value.
     assert!(app.passcode.is_some());
-    app.start(
-        path.clone(),
-        Operation::Verify {
-            metadata_only: true,
-        },
-    );
+    app.start(Operation::Verify {
+        source: PackageSource::new(path.clone(), app.passcode.clone()),
+        metadata_only: true,
+    });
     finish(&mut app);
     assert!(
         app.verification
@@ -101,12 +100,10 @@ fn cancelled_verification_keeps_a_report_and_resets_the_worker() {
     let mut app = OrbisApp::default();
     app.open(path.clone());
     finish(&mut app);
-    app.start(
-        path,
-        Operation::Verify {
-            metadata_only: false,
-        },
-    );
+    app.start(Operation::Verify {
+        source: PackageSource::new(path, app.passcode.clone()),
+        metadata_only: false,
+    });
     app.job.as_ref().unwrap().cancel();
     finish(&mut app);
     assert_eq!(app.verification.as_ref().unwrap().status, "interrupted");
@@ -128,7 +125,7 @@ fn passcode_frame(app: &mut OrbisApp, events: Vec<egui::Event>) {
             events,
             ..Default::default()
         },
-        |ui| app.passcode_settings(ui, false),
+        |ui| app.passcode_settings(ui, PasscodePrompt::Optional),
     );
     // This headless test has no renderer to consume texture updates.
     output.textures_delta.clear();
@@ -967,9 +964,11 @@ fn update_with_locked_metadata_requires_a_passcode_even_with_readable_sfo() {
     );
 
     let error = operations::run(
-        &path,
         Operation::PreviewUpdate {
-            package: UpdatePackage::Readable(app.package.as_ref().unwrap().content_id),
+            package: operations::UpdatePackage::Readable {
+                source: PackageSource::new(path.clone(), None),
+                id: app.package.as_ref().unwrap().content_id,
+            },
             base: base.clone(),
             mode: InstallMode::Separate,
         },

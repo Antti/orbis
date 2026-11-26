@@ -1,3 +1,4 @@
+use super::update::PackageGuidance;
 use super::*;
 use crate::theme::{self, heading, muted};
 use egui::{Color32, RichText};
@@ -120,76 +121,33 @@ impl OrbisApp {
             return;
         }
         let Some(info) = &self.package else { return };
-        let readiness = &info.update.readiness;
-        let step = self
-            .update_target
-            .step(readiness, self.base.path().is_some());
-        let installing = self.action == Action::Update;
-        let (rejection, operation_passcode) = match step {
-            UpdateStep::PackageRejected(error @ InstallError::PackageFilesystem { .. }) => (
-                Some(error),
-                self.action == Action::Verify && self.metadata_only,
-            ),
-            UpdateStep::PackageRejected(error @ InstallError::TruncatedEntry { .. }) => {
-                (Some(error), false)
-            }
-            UpdateStep::PackageRejected(error) | UpdateStep::TargetRejected(error)
-                if installing =>
-            {
-                (Some(error), false)
-            }
-            UpdateStep::PackageRejected(InstallError::PasscodeMetadata { .. }) => (None, false),
-            UpdateStep::CheckTarget if installing => (None, false),
-            _ => (None, true),
-        };
-        let inspection_passcode =
-            !installing && (info.can_unlock_details || self.passcode.is_some());
-        let needs_passcode = installing && matches!(step, UpdateStep::EnterPasscode);
-        if let Some(error) = rejection {
-            warning(ui, &operations::Failure::from_error(error).details);
-            if matches!(step, UpdateStep::PackageRejected(_))
-                && matches!(self.base, UpdateBase::Game(_))
-            {
+        let guidance = self.update_target.controls(info, &self.base).guidance(
+            self.action,
+            self.metadata_only,
+            self.passcode.is_some(),
+        );
+        let passcode = match guidance {
+            PackageGuidance::ChooseAnotherPackage(reason) => {
+                warning(ui, &reason);
                 return;
             }
-        } else if info.update.missing_keys > 0 {
-            let entries = if info.update.missing_keys == 1 {
-                "entry"
-            } else {
-                "entries"
-            };
-            let guidance = match (&step, installing) {
-                (UpdateStep::PackageRejected(InstallError::UnsupportedUpdateKey { slot }), _) => {
-                    format!("Key slot {slot} is unsupported. Extraction may be incomplete.")
+            PackageGuidance::Settings {
+                warning: message,
+                passcode,
+            } => {
+                if let Some(message) = message {
+                    warning(ui, &message);
                 }
-                (UpdateStep::PackageRejected(error @ InstallError::PasscodeMetadata { .. }), _) => {
-                    operations::Failure::from_error(*error).details
-                }
-                (UpdateStep::EnterPasscode, true) => {
-                    "Validate the package passcode before installing this update.".into()
-                }
-                (UpdateStep::CheckTarget, true) => {
-                    "Check the selected game before entering a passcode.".into()
-                }
-                _ => "Extraction may be incomplete.".into(),
-            };
-            warning(
-                ui,
-                &format!(
-                    "{} encrypted metadata {entries} cannot be read. {guidance}",
-                    info.update.missing_keys
-                ),
-            );
-        }
+                passcode
+            }
+        };
         for message in &info.warnings {
             warning(ui, message);
         }
         ui.separator();
         if self.notice.is_none() {
             ui.add_enabled_ui(idle, |ui| {
-                if inspection_passcode || operation_passcode {
-                    self.passcode_settings(ui, needs_passcode);
-                }
+                self.passcode_settings(ui, passcode);
                 self.settings(ui, frame);
             });
         }
@@ -383,7 +341,7 @@ impl OrbisApp {
                         .size(13.0),
                     );
                     path_label(ui, &plan.destination, "Destination: ");
-                    if plan.available_bytes < plan.required_free_bytes {
+                    if !plan.has_sufficient_space() {
                         warning(
                             ui,
                             "Not enough free space. Free space on this drive, then check again.",
@@ -501,7 +459,7 @@ impl OrbisApp {
         let Some(package) = &self.package else {
             return;
         };
-        let path = package.path.clone();
+        let source = PackageSource::new(package.path.clone(), self.passcode.clone());
         ui.horizontal(|ui| {
             let caption = match self.action {
                 Action::Verify => "Verification does not write package data.",
@@ -517,12 +475,10 @@ impl OrbisApp {
                 |ui| match self.action {
                     Action::Verify => {
                         if ui.add(theme::primary("Verify package")).clicked() {
-                            self.start(
-                                path,
-                                Operation::Verify {
-                                    metadata_only: self.metadata_only,
-                                },
-                            );
+                            self.start(Operation::Verify {
+                                source,
+                                metadata_only: self.metadata_only,
+                            });
                         }
                     }
                     Action::Extract => {
@@ -535,13 +491,11 @@ impl OrbisApp {
                             .add_enabled(output.is_some(), theme::primary("Extract files"))
                             .clicked()
                         {
-                            self.start(
-                                path,
-                                Operation::Extract {
-                                    output: output.unwrap(),
-                                    resume: self.resume,
-                                },
-                            );
+                            self.start(Operation::Extract {
+                                source,
+                                output: output.unwrap(),
+                                resume: self.resume,
+                            });
                         }
                     }
                     Action::Update => self.update_button(ui),
@@ -552,37 +506,15 @@ impl OrbisApp {
 
     fn update_button(&mut self, ui: &mut egui::Ui) {
         let Some(info) = &self.package else { return };
-        let base = self.base.path();
-        let step = self
-            .update_target
-            .step(&info.update.readiness, base.is_some());
-        let (label, enabled) = match step {
-            UpdateStep::Install(plan) if plan.available_bytes >= plan.required_free_bytes => {
-                let label = match plan.mode {
-                    InstallMode::Separate => "Install update",
-                    InstallMode::Merge => "Merge update",
-                };
-                if ui.add(theme::primary(label)).clicked()
-                    && let Some(base) = base.cloned()
-                    && let UpdateTargetState::Preview(preview) =
-                        std::mem::take(&mut self.update_target)
-                {
-                    self.start(
-                        info.path.clone(),
-                        Operation::InstallUpdate { base, preview },
-                    );
-                }
-                return;
-            }
-            UpdateStep::Install(_) | UpdateStep::TargetRejected(_) => ("Check again", true),
-            UpdateStep::CheckUpdate | UpdateStep::CheckTarget => ("Check update", true),
-            UpdateStep::EnterPasscode | UpdateStep::PackageRejected(_) => ("Check update", false),
-        };
+        let command = self.update_target.controls(info, &self.base).command();
         if ui
-            .add_enabled(base.is_some() && enabled, theme::primary(label))
+            .add_enabled(
+                command != UpdateCommand::Unavailable,
+                theme::primary(command.label()),
+            )
             .clicked()
         {
-            self.check_update();
+            self.submit_update(command);
         }
     }
 

@@ -1,7 +1,7 @@
 use crate::operations::{self, Failure, Operation, Outcome};
 use orbis_cli::ExtractProgress;
 use std::{
-    path::{Path, PathBuf},
+    path::Path,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -82,12 +82,7 @@ pub struct Job {
 }
 
 impl Job {
-    pub fn start(
-        path: PathBuf,
-        operation: Operation,
-        ctx: eframe::egui::Context,
-        passcode: Option<Arc<operations::Passcode>>,
-    ) -> std::io::Result<Self> {
+    pub fn start(operation: Operation, ctx: eframe::egui::Context) -> std::io::Result<Self> {
         let label = operation.label();
         let help = operation.failure_help();
         let progress = Arc::new(Progress::default());
@@ -96,12 +91,7 @@ impl Job {
         let thread = thread::Builder::new()
             .name("orbis-operation".into())
             .spawn(move || {
-                let result = operations::run_with_passcode(
-                    &path,
-                    operation,
-                    passcode.as_deref(),
-                    worker_progress.as_ref(),
-                );
+                let result = operations::run(operation, worker_progress.as_ref());
                 // A modal native picker can outlast the frame's repaint timer.
                 // Wake the event loop explicitly when background work finishes.
                 ctx.request_repaint();

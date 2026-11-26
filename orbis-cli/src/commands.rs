@@ -2,8 +2,8 @@ use crate::cli::{self, Cli, Command};
 use crate::output::{diagnostic, error_message, escaped, human_size};
 use clap::CommandFactory;
 use orbis_cli::{
-    ConsoleProgress, ExtractError, ExtractOptions, ListedItem, PkgExtractor, SilentProgress,
-    prepare_filesystem,
+    ConsoleProgress, ExtractError, ExtractOptions, ListedItem, MappedPackage as Package,
+    PkgExtractor, SilentProgress, prepare_filesystem,
 };
 use serde_json::{Value, json};
 use snafu::{ResultExt, Snafu};
@@ -19,7 +19,6 @@ mod install;
 mod verify;
 
 type Result<T> = std::result::Result<T, Box<dyn StdError>>;
-type Package = orbis_pkg::Pkg<memmap2::Mmap>;
 
 #[derive(Debug, Snafu)]
 enum Error {

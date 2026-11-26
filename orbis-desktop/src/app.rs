@@ -1,5 +1,5 @@
 use crate::{
-    operations::{self, Operation, Outcome, OutputFolder, PackageInfo, UpdatePackage, human_size},
+    operations::{self, Operation, Outcome, OutputFolder, PackageInfo, PackageSource, human_size},
     worker::{Details, Job},
 };
 use eframe::egui;
@@ -8,13 +8,15 @@ mod game;
 #[cfg(test)]
 mod tests;
 mod tools;
+mod update;
 mod view;
-use orbis_cli::install::{GameTarget, InstallError, InstallMode, InstallPlan, UpdateReadiness};
+use orbis_cli::install::{GameTarget, InstallMode};
 use std::{
     path::PathBuf,
     sync::{Arc, atomic::Ordering},
     time::Duration,
 };
+use update::{PasscodePrompt, UpdateCommand, UpdateTargetState};
 
 #[derive(Default, PartialEq, Eq, Clone, Copy)]
 enum Action {
@@ -22,54 +24,6 @@ enum Action {
     Extract,
     Update,
     Verify,
-}
-
-enum UpdateStep<'a> {
-    CheckUpdate,
-    CheckTarget,
-    EnterPasscode,
-    Install(&'a InstallPlan),
-    PackageRejected(&'a InstallError),
-    TargetRejected(&'a InstallError),
-}
-
-/// The last check of the selected package against this folder and install mode.
-#[derive(Default)]
-enum UpdateTargetState {
-    #[default]
-    Unchecked,
-    AwaitingPasscode,
-    Rejected(InstallError),
-    Preview(Box<InstallPlan>),
-}
-
-impl UpdateTargetState {
-    fn preview(&self) -> Option<&InstallPlan> {
-        match self {
-            Self::Preview(plan) => Some(plan),
-            _ => None,
-        }
-    }
-
-    fn discard_preview(&mut self) {
-        if matches!(self, Self::Preview(_)) {
-            *self = Self::Unchecked;
-        }
-    }
-
-    fn step<'a>(&'a self, readiness: &'a UpdateReadiness, has_base: bool) -> UpdateStep<'a> {
-        match self {
-            Self::Preview(plan) => UpdateStep::Install(plan),
-            Self::Rejected(error) => UpdateStep::TargetRejected(error),
-            Self::AwaitingPasscode => UpdateStep::EnterPasscode,
-            Self::Unchecked => match readiness {
-                UpdateReadiness::Ready(_) => UpdateStep::CheckUpdate,
-                UpdateReadiness::Rejected(error) => UpdateStep::PackageRejected(error),
-                UpdateReadiness::NeedsPasscode(_) if has_base => UpdateStep::CheckTarget,
-                UpdateReadiness::NeedsPasscode(_) => UpdateStep::EnterPasscode,
-            },
-        }
-    }
 }
 
 struct Notice {
@@ -183,43 +137,10 @@ impl OrbisApp {
 
     fn open_package(&mut self, path: PathBuf, base: UpdateBase) {
         self.reset_package(base);
-        self.start(path, Operation::Inspect);
+        self.start(Operation::Inspect(PackageSource::new(path, None)));
     }
 
-    fn update_target_changed(&mut self) {
-        if let Some(info) = &self.package
-            && self.action == Action::Update
-            && (matches!(self.base, UpdateBase::Game(_))
-                || matches!(info.update.readiness, UpdateReadiness::NeedsPasscode(_)))
-        {
-            self.check_update();
-        } else {
-            self.update_target = UpdateTargetState::Unchecked;
-        }
-    }
-
-    fn check_update(&mut self) {
-        self.update_target = UpdateTargetState::Unchecked;
-        let (Some(info), Some(base)) = (&self.package, self.base.path().cloned()) else {
-            return;
-        };
-        let mode = self.mode;
-        let package = match info.update.readiness {
-            UpdateReadiness::Ready(_) => UpdatePackage::Readable(info.content_id),
-            UpdateReadiness::NeedsPasscode(update) => UpdatePackage::Locked(update),
-            UpdateReadiness::Rejected(_) => return,
-        };
-        self.start(
-            info.path.clone(),
-            Operation::PreviewUpdate {
-                package,
-                base,
-                mode,
-            },
-        );
-    }
-
-    fn start(&mut self, path: PathBuf, operation: Operation) {
+    fn start(&mut self, operation: Operation) {
         if self.job.is_some() {
             return;
         }
@@ -228,14 +149,7 @@ impl OrbisApp {
         }
         self.notice = None;
         self.warnings = Details::default();
-        match Job::start(
-            path,
-            operation,
-            self.ctx.clone(),
-            self.pending_passcode
-                .clone()
-                .or_else(|| self.passcode.clone()),
-        ) {
+        match Job::start(operation, self.ctx.clone()) {
             Ok(job) => self.job = Some(job),
             Err(e) => {
                 self.pending_passcode = None;

@@ -130,7 +130,7 @@ impl OrbisApp {
     pub(super) fn refresh_game(&mut self, target: GameTarget) {
         self.update_target = UpdateTargetState::Unchecked;
         self.game = Some(GameFolder::new(target.clone(), None, None));
-        self.start(PathBuf::new(), Operation::CheckGame { target });
+        self.start(Operation::CheckGame { target });
     }
 
     pub(super) fn game_footer(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
@@ -170,7 +170,7 @@ impl OrbisApp {
                 let plan = game.rollback.take().unwrap();
                 game.status = None;
                 game.confirming_rollback = false;
-                self.start(PathBuf::new(), Operation::RollbackSeparate { target, plan });
+                self.start(Operation::RollbackSeparate { target, plan });
             }
             return;
         }
@@ -211,7 +211,7 @@ impl OrbisApp {
                     } else {
                         Operation::RestoreBase { target }
                     };
-                    self.start(PathBuf::new(), operation);
+                    self.start(operation);
                 }
             }
             _ => {}
