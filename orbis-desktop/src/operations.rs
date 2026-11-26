@@ -299,6 +299,11 @@ fn execute(
                 incomplete,
             });
         }
+        Operation::CheckUpdateTarget { base, .. } | Operation::PreviewUpdate { base, .. }
+            if install::merge_status(base)?.is_some() =>
+        {
+            return game_status(base, progress);
+        }
         Operation::CheckUpdateTarget { update, base, mode } => {
             return Ok(Outcome::UpdateTarget(update.check_target(base, *mode)));
         }
@@ -310,9 +315,6 @@ fn execute(
                 title: "Rollback complete",
                 message: format!("Version {} is now active.", plan.target_version()),
             });
-        }
-        Operation::PreviewUpdate { base, .. } if install::merge_status(base)?.is_some() => {
-            return game_status(base, progress);
         }
         Operation::RestoreBase { base } | Operation::RecoverBase { base } => {
             let (title, message) = if matches!(operation, Operation::RestoreBase { .. }) {

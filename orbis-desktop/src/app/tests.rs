@@ -681,6 +681,8 @@ fn returning_to_a_locked_pkg_after_rollback_rechecks_the_active_version() {
     click(&mut app, "Done");
     finish(&mut app);
     click(&mut app, "Back");
+    assert!(app.job.is_none() && app.target_check.is_none());
+    click(&mut app, "Check update");
     finish(&mut app);
     app.passcode_input = String::from_utf8(features::PASSCODE.to_vec())
         .unwrap()
@@ -857,6 +859,91 @@ fn contextual_update_accepts_a_passcode_and_rereads_the_game_on_back() {
     finish(&mut app);
     assert_eq!(app.game.as_ref().unwrap().base, base);
     assert!(app.package.is_none() && app.passcode.is_none() && app.preview.is_none());
+}
+
+#[test]
+fn locked_update_can_restore_or_recover_a_merged_target_without_the_pkg() {
+    use crate::common;
+    use orbis_cli::{SilentProgress, install};
+    for (pending, button) in [(false, "Restore base"), (true, "Recover base")] {
+        let dir = tempfile::tempdir().unwrap();
+        let base = common::base_game(dir.path());
+        let active = orbis_pkg::Pkg::new(common::update("01.10", "new.txt", b"ACTIVE")).unwrap();
+        install::install_with_mode(&active, &base, InstallMode::Merge, SilentProgress).unwrap();
+        if pending {
+            fs::write(
+                dir.path()
+                    .join(".CUSA00000.orbis-install/merge/pending.json"),
+                br#""restore""#,
+            )
+            .unwrap();
+        }
+        let path = dir.path().join("locked.pkg");
+        fs::write(
+            &path,
+            features::passcoded_pkg_with_entry(2, orbis_pkg::entry::EntryId::PfsImageKey),
+        )
+        .unwrap();
+        let mut app = OrbisApp::default();
+        app.open(path.clone());
+        finish(&mut app);
+        fs::remove_file(&path).unwrap();
+        app.base = UpdateBase::Pick(Some(base.clone()));
+        app.update_target_changed();
+        finish(&mut app);
+
+        click(&mut app, "Back");
+        assert!(app.game.is_none() && app.job.is_none());
+        click(&mut app, "Check update");
+        finish(&mut app);
+        click(&mut app, button);
+        finish(&mut app);
+        click(&mut app, "Done");
+        finish(&mut app);
+        assert!(install::merge_status(&base).unwrap().is_none());
+        assert!(!base.join("new.txt").exists());
+        click(&mut app, "Back");
+        assert_eq!(app.package.as_ref().unwrap().path, path);
+    }
+}
+
+#[test]
+fn back_from_a_merged_target_waits_for_an_explicit_update_check() {
+    use crate::common;
+    use orbis_cli::{SilentProgress, install};
+    let dir = tempfile::tempdir().unwrap();
+    let base = common::base_game(dir.path());
+    let mut app = OrbisApp::default();
+    app.open_game(base.clone());
+    finish(&mut app);
+
+    // Another process merges an update while the PKG picker is open.
+    let active = orbis_pkg::Pkg::new(common::update("01.10", "new.txt", b"ACTIVE")).unwrap();
+    install::install_with_mode(&active, &base, InstallMode::Merge, SilentProgress).unwrap();
+    let path = dir.path().join("next.pkg");
+    fs::write(&path, common::update("01.12", "new.txt", b"NEXT")).unwrap();
+    app.open_package(path.clone(), UpdateBase::Game(base.clone()));
+    finish(&mut app);
+    click(&mut app, "Back");
+    assert!(app.game.is_none() && app.job.is_none() && app.preview.is_none());
+    assert_eq!(app.package.as_ref().unwrap().path, path);
+    assert_eq!(app.base.path(), Some(&base));
+    click(&mut app, "Check update");
+    finish(&mut app);
+    assert_eq!(
+        app.game.as_ref().unwrap().status.as_ref().unwrap().mode,
+        InstallMode::Merge
+    );
+    click(&mut app, "Refresh");
+    finish(&mut app);
+    click(&mut app, "Restore base");
+    finish(&mut app);
+    click(&mut app, "Done");
+    finish(&mut app);
+    click(&mut app, "Back");
+    click(&mut app, "Check update");
+    finish(&mut app);
+    assert_eq!(app.preview.as_ref().unwrap().current_version, "01.00");
 }
 
 #[test]

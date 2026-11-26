@@ -125,11 +125,10 @@ impl OrbisApp {
             self.mode = InstallMode::Separate;
         }
         self.base = base;
-        self.target_check = None;
+        self.invalidate_update_check();
         self.game = None;
         self.folder_name.clear();
         self.resume = false;
-        self.preview = None;
     }
 
     fn open_package(&mut self, path: PathBuf, base: UpdateBase) {
@@ -149,12 +148,15 @@ impl OrbisApp {
         }
     }
 
-    // A new folder, mode, or return from the game view invalidates the preview
-    // and the locked update's target check. Package facts and credentials survive.
-    fn update_target_changed(&mut self) {
+    fn invalidate_update_check(&mut self) {
         self.preview = None;
         self.target_check = None;
+    }
+
+    fn update_target_changed(&mut self) {
+        self.invalidate_update_check();
         if let Some(info) = &self.package
+            && self.action == Action::Update
             && (matches!(self.base, UpdateBase::Game(_))
                 || matches!(info.update.readiness, UpdateReadiness::NeedsPasscode(_)))
         {
@@ -292,8 +294,13 @@ impl OrbisApp {
                 title,
                 message,
             }) => {
-                self.preview = None;
+                // A completed contextual install leaves the package. A restore
+                // from the game screen keeps the package that led to recovery.
+                if self.game.is_none() && matches!(self.base, UpdateBase::Game(_)) {
+                    self.reset_package(UpdateBase::default());
+                }
                 self.game = Some(game::GameFolder::new(base.clone(), None, None));
+                self.invalidate_update_check();
                 self.notice = Some(Notice {
                     title: title.into(),
                     message,

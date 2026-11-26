@@ -479,13 +479,13 @@ impl OrbisApp {
                 let refresh = !notice.attention && self.export.is_none();
                 self.notice = None;
                 self.warnings = Details::default();
-                if refresh && let UpdateBase::Game(base) = &self.base {
-                    self.open_game(base.clone());
-                } else if refresh
+                if refresh
                     && let Some(game) = &self.game
                     && game.status.is_none()
                 {
-                    self.open_game(game.base.clone());
+                    self.refresh_game(game.base.clone());
+                } else if refresh && let UpdateBase::Game(base) = &self.base {
+                    self.open_game(base.clone());
                 }
             }
             if let Some(error) = reveal_error {

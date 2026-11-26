@@ -107,9 +107,9 @@ impl OrbisApp {
                 ui.add_enabled_ui(self.job.is_none() && self.notice.is_none(), |ui| {
                     if ui.button("Back").clicked() {
                         self.game = None;
-                        self.update_target_changed();
+                        self.invalidate_update_check();
                     } else if ui.button("Refresh").clicked() {
-                        self.open_game(base);
+                        self.refresh_game(base);
                     }
                 });
             });
@@ -124,7 +124,11 @@ impl OrbisApp {
             self.reset_package(UpdateBase::default());
         }
         self.export = None;
-        self.preview = None;
+        self.refresh_game(base);
+    }
+
+    pub(super) fn refresh_game(&mut self, base: PathBuf) {
+        self.invalidate_update_check();
         self.game = Some(GameFolder::new(base.clone(), None, None));
         self.start(PathBuf::new(), Operation::CheckGame { base });
     }
