@@ -424,7 +424,7 @@ fn extracted_game_can_preview_retry_and_install_an_update() {
     click(&mut app, "Done");
     finish(&mut app);
     let game = app.game.as_ref().unwrap();
-    assert_eq!(game.target.path, base);
+    assert_eq!(game.target.path, base.canonicalize().unwrap());
     assert_eq!(
         game.status.as_ref().unwrap().active_version.as_deref(),
         Some("01.12")
@@ -541,6 +541,9 @@ fn incompatible_packages_with_locked_entries_offer_a_replacement_without_a_passc
     let mut missing_image_key = features::passcoded_pkg(2);
     missing_image_key[0x201c] |= 4; // Encrypted PFS requires a PfsImageKey record.
     common::be32(&mut missing_image_key, 0x1020, EntryId::Icon0Png.as_u32());
+    let mut empty_image_key = features::passcoded_pkg(2);
+    empty_image_key[0x201c] |= 4;
+    common::be32(&mut empty_image_key, 0x1034, 0);
     let mut partial_plain_entry = features::passcoded_pkg(2);
     let end = partial_plain_entry.len() as u32;
     common::be32(&mut partial_plain_entry, 0x1030, end); // Unencrypted PfsImageKey.
@@ -568,6 +571,11 @@ fn incompatible_packages_with_locked_entries_offer_a_replacement_without_a_passc
             "missing-image-key.pkg",
             missing_image_key,
             "no PFS image key",
+        ),
+        (
+            "empty-image-key.pkg",
+            empty_image_key,
+            "empty PFS image key",
         ),
         (
             "unsupported-sfo.pkg",
@@ -1112,6 +1120,69 @@ fn done_after_a_separate_install_rechecks_the_confirmed_edition() {
             .iter()
             .any(|(_, node)| node.label() == Some("Restore base"))
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn redirecting_a_link_after_install_keeps_refresh_and_restore_on_the_installed_game() {
+    use crate::common;
+    use orbis_cli::{SilentProgress, install};
+    use std::os::unix::fs::symlink;
+
+    for mode in [InstallMode::Separate, InstallMode::Merge] {
+        let temp = tempfile::tempdir().unwrap();
+        let first = common::base_game(&temp.path().join("first"));
+        let second = common::base_game(&temp.path().join("second"));
+        let other_update =
+            orbis_pkg::Pkg::new(common::update("01.10", "new.txt", b"OTHER")).unwrap();
+        install::install_with_mode(&other_update, &second, mode, SilentProgress).unwrap();
+        let link = temp.path().join("selected-game");
+        symlink(&first, &link).unwrap();
+        let path = temp.path().join("update.pkg");
+        fs::write(&path, common::update("01.12", "new.txt", b"SELECTED")).unwrap();
+        let mut app = OrbisApp::default();
+        app.open_package(path, UpdateBase::Game(link.clone()));
+        finish(&mut app);
+        if mode == InstallMode::Merge {
+            click(&mut app, "Merge into game folder");
+            finish(&mut app);
+            click(&mut app, "Merge update");
+        } else {
+            click(&mut app, "Install update");
+        }
+        finish(&mut app);
+
+        fs::remove_file(&link).unwrap();
+        symlink(&second, &link).unwrap();
+        click(&mut app, "Done");
+        finish(&mut app);
+        let game = app.game.as_ref().unwrap();
+        assert_eq!(
+            game.status.as_ref().unwrap().active_version.as_deref(),
+            Some("01.12")
+        );
+        assert_eq!(game.target.path, first.canonicalize().unwrap());
+        if mode == InstallMode::Merge {
+            click(&mut app, "Restore base");
+        } else {
+            click(&mut app, "Restore base 01.00…");
+            click(&mut app, "Confirm restore");
+        }
+        finish(&mut app);
+        assert!(
+            install::status(&first, SilentProgress)
+                .unwrap()
+                .active_version
+                .is_none()
+        );
+        assert_eq!(
+            install::status(&second, SilentProgress)
+                .unwrap()
+                .active_version
+                .as_deref(),
+            Some("01.10")
+        );
+    }
 }
 
 #[test]

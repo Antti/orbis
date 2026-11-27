@@ -90,12 +90,11 @@ pub enum UpdatePackage {
 }
 
 impl UpdatePackage {
-    fn game_target(&self, base: &Path) -> install::GameTarget {
-        let id = match self {
+    fn content_id(&self) -> ContentId {
+        match self {
             Self::Readable { id, .. } => *id,
             Self::Locked(update) => update.content_id(),
-        };
-        install::GameTarget::for_update(base.to_owned(), id)
+        }
     }
 }
 
@@ -330,9 +329,10 @@ fn execute(operation: Operation, progress: &impl ExtractProgress) -> Result<Outc
             preview,
         } => {
             let pkg = source.open_filesystem(Some((&base, preview.mode)), progress)?;
-            let plan = preview.apply(&pkg, &base, progress)?;
+            let target = install::GameTarget::for_update(&base, *pkg.header().content_id())?;
+            let plan = preview.apply(&pkg, &target.path, progress)?;
             Ok(Outcome::UpdateInstalled {
-                target: install::GameTarget::for_update(base, *pkg.header().content_id()),
+                target,
                 plan: Box::new(plan),
             })
         }
@@ -378,7 +378,7 @@ fn preview_update(
     progress: &impl ExtractProgress,
 ) -> Result<Outcome> {
     // A merged game can be recovered even if the selected package is no longer available.
-    let target = package.game_target(&base);
+    let target = install::GameTarget::for_update(&base, package.content_id())?;
     match target.merged_status(progress) {
         Ok(Some(status)) => {
             return Ok(Outcome::GameStatus {
@@ -395,13 +395,16 @@ fn preview_update(
     }
 
     match package {
-        UpdatePackage::Locked(update) => {
-            Ok(Outcome::UpdateTarget(update.check_target(&base, mode)))
-        }
+        UpdatePackage::Locked(update) => Ok(Outcome::UpdateTarget(
+            update.check_target(&target.path, mode),
+        )),
         UpdatePackage::Readable { source, .. } => {
-            let pkg = source.open_filesystem(Some((&base, mode)), progress)?;
+            let pkg = source.open_filesystem(Some((&target.path, mode)), progress)?;
             Ok(Outcome::Preview(install::plan_with_mode(
-                &pkg, &base, mode, progress,
+                &pkg,
+                &target.path,
+                mode,
+                progress,
             )?))
         }
     }

@@ -45,11 +45,12 @@ impl GameTarget {
         Self { path, update: None }
     }
 
-    pub fn for_update(path: PathBuf, id: ContentId) -> Self {
-        Self {
-            path,
+    /// Pins the resolved game folder for the update and its later status or recovery actions.
+    pub fn for_update(path: &Path, id: ContentId) -> Result<Self> {
+        Ok(Self {
+            path: std::fs::canonicalize(path)?,
             update: Some(id),
-        }
+        })
     }
 
     pub fn merged_status(

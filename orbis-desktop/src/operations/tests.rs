@@ -590,7 +590,7 @@ fn previews_and_installs_updates_without_changing_the_base() {
         fs::read(plan.destination.join("new.txt")).unwrap(),
         b"NEW DATA"
     );
-    assert_eq!(target.path, base);
+    assert_eq!(target.path, base.canonicalize().unwrap());
     assert_eq!(fs::read(base.join("base.txt")).unwrap(), b"BASE");
     assert!(!base.join("new.txt").exists());
 }

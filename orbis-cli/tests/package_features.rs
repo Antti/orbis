@@ -437,26 +437,30 @@ fn install_only_requires_an_image_key_record_for_an_encrypted_filesystem() {
         base.to_str().unwrap(),
         "--dry-run",
     ];
-    let mut bytes = passcoded_pkg(2);
-    be32(
-        &mut bytes,
-        0x1020,
-        orbis_pkg::entry::EntryId::Icon0Png.as_u32(),
-    );
     let path = dir.path().join("update.pkg");
-
-    // The plaintext filesystem can be installed once the SFO is unlocked.
-    std::fs::write(&path, &bytes).unwrap();
     let unlocked = [&args[..], &["--passcode-file", "passcode"]].concat();
-    assert_code(&run(dir.path(), &unlocked), 0);
+    for (offset, value, reason) in [
+        (
+            0x1020,
+            orbis_pkg::entry::EntryId::Icon0Png.as_u32(),
+            "no PFS image key",
+        ),
+        (0x1034, 0, "empty PFS image key"),
+    ] {
+        let mut bytes = passcoded_pkg(2);
+        be32(&mut bytes, offset, value);
+        // A plaintext filesystem can be installed once the SFO is unlocked.
+        std::fs::write(&path, &bytes).unwrap();
+        assert_code(&run(dir.path(), &unlocked), 0);
 
-    bytes[0x201c] |= 4;
-    std::fs::write(path, bytes).unwrap();
-    for args in [&args[..], &unlocked] {
-        let output = run(dir.path(), args);
-        assert_code(&output, 1);
-        let error = String::from_utf8_lossy(&output.stderr);
-        assert!(error.contains("no PFS image key"), "{error}");
+        bytes[0x201c] |= 4;
+        std::fs::write(&path, bytes).unwrap();
+        for args in [&args[..], &unlocked] {
+            let output = run(dir.path(), args);
+            assert_code(&output, 1);
+            let error = String::from_utf8_lossy(&output.stderr);
+            assert!(error.contains(reason), "{error}");
+        }
     }
 }
 

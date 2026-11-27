@@ -303,14 +303,18 @@ impl<R: AsRef<[u8]>> Pkg<R> {
         Err(FindEntryError::NotFound)
     }
 
-    /// Locates the filesystem image key record without requiring its entry decryption key.
+    /// Locates a nonempty filesystem image key record without requiring its entry decryption key.
     pub fn pfs_image_key_entry(&self) -> Result<PkgEntry, OpenError> {
-        self.find_entry(EntryId::PfsImageKey)
-            .map(|(entry, _)| entry)
+        let (entry, _) = self
+            .find_entry(EntryId::PfsImageKey)
             .map_err(|source| match source {
                 FindEntryError::NotFound => OpenError::PfsImageKeyNotFound,
                 source => OpenError::FindPfsImageKeyFailed { source },
-            })
+            })?;
+        if entry.data_size() == 0 {
+            return Err(OpenError::EmptyPfsImageKey);
+        }
+        Ok(entry)
     }
 
     fn load_ekpfs(&mut self) -> Result<(), OpenError> {
@@ -510,6 +514,9 @@ pub enum OpenError {
 
     #[snafu(display("no PFS image key in the PKG"))]
     PfsImageKeyNotFound,
+
+    #[snafu(display("empty PFS image key record"))]
+    EmptyPfsImageKey,
 
     #[snafu(display("failed to get PFS image key"))]
     GetPfsImageKeyFailed { source: EntryDataError },
