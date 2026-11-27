@@ -21,6 +21,30 @@ fn active(base: &Path) -> PathBuf {
 fn manager(base: &Path) -> PathBuf {
     base.with_file_name(".CUSA00000.orbis-install")
 }
+
+#[test]
+fn confirming_a_preview_rejects_a_different_target_before_creating_state() {
+    for mode in [InstallMode::Separate, InstallMode::Merge] {
+        let tmp = tempfile::tempdir().unwrap();
+        let selected = base_game(&tmp.path().join("selected"));
+        let other = base_game(&tmp.path().join("other"));
+        let pkg = package("01.12", "next.txt");
+        let preview = plan_with_mode(&pkg, &selected, mode, SilentProgress).unwrap();
+
+        // Same edition, different destination.
+        assert!(preview.apply(&pkg, &other, SilentProgress).is_err());
+        assert!(!manager(&other).exists());
+
+        // Same destination, different game.
+        fs::write(
+            selected.join("sce_sys/param.sfo"),
+            sfo("CUSA12345", "gd", "01.00"),
+        )
+        .unwrap();
+        assert!(preview.apply(&pkg, &selected, SilentProgress).is_err());
+        assert!(!manager(&selected).exists());
+    }
+}
 fn version(base: &Path) -> String {
     let dir = Dir::open_ambient_dir(active(base), cap_std::ambient_authority()).unwrap();
     storage::app_metadata(&dir).unwrap().version.to_string()
@@ -263,6 +287,24 @@ fn confirmed_rollback_preserves_a_separate_installation_that_now_needs_attention
 }
 
 #[test]
+fn preview_reports_an_unsupported_key_slot_before_a_recoverable_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = base_game(tmp.path());
+    let mut bytes = update("01.01", "file", b"new");
+    // The first two entries are locked, while the update SFO remains readable.
+    for (entry, slot) in [(0x1000, 2), (0x1020, 7)] {
+        be32(&mut bytes, entry + 8, 0x8000_0000);
+        be32(&mut bytes, entry + 12, slot << 12);
+    }
+    let pkg = Pkg::parse(bytes).unwrap();
+    assert!(matches!(
+        plan(&pkg, &base),
+        Err(InstallError::UnsupportedUpdateKey { slot: 7 })
+    ));
+    assert!(!manager(&base).exists());
+}
+
+#[test]
 fn rejects_wrong_titles_categories_and_delta_packages() {
     let tmp = tempfile::tempdir().unwrap();
     let base = base_game(tmp.path());
@@ -453,7 +495,7 @@ fn recovery_restores_prior_installation_at_every_rollback_boundary() {
 fn lock_prevents_simultaneous_installation_and_recovery() {
     let tmp = tempfile::tempdir().unwrap();
     let base = base_game(tmp.path());
-    let guard = Layout::open(&base, true).unwrap();
+    let guard = Layout::open_for_write(&base).unwrap();
     assert!(
         install(&package("01.01", "one"), &base, SilentProgress)
             .unwrap_err()
@@ -466,10 +508,43 @@ fn lock_prevents_simultaneous_installation_and_recovery() {
 }
 
 #[test]
+fn separate_preview_shares_the_installation_lock_during_the_scan() {
+    struct ObserveScan<'a> {
+        base: &'a Path,
+        scanned: AtomicBool,
+    }
+    impl ExtractProgress for ObserveScan<'_> {
+        fn phase(&self, name: &str) {
+            if name == "Checking installed update" {
+                assert!(merge_status(self.base).unwrap().is_none());
+                assert!(Layout::open_locked_existing(self.base).is_err());
+                self.scanned.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let base = base_game(tmp.path());
+    install(&package("01.01", "old"), &base, SilentProgress).unwrap();
+    let next = package("01.02", "new");
+    let writer = Layout::open_locked_existing(&base).unwrap();
+    assert!(plan(&next, &base).unwrap_err().to_string().contains("lock"));
+    drop(writer);
+
+    let progress = ObserveScan {
+        base: &base,
+        scanned: AtomicBool::new(false),
+    };
+    plan_with_mode(&next, &base, InstallMode::Separate, &progress).unwrap();
+    assert!(progress.scanned.load(Ordering::Relaxed));
+    Layout::open_locked_existing(&base).unwrap();
+}
+
+#[test]
 fn separate_status_preserves_structured_diagnostics_while_a_writer_holds_the_lock() {
     let tmp = tempfile::tempdir().unwrap();
     let base = base_game(tmp.path());
-    let writer = Layout::open(&base, true).unwrap();
+    let writer = Layout::open_for_write(&base).unwrap();
 
     // Status previously returned a report here, allowing --json callers to
     // receive an actionable issue with exit 3 while an update is in progress.
@@ -647,7 +722,7 @@ fn retains_unknown_metadata_and_rejects_reserved_paths_and_insufficient_space() 
     let base = base_game(tmp.path());
     let mut bytes = update("01.01", "file", b"NEW");
     be32(&mut bytes, 0x1000, 0xfeedcafe);
-    let planned = plan(&Pkg::parse(bytes).unwrap(), &base).unwrap();
+    let mut planned = plan(&Pkg::parse(bytes).unwrap(), &base).unwrap();
     assert!(
         planned
             .files
@@ -657,13 +732,16 @@ fn retains_unknown_metadata_and_rejects_reserved_paths_and_insufficient_space() 
     for name in [".orbis-install.json", "NUL", "bad.", "bad:stream"] {
         assert!(plan(&package("01.01", name), &base).is_err());
     }
+    planned.available_bytes = planned.required_free_bytes - 1;
     assert!(
-        check_space(100, 99)
+        planned
+            .check_space()
             .unwrap_err()
             .to_string()
             .contains("insufficient free space")
     );
-    assert!(check_space(100, 100).is_ok());
+    planned.available_bytes = planned.required_free_bytes;
+    assert!(planned.check_space().is_ok());
     assert!(!active(&base).exists());
 }
 

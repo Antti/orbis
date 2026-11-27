@@ -25,14 +25,22 @@ flagged before extraction. macOS installer `.pkg` files cannot be read by Orbis.
 - **Extract files:** choose a destination and a new folder name, then extract.
   Existing files are never replaced. To continue interrupted work, select the
   same destination and folder name and enable **Resume**. Matching files are
-  checked before reuse; conflicting files remain untouched.
-- **Install update:** open a supported update PKG, choose the extracted base game
-  folder containing `sce_sys`, and click **Check update**. Review the versions,
-  destination, file changes, and space estimate. **Keep update separate** is the
-  default: **Install update** writes to the sibling `-UPDATE` folder and preserves
-  the base. **Merge into game folder** writes update files directly into the base;
-  review the preview, close the emulator, then click **Merge update**. Replaced
-  originals are moved to a backup beside the game; unchanged files stay in place.
+  checked before reuse; conflicting files remain untouched. After a complete
+  base-game extraction, **Open game folder in Orbis** opens its status (added after v0.6.0).
+- **Install update…** in the game-folder view (added after v0.6.0) opens a PKG
+  picker and checks the selected update against the open game. If the PKG is for
+  a different game or uses an unsupported update format, click **Choose another
+  PKG…** or drop a replacement onto the window. Orbis keeps the game folder and
+  your choice of separate or merged installation. If Orbis needs a passcode to
+  read update metadata, enter it and click **Validate passcode**. You can also
+  open an update PKG, choose the extracted base folder containing `sce_sys`, and
+  click **Check update**.
+
+  Review the versions, destination, file changes, and space estimate. Close the
+  emulator before confirming. With **Keep update separate** selected, **Install
+  update** writes to the sibling `-UPDATE` folder. **Merge into game folder**
+  backs up the originals beside the game and replaces files in place when you
+  click **Merge update**.
 
   <img src="../assets/screenshots/update.png" width="640" alt="Sample update PKG for CUSA00000 with Keep update separate selected and Check update ready">
 

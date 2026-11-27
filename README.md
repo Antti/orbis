@@ -21,6 +21,8 @@ The desktop game-folder view and the option to combine `--resume` with
 Drop a PS4 PKG onto the window. Check the title and version, choose a destination
 and folder name, then click **Extract files**. To continue an interrupted
 extraction, select the same output and turn on **Resume an unfinished extraction**.
+After a complete base-game extraction, source builds offer **Open game folder
+in Orbis** to see the installed version or add an update.
 
 <img src="assets/screenshots/package.png" width="640" alt="PS4Load open in Orbis, with one unreadable metadata entry and Games/LOAD00044 selected as the extraction folder">
 
@@ -44,10 +46,13 @@ without extracting files, run `orbis verify game.pkg --integrity`.
 
 ## Install an update for shadPS4
 
-Close the emulator and open the update PKG. Under **Install update**, select the
-extracted base folder containing `sce_sys`. Leave **Keep update separate**
-selected and click **Check update**. Review the versions and space estimate,
-then click **Install update**.
+Close the emulator. In a source build, drop the extracted base game folder onto
+Orbis, click **Install update…**, and choose the update PKG. Orbis checks it
+against that game. Review the installed and update versions, destination, and
+space estimate, then click **Install update**.
+
+In v0.6.0, open the update PKG first, select the extracted base folder containing
+`sce_sys`, and click **Check update** to see the same preview.
 
 ```sh
 orbis install update.pkg --base Games/CUSA00000 --dry-run
@@ -63,7 +68,7 @@ Drop the base game folder onto the window to see the active version. Orbis keeps
 one rollback point. In this sample, **Restore base 01.00…** undoes update 01.12.
 The CLI equivalent is `orbis rollback --base Games/CUSA00000`.
 
-<img src="assets/screenshots/game-folder.png" width="640" alt="Sample game CUSA00000 with separate update 01.12 installed, base version 01.00, and a Restore base 01.00 button">
+<img src="assets/screenshots/game-folder.png" width="640" alt="Game folder for CUSA00000 with update 01.12 active and actions to install an update or restore base 01.00">
 
 To update the base folder in place, select **Merge into game folder** or pass
 `--merge` to `orbis install`. Keep the adjacent `.CUSA00000.orbis-install`

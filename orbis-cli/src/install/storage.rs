@@ -83,19 +83,22 @@ impl Drop for InstallLock {
 }
 
 impl Layout {
-    pub fn open(base: &Path, write: bool) -> Result<Self> {
-        Self::open_inner(base, write, false)
+    pub fn open(base: &Path) -> Result<Self> {
+        Self::open_inner(base, false)
+    }
+    pub fn open_for_write(base: &Path) -> Result<Self> {
+        Self::open(base)?.lock_for_write()
     }
     pub fn inspect(base: &Path) -> Result<Self> {
-        Self::open_inner(base, false, true)
+        Self::open_inner(base, true)
     }
     /// Lock a managed installation without creating state in a replacement folder.
     pub fn open_locked_existing(base: &Path) -> Result<Self> {
-        let mut layout = Self::open(base, false)?;
+        let mut layout = Self::open(base)?;
         layout._lock = Some(InstallLock::acquire(layout.manager()?, false)?);
         Ok(layout)
     }
-    fn open_inner(base: &Path, write: bool, allow_legacy: bool) -> Result<Self> {
+    fn open_inner(base: &Path, allow_legacy: bool) -> Result<Self> {
         let base_path = std::fs::canonicalize(base)?;
         if !base_path.is_dir() {
             return Err(invalid("base must be an extracted game directory"));
@@ -117,19 +120,9 @@ impl Layout {
         let mut root_name = OsString::from(".");
         root_name.push(name);
         root_name.push(".orbis-install");
-        if exists(&parent, &root_name)? {
-            require_directory(&parent, &root_name)?;
-        } else if write {
-            parent.create_dir(&root_name)?;
-            sync_dir(&parent)?;
-        }
         let root = if exists(&parent, &root_name)? {
+            require_directory(&parent, &root_name)?;
             Some(parent.open_dir(&root_name)?)
-        } else {
-            None
-        };
-        let lock = if write {
-            Some(InstallLock::acquire(root.as_ref().unwrap(), true)?)
         } else {
             None
         };
@@ -140,8 +133,29 @@ impl Layout {
             active,
             root_name,
             root,
-            _lock: lock,
+            _lock: None,
         })
+    }
+    /// Acquire the writer on the already-resolved layout, creating manager state if needed.
+    pub fn lock_for_write(mut self) -> Result<Self> {
+        if self.root.is_none() {
+            match self.parent.create_dir(&self.root_name) {
+                Ok(()) => sync_dir(&self.parent)?,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    require_directory(&self.parent, &self.root_name)?;
+                }
+                Err(e) => return Err(e.into()),
+            }
+            self.root = Some(self.parent.open_dir(&self.root_name)?);
+        }
+        self._lock = Some(InstallLock::acquire(self.manager()?, true)?);
+        Ok(self)
+    }
+    pub fn install_destination(&self, mode: InstallMode) -> PathBuf {
+        match mode {
+            InstallMode::Separate => self.active_path(),
+            InstallMode::Merge => self.parent_path.join(&self.base),
+        }
     }
     pub fn manager(&self) -> Result<&Dir> {
         self.root
@@ -386,7 +400,7 @@ pub(super) fn validate_manifest_metadata(
     dir: &Dir,
     manifest: &Manifest,
     base: &AppMetadata,
-) -> Result<()> {
+) -> Result<AppVersion> {
     if manifest.schema_version != 1
         || manifest.title_id != base.title_id
         || manifest.content_id != base.content_id
@@ -400,7 +414,7 @@ pub(super) fn validate_manifest_metadata(
     {
         return Err(invalid("installed update metadata has changed"));
     }
-    Ok(())
+    Ok(meta.version)
 }
 
 pub(super) fn compare_inventory(
@@ -427,19 +441,19 @@ mod tests {
     fn dropping_layout_releases_lock_despite_a_duplicate_descriptor() {
         let temp = tempfile::tempdir().unwrap();
         let base = crate::test_support::base_game(temp.path());
-        let layout = Layout::open(&base, true).unwrap();
+        let layout = Layout::open_for_write(&base).unwrap();
         // A concurrent fork can retain this open file description until exec,
         // even when the descriptor is marked close-on-exec. Duplicate it here
         // to reproduce that lifetime deterministically without timing a fork.
         let inherited = layout._lock.as_ref().unwrap().0.try_clone().unwrap();
-        assert!(Layout::open(&base, true).is_err());
+        assert!(Layout::open_for_write(&base).is_err());
         drop(layout);
-        let next = Layout::open(&base, true).unwrap();
-        assert!(Layout::open(&base, true).is_err());
+        let next = Layout::open_for_write(&base).unwrap();
+        assert!(Layout::open_for_write(&base).is_err());
         drop(inherited);
-        assert!(Layout::open(&base, true).is_err());
+        assert!(Layout::open_for_write(&base).is_err());
         drop(next);
-        assert!(Layout::open(&base, true).is_ok());
+        assert!(Layout::open_for_write(&base).is_ok());
     }
 
     #[test]

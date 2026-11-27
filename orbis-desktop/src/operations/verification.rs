@@ -58,15 +58,14 @@ impl VerificationReport {
 }
 
 pub(super) fn verify(
-    path: &Path,
+    source: &PackageSource,
     metadata_only: bool,
-    passcode: Option<&Passcode>,
     progress: &impl ExtractProgress,
 ) -> VerificationReport {
     let mut report = VerificationReport {
         schema_version: 1,
         report_type: "orbis-desktop-verification-summary",
-        package: path.to_string_lossy().into_owned(),
+        package: source.path.to_string_lossy().into_owned(),
         started_at_unix_seconds: SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
@@ -83,11 +82,7 @@ pub(super) fn verify(
         if progress.is_cancelled() {
             return Err(ExtractError::Cancelled.into());
         }
-        let mut pkg = unsafe { orbis_cli::inspect_pkg(path)? };
-        if let Some(passcode) = passcode {
-            pkg.load_passcode(passcode.bytes())?;
-        }
-        let _ = pkg.load_entry_keys();
+        let mut pkg = source.open()?;
         if !metadata_only {
             let _ = pkg.load_pfs_key();
         }

@@ -11,14 +11,31 @@ fn package(root: &Path) -> PathBuf {
     path
 }
 
+fn source(path: &Path) -> PackageSource {
+    PackageSource::new(path.to_owned(), None)
+}
+
+fn readable_update(path: &Path) -> UpdatePackage {
+    let pkg = orbis_pkg::Pkg::parse(fs::read(path).unwrap()).unwrap();
+    UpdatePackage::Readable {
+        source: source(path),
+        id: *pkg.header().content_id(),
+    }
+}
+
 fn verify_report(
     path: &Path,
     metadata_only: bool,
     progress: &impl ExtractProgress,
 ) -> Box<VerificationReport> {
-    let Outcome::Verified(report) =
-        run(path, Operation::Verify { metadata_only }, progress).unwrap()
-    else {
+    let Outcome::Verified(report) = run(
+        Operation::Verify {
+            source: source(path),
+            metadata_only,
+        },
+        progress,
+    )
+    .unwrap() else {
         panic!()
     };
     report
@@ -113,11 +130,12 @@ fn passcode_unlocks_inspection_and_extraction_and_wrong_values_never_fall_back()
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("locked.pkg");
     fs::write(&path, features::passcoded_pkg(2)).unwrap();
-    let Outcome::Inspected(locked) = run(&path, Operation::Inspect, &SilentProgress).unwrap()
+    let Outcome::Inspected(locked) =
+        run(Operation::Inspect(source(&path)), &SilentProgress).unwrap()
     else {
         panic!()
     };
-    assert_eq!(locked.missing_keys, 1);
+    assert_eq!(locked.update.missing_keys, 1);
     let passcode = Passcode::new(
         String::from_utf8(features::PASSCODE.to_vec())
             .unwrap()
@@ -125,21 +143,21 @@ fn passcode_unlocks_inspection_and_extraction_and_wrong_values_never_fall_back()
     )
     .unwrap();
     assert!(!format!("{passcode:?}").contains("0123456789abcdef"));
+    let unlocked_source = PackageSource::new(path.clone(), Some(Arc::new(passcode)));
     let Outcome::Inspected(unlocked) =
-        run_with_passcode(&path, Operation::Inspect, Some(&passcode), &SilentProgress).unwrap()
+        run(Operation::Inspect(unlocked_source.clone()), &SilentProgress).unwrap()
     else {
         panic!()
     };
-    assert_eq!(unlocked.missing_keys, 0);
+    assert_eq!(unlocked.update.missing_keys, 0);
     assert_eq!(unlocked.version.as_deref(), Some("01.12"));
     let output = dir.path().join("output");
-    let result = run_with_passcode(
-        &path,
+    let result = run(
         Operation::Extract {
+            source: unlocked_source.clone(),
             output: output.clone(),
             resume: false,
         },
-        Some(&passcode),
         &SilentProgress,
     )
     .unwrap();
@@ -153,25 +171,23 @@ fn passcode_unlocks_inspection_and_extraction_and_wrong_values_never_fall_back()
     assert!(output.join("sce_sys/param.sfo").is_file());
     let bad = Passcode::new("x".repeat(32).into()).unwrap();
     let untouched = dir.path().join("bad-output");
-    let error = run_with_passcode(
-        &path,
+    let error = run(
         Operation::Extract {
+            source: PackageSource::new(path.clone(), Some(Arc::new(bad))),
             output: untouched.clone(),
             resume: false,
         },
-        Some(&bad),
         &SilentProgress,
     )
     .unwrap_err();
     assert!(error.details.contains("passcode"));
     assert!(!error.details.contains(&"x".repeat(32)));
     assert!(!untouched.exists());
-    let Outcome::Verified(report) = run_with_passcode(
-        &path,
+    let Outcome::Verified(report) = run(
         Operation::Verify {
+            source: unlocked_source,
             metadata_only: true,
         },
-        Some(&passcode),
         &SilentProgress,
     )
     .unwrap() else {
@@ -190,7 +206,6 @@ fn passcode_unlocks_inspection_and_extraction_and_wrong_values_never_fall_back()
 
 fn export_preview(base: &Path, output: &Path, resume: bool) -> Box<install::ExportPreview> {
     let Outcome::ExportPreview(plan) = run(
-        Path::new(""),
         Operation::PreviewExport {
             base: base.into(),
             output: output.into(),
@@ -229,7 +244,7 @@ fn resume_confirmation_hashes_sources_once_under_the_install_lock() {
         base,
         passes: Default::default(),
     };
-    let result = run(Path::new(""), Operation::Export(preview), &progress).unwrap();
+    let result = run(Operation::Export(preview), &progress).unwrap();
     assert!(matches!(
         result,
         Outcome::Finished {
@@ -252,7 +267,7 @@ fn export_previews_resumes_and_verifies_without_a_package_or_source_changes() {
     assert!(!output.exists());
     assert_eq!(preview.plan().update_version.as_deref(), Some("01.12"));
     let required = preview.plan().filesystem.required_free_bytes;
-    let result = run(Path::new(""), Operation::Export(preview), &SilentProgress).unwrap();
+    let result = run(Operation::Export(preview), &SilentProgress).unwrap();
     assert!(matches!(
         result,
         Outcome::Finished {
@@ -270,12 +285,11 @@ fn export_previews_resumes_and_verifies_without_a_package_or_source_changes() {
         original_manifest
     );
     fs::remove_file(output.join("base.txt")).unwrap();
-    run(Path::new(""), Operation::Export(preview), &SilentProgress).unwrap();
+    run(Operation::Export(preview), &SilentProgress).unwrap();
     assert_eq!(fs::read(output.join("base.txt")).unwrap(), b"UPDATED");
     fs::write(output.join("base.txt"), b"USER CONTENT").unwrap();
     assert!(
         run(
-            Path::new(""),
             Operation::PreviewExport {
                 base,
                 output: output.clone(),
@@ -295,14 +309,14 @@ fn export_rejects_changed_previews_and_cancellation_never_creates_output() {
     let output = dir.path().join("merged");
     let preview = export_preview(&base, &output, false);
     fs::write(base.join("added.txt"), b"new file").unwrap();
-    let error = run(Path::new(""), Operation::Export(preview), &SilentProgress).unwrap_err();
+    let error = run(Operation::Export(preview), &SilentProgress).unwrap_err();
     assert!(error.details.contains("changed after the preview"));
     assert!(!output.exists());
     let preview = export_preview(&base, &output, false);
     let progress = Progress::default();
     progress.cancelled.store(true, Ordering::Relaxed);
     assert!(
-        run(Path::new(""), Operation::Export(preview), &progress)
+        run(Operation::Export(preview), &progress)
             .unwrap_err()
             .cancelled
     );
@@ -327,7 +341,6 @@ fn cancellation_during_export_verification_preserves_the_copy_and_reports_cancel
     let output = dir.path().join("merged");
     let preview = export_preview(&base, &output, false);
     let error = run(
-        Path::new(""),
         Operation::Export(preview),
         &CancelVerification(Default::default()),
     )
@@ -360,12 +373,7 @@ fn automatic_export_verification_reports_corrupt_output_without_changing_sources
         let preview = export_preview(&base, &output, resume);
         let Outcome::Finished {
             title, incomplete, ..
-        } = run(
-            Path::new(""),
-            Operation::Export(preview),
-            &Corrupt(output.clone()),
-        )
-        .unwrap()
+        } = run(Operation::Export(preview), &Corrupt(output.clone())).unwrap()
         else {
             panic!()
         };
@@ -403,7 +411,7 @@ fn automatic_export_verification_rejects_a_directory_replaced_while_copying() {
     install::export_merged(&base, &progress.replacement, SilentProgress).unwrap();
     fs::write(base.join("base.txt"), b"BASE").unwrap();
     let preview = export_preview(&base, &progress.output, true);
-    let error = run(Path::new(""), Operation::Export(preview), &progress).unwrap_err();
+    let error = run(Operation::Export(preview), &progress).unwrap_err();
     assert!(error.details.contains("Export created"));
     assert!(error.details.contains("export destination changed"));
     assert_eq!(fs::read(progress.moved.join("base.txt")).unwrap(), b"BASE");
@@ -418,25 +426,95 @@ fn automatic_export_verification_rejects_a_directory_replaced_while_copying() {
 }
 
 #[test]
+fn extraction_preserves_another_games_sfo_without_offering_to_open_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = common::base_game(temp.path());
+    let mut bytes = common::pkg(common::pfs("extra.txt", b"extra", false));
+    common::be32(&mut bytes, 0x10, 2); // No PARAM.SFO in this PKG.
+    bytes[0x63] = b'1'; // Same title ID, different content ID from the existing game.
+    let path = temp.path().join("extra.pkg");
+    fs::write(&path, bytes).unwrap();
+    let result = run(
+        Operation::Extract {
+            source: source(&path),
+            output: output.clone(),
+            resume: false,
+        },
+        &SilentProgress,
+    )
+    .unwrap();
+    assert!(
+        matches!(result, Outcome::Finished { output: OutputFolder::Directory(path), incomplete: false, .. } if path == output)
+    );
+    assert_eq!(fs::read(output.join("extra.txt")).unwrap(), b"extra");
+    assert_eq!(
+        fs::read(output.join("sce_sys/param.sfo")).unwrap(),
+        common::sfo("CUSA00000", "gd", "01.00")
+    );
+}
+
+#[test]
+fn complete_extraction_recognizes_a_base_sfo_from_the_inner_filesystem() {
+    use common::{BS, be32, dirent, le32, le64};
+    let temp = tempfile::tempdir().unwrap();
+    let metadata = common::sfo("CUSA00000", "gd", "01.00");
+    let mut image = common::pfs("param.sfo", &metadata, false);
+    // Insert a directory between uroot and the fixture's param.sfo.
+    image.resize(6 * BS, 0);
+    le64(&mut image, 0x28, 6);
+    le64(&mut image, 0x30, 4);
+    let dir_inode = BS + 3 * 168;
+    image.copy_within(BS + 168..BS + 2 * 168, dir_inode);
+    le32(&mut image, dir_inode + 100, 5);
+    dirent(&mut image[2 * BS..], 3, 3, "uroot");
+    dirent(&mut image[5 * BS..], 1, 3, "sce_sys");
+    let mut bytes = common::pkg(image);
+    be32(&mut bytes, 0x10, 2); // Keep the two key entries, omit the outer PARAM.SFO.
+    let path = temp.path().join("base.pkg");
+    fs::write(&path, bytes).unwrap();
+    let output = temp.path().join("game");
+    let result = run(
+        Operation::Extract {
+            source: source(&path),
+            output: output.clone(),
+            resume: false,
+        },
+        &SilentProgress,
+    )
+    .unwrap();
+    assert!(
+        matches!(result, Outcome::Finished { output: OutputFolder::ExtractedGame(path), incomplete: false, .. } if path == output)
+    );
+    assert_eq!(
+        fs::read(output.join("sce_sys/param.sfo")).unwrap(),
+        metadata
+    );
+}
+
+#[test]
 fn inspects_then_extracts_real_package_without_a_cli() {
     let dir = tempfile::tempdir().unwrap();
     let path = package(dir.path());
-    let Outcome::Inspected(info) = run(&path, Operation::Inspect, &SilentProgress).unwrap() else {
+    let Outcome::Inspected(info) = run(Operation::Inspect(source(&path)), &SilentProgress).unwrap()
+    else {
         panic!()
     };
     assert_eq!(info.title_id, "CUSA00000");
     assert_eq!(info.version.as_deref(), Some("01.01"));
     assert_eq!(info.region, Some("North America"));
-    assert_eq!(info.content_id, "UP0000-CUSA00000_00-0000000000000000");
+    assert_eq!(
+        info.content_id.as_str(),
+        "UP0000-CUSA00000_00-0000000000000000"
+    );
     assert_eq!(info.metadata_entries, 3);
-    assert_eq!(info.missing_keys, 0);
+    assert_eq!(info.update.missing_keys, 0);
     assert!(info.required_system.is_none());
     assert!(info.artwork.is_none());
-    assert!(info.update_supported);
+    assert!(info.update.readiness.has_update_metadata());
     let output = dir.path().join("output");
     let result = run(
-        &path,
         Operation::Extract {
+            source: source(&path),
             output: output.clone(),
             resume: false,
         },
@@ -446,6 +524,7 @@ fn inspects_then_extracts_real_package_without_a_cli() {
     assert!(matches!(
         result,
         Outcome::Finished {
+            output: OutputFolder::Directory(_),
             incomplete: false,
             ..
         }
@@ -461,8 +540,8 @@ fn resume_reuses_matching_files_and_preserves_conflicting_files() {
     let output = dir.path().join("output");
     let extract = |resume| {
         run(
-            &path,
             Operation::Extract {
+                source: source(&path),
                 output: output.clone(),
                 resume,
             },
@@ -483,8 +562,8 @@ fn previews_and_installs_updates_without_changing_the_base() {
     let base = common::base_game(dir.path());
     let path = package(dir.path());
     let Outcome::Preview(preview) = run(
-        &path,
         Operation::PreviewUpdate {
+            package: readable_update(&path),
             base: base.clone(),
             mode: install::InstallMode::Separate,
         },
@@ -496,55 +575,107 @@ fn previews_and_installs_updates_without_changing_the_base() {
     assert_eq!(preview.current_version, "01.00");
     assert!(!preview.destination.exists());
     let result = run(
-        &path,
         Operation::InstallUpdate {
+            source: source(&path),
             base: base.clone(),
             preview: Box::new(preview),
         },
         &SilentProgress,
     )
     .unwrap();
-    let Outcome::Finished {
-        output,
-        incomplete: false,
-        ..
-    } = result
-    else {
+    let Outcome::UpdateInstalled { target, plan } = result else {
         panic!()
     };
-    assert_eq!(fs::read(output.join("new.txt")).unwrap(), b"NEW DATA");
+    assert_eq!(
+        fs::read(plan.destination.join("new.txt")).unwrap(),
+        b"NEW DATA"
+    );
+    assert_eq!(target.path, base.canonicalize().unwrap());
     assert_eq!(fs::read(base.join("base.txt")).unwrap(), b"BASE");
     assert!(!base.join("new.txt").exists());
 }
 
 #[test]
 fn refuses_a_changed_update_after_preview() {
-    let dir = tempfile::tempdir().unwrap();
-    let base = common::base_game(dir.path());
-    let path = package(dir.path());
-    let Outcome::Preview(preview) = run(
-        &path,
-        Operation::PreviewUpdate {
+    for mode in [install::InstallMode::Separate, install::InstallMode::Merge] {
+        let dir = tempfile::tempdir().unwrap();
+        let base = common::base_game(dir.path());
+        let path = package(dir.path());
+        let pkg = orbis_pkg::Pkg::new(fs::read(&path).unwrap()).unwrap();
+        let preview = install::plan_with_mode(&pkg, &base, mode, SilentProgress).unwrap();
+
+        fs::write(&path, common::update("01.02", "new.txt", b"NEW DATA")).unwrap();
+        let failure = run(
+            Operation::InstallUpdate {
+                source: source(&path),
+                base: base.clone(),
+                preview: Box::new(preview),
+            },
+            &SilentProgress,
+        )
+        .unwrap_err();
+        assert!(failure.details.contains("changed after the preview"));
+        assert!(!base.join("new.txt").exists());
+        assert!(!dir.path().join("CUSA00000-UPDATE").exists());
+        assert!(install::merge_status(&base).unwrap().is_none());
+    }
+}
+
+#[test]
+fn confirmed_install_scans_once_while_holding_the_write_lock() {
+    use std::sync::atomic::AtomicUsize;
+
+    struct ObserveScan {
+        phase: &'static str,
+        base: PathBuf,
+        scans: AtomicUsize,
+    }
+    impl ExtractProgress for ObserveScan {
+        fn phase(&self, name: &str) {
+            if name == self.phase {
+                // A status reader can share a preview lock, but cannot read during installation.
+                let error = install::merge_status(&self.base).unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("another installation operation holds the lock")
+                );
+                self.scans.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    for (mode, phase) in [
+        (install::InstallMode::Separate, "Checking installed update"),
+        (install::InstallMode::Merge, "Checking game paths"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let base = common::base_game(dir.path());
+        if mode == install::InstallMode::Separate {
+            let previous = orbis_pkg::Pkg::new(common::update("01.01", "old.txt", b"OLD")).unwrap();
+            install::install(&previous, &base, SilentProgress).unwrap();
+        }
+        let path = dir.path().join("next.pkg");
+        fs::write(&path, common::update("01.02", "new.txt", b"NEW")).unwrap();
+        let pkg = orbis_pkg::Pkg::new(fs::read(&path).unwrap()).unwrap();
+        let mut preview = install::plan_with_mode(&pkg, &base, mode, SilentProgress).unwrap();
+        preview.available_bytes = 0; // Space can be freed between preview and confirmation.
+        let progress = ObserveScan {
+            phase,
             base: base.clone(),
-            mode: install::InstallMode::Separate,
-        },
-        &SilentProgress,
-    )
-    .unwrap() else {
-        panic!()
-    };
-    fs::write(&path, common::update("01.02", "new.txt", b"NEW DATA")).unwrap();
-    let failure = run(
-        &path,
-        Operation::InstallUpdate {
-            base,
-            preview: Box::new(preview),
-        },
-        &SilentProgress,
-    )
-    .unwrap_err();
-    assert!(failure.details.contains("changed after the preview"));
-    assert!(!dir.path().join("CUSA00000-UPDATE").exists());
+            scans: AtomicUsize::new(0),
+        };
+        run(
+            Operation::InstallUpdate {
+                source: source(&path),
+                base,
+                preview: Box::new(preview),
+            },
+            &progress,
+        )
+        .unwrap();
+        assert_eq!(progress.scans.load(Ordering::Relaxed), 1);
+    }
 }
 
 #[test]
@@ -556,14 +687,15 @@ fn incomplete_extraction_is_not_reported_as_success() {
     // remains readable, so this must produce a partial result, not full success.
     common::be32(&mut bytes, 0x1048, 0x8000_0000);
     fs::write(&path, bytes).unwrap();
-    let Outcome::Inspected(info) = run(&path, Operation::Inspect, &SilentProgress).unwrap() else {
+    let Outcome::Inspected(info) = run(Operation::Inspect(source(&path)), &SilentProgress).unwrap()
+    else {
         panic!()
     };
-    assert_eq!(info.missing_keys, 1);
+    assert_eq!(info.update.missing_keys, 1);
     assert!(!info.warnings.is_empty());
     let result = run(
-        &path,
         Operation::Extract {
+            source: source(&path),
             output: dir.path().join("output"),
             resume: false,
         },
@@ -573,6 +705,7 @@ fn incomplete_extraction_is_not_reported_as_success() {
     assert!(matches!(
         result,
         Outcome::Finished {
+            output: OutputFolder::Directory(_),
             incomplete: true,
             ..
         }
@@ -587,8 +720,8 @@ fn cancellation_creates_no_output_and_is_distinct_from_failure() {
     let progress = Progress::default();
     progress.cancelled.store(true, Ordering::Relaxed);
     let error = run(
-        &path,
         Operation::Extract {
+            source: source(&path),
             output: output.clone(),
             resume: false,
         },
@@ -604,8 +737,8 @@ fn invalid_inputs_and_unsafe_folder_names_are_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("other.pkg");
     fs::write(&path, b"not a PS4 package").unwrap();
-    assert!(run(&path, Operation::Inspect, &SilentProgress).is_err());
-    assert!(run(dir.path(), Operation::Inspect, &SilentProgress).is_err());
+    assert!(run(Operation::Inspect(source(&path)), &SilentProgress).is_err());
+    assert!(run(Operation::Inspect(source(dir.path())), &SilentProgress).is_err());
     for name in [
         "",
         "../base",
@@ -690,7 +823,8 @@ fn inspection_reads_display_metadata_and_optional_artwork() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("metadata.pkg");
     fs::write(&path, bytes).unwrap();
-    let Outcome::Inspected(info) = run(&path, Operation::Inspect, &SilentProgress).unwrap() else {
+    let Outcome::Inspected(info) = run(Operation::Inspect(source(&path)), &SilentProgress).unwrap()
+    else {
         panic!()
     };
     assert_eq!(info.title, "A friendly application");
@@ -725,8 +859,8 @@ fn merge_preview_install_and_restore_work_without_the_original_package() {
     let original_sfo = fs::read(base.join("sce_sys/param.sfo")).unwrap();
     let path = package(dir.path());
     let Outcome::Preview(preview) = run(
-        &path,
         Operation::PreviewUpdate {
+            package: readable_update(&path),
             base: base.clone(),
             mode: install::InstallMode::Merge,
         },
@@ -737,9 +871,9 @@ fn merge_preview_install_and_restore_work_without_the_original_package() {
     };
     assert_eq!(preview.mode, install::InstallMode::Merge);
     assert_eq!(preview.destination, fs::canonicalize(&base).unwrap());
-    let Outcome::GameChanged { base: output, .. } = run(
-        &path,
+    let Outcome::UpdateInstalled { target, .. } = run(
         Operation::InstallUpdate {
+            source: source(&path),
             base: base.clone(),
             preview: Box::new(preview),
         },
@@ -748,11 +882,12 @@ fn merge_preview_install_and_restore_work_without_the_original_package() {
     .unwrap() else {
         panic!()
     };
-    assert_eq!(fs::read(output.join("new.txt")).unwrap(), b"NEW DATA");
+    assert_eq!(fs::read(target.path.join("new.txt")).unwrap(), b"NEW DATA");
     fs::remove_file(&path).unwrap();
     let Outcome::GameStatus { status, .. } = run(
-        &path,
-        Operation::CheckGame { base: base.clone() },
+        Operation::CheckGame {
+            target: install::GameTarget::open(base.clone()),
+        },
         &SilentProgress,
     )
     .unwrap() else {
@@ -763,8 +898,9 @@ fn merge_preview_install_and_restore_work_without_the_original_package() {
     assert_eq!(status.active_version.as_deref(), Some("01.01"));
     assert!(matches!(
         run(
-            &path,
-            Operation::RestoreBase { base: base.clone() },
+            Operation::RestoreBase {
+                target: install::GameTarget::open(base.clone())
+            },
             &SilentProgress
         )
         .unwrap(),
@@ -775,7 +911,15 @@ fn merge_preview_install_and_restore_work_without_the_original_package() {
         original_sfo
     );
     assert!(!base.join("new.txt").exists());
-    assert!(run(&path, Operation::RestoreBase { base }, &SilentProgress).is_err());
+    assert!(
+        run(
+            Operation::RestoreBase {
+                target: install::GameTarget::open(base)
+            },
+            &SilentProgress
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -793,8 +937,11 @@ fn checking_an_existing_merge_needs_no_package_and_offers_recovery() {
     .unwrap();
     let path = dir.path().join("missing.pkg");
     let Outcome::GameStatus { status, .. } = run(
-        &path,
         Operation::PreviewUpdate {
+            package: UpdatePackage::Readable {
+                source: source(&path),
+                id: *pkg.header().content_id(),
+            },
             base: base.clone(),
             mode: install::InstallMode::Separate,
         },
@@ -805,8 +952,9 @@ fn checking_an_existing_merge_needs_no_package_and_offers_recovery() {
     };
     assert!(status.pending_recovery);
     run(
-        &path,
-        Operation::RecoverBase { base: base.clone() },
+        Operation::RecoverBase {
+            target: install::GameTarget::open(base.clone()),
+        },
         &SilentProgress,
     )
     .unwrap();

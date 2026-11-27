@@ -1,5 +1,5 @@
 use crate::{
-    operations::{self, Operation, Outcome, PackageInfo, human_size},
+    operations::{self, Operation, Outcome, OutputFolder, PackageInfo, PackageSource, human_size},
     worker::{Details, Job},
 };
 use eframe::egui;
@@ -8,13 +8,15 @@ mod game;
 #[cfg(test)]
 mod tests;
 mod tools;
+mod update;
 mod view;
-use orbis_cli::install::{InstallMode, InstallPlan};
+use orbis_cli::install::{GameTarget, InstallMode};
 use std::{
     path::PathBuf,
     sync::{Arc, atomic::Ordering},
     time::Duration,
 };
+use update::{PasscodePrompt, UpdateCommand, UpdateTargetState};
 
 #[derive(Default, PartialEq, Eq, Clone, Copy)]
 enum Action {
@@ -28,8 +30,40 @@ struct Notice {
     title: String,
     message: String,
     details: String,
-    output: Option<PathBuf>,
-    attention: bool,
+    output: Option<OutputFolder>,
+    kind: NoticeKind,
+}
+
+enum NoticeKind {
+    Success,
+    Attention,
+    RefreshGame(GameTarget),
+}
+
+impl Notice {
+    fn needs_attention(&self) -> bool {
+        matches!(self.kind, NoticeKind::Attention)
+    }
+}
+
+enum UpdateBase {
+    Pick(Option<PathBuf>),
+    Game(PathBuf),
+}
+
+impl Default for UpdateBase {
+    fn default() -> Self {
+        Self::Pick(None)
+    }
+}
+
+impl UpdateBase {
+    fn path(&self) -> Option<&PathBuf> {
+        match self {
+            Self::Pick(path) => path.as_ref(),
+            Self::Game(path) => Some(path),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -41,8 +75,8 @@ pub struct OrbisApp {
     parent: Option<PathBuf>,
     folder_name: String,
     resume: bool,
-    base: Option<PathBuf>,
-    preview: Option<InstallPlan>,
+    base: UpdateBase,
+    update_target: UpdateTargetState,
     mode: InstallMode,
     game: Option<game::GameFolder>,
     job: Option<Job>,
@@ -75,8 +109,12 @@ impl OrbisApp {
     fn open(&mut self, path: PathBuf) {
         if path.is_dir() {
             self.open_game(path);
-            return;
+        } else {
+            self.open_package(path, UpdateBase::default());
         }
+    }
+
+    fn reset_package(&mut self, base: UpdateBase) {
         self.passcode = None;
         self.pending_passcode = None;
         self.reset_passcode_input();
@@ -86,16 +124,23 @@ impl OrbisApp {
         self.package = None;
         self.artwork = None;
         self.parent = None;
-        self.base = None;
+        if !matches!((&self.base, &base), (UpdateBase::Game(old), UpdateBase::Game(new)) if old == new)
+        {
+            self.mode = InstallMode::Separate;
+        }
+        self.base = base;
+        self.update_target = UpdateTargetState::Unchecked;
         self.game = None;
-        self.mode = InstallMode::Separate;
         self.folder_name.clear();
         self.resume = false;
-        self.preview = None;
-        self.start(path, Operation::Inspect);
     }
 
-    fn start(&mut self, path: PathBuf, operation: Operation) {
+    fn open_package(&mut self, path: PathBuf, base: UpdateBase) {
+        self.reset_package(base);
+        self.start(Operation::Inspect(PackageSource::new(path, None)));
+    }
+
+    fn start(&mut self, operation: Operation) {
         if self.job.is_some() {
             return;
         }
@@ -104,14 +149,7 @@ impl OrbisApp {
         }
         self.notice = None;
         self.warnings = Details::default();
-        match Job::start(
-            path,
-            operation,
-            self.ctx.clone(),
-            self.pending_passcode
-                .clone()
-                .or_else(|| self.passcode.clone()),
-        ) {
+        match Job::start(operation, self.ctx.clone()) {
             Ok(job) => self.job = Some(job),
             Err(e) => {
                 self.pending_passcode = None;
@@ -128,7 +166,42 @@ impl OrbisApp {
             message: String::new(),
             details,
             output: None,
-            attention: true,
+            kind: NoticeKind::Attention,
+        });
+    }
+
+    fn dismiss_notice(&mut self) {
+        self.warnings = Details::default();
+        if let Some(Notice {
+            kind: NoticeKind::RefreshGame(target),
+            ..
+        }) = self.notice.take()
+        {
+            self.refresh_game(target);
+        }
+    }
+
+    fn finish_game_action(
+        &mut self,
+        title: &str,
+        message: String,
+        output: PathBuf,
+        refresh: Option<GameTarget>,
+    ) {
+        self.update_target = UpdateTargetState::Unchecked;
+        let kind = match refresh {
+            Some(target) => {
+                self.game = Some(game::GameFolder::new(target.clone(), None, None));
+                NoticeKind::RefreshGame(target)
+            }
+            None => NoticeKind::Success,
+        };
+        self.notice = Some(Notice {
+            title: title.into(),
+            message,
+            details: String::new(),
+            output: Some(OutputFolder::Directory(output)),
+            kind,
         });
     }
 
@@ -137,6 +210,7 @@ impl OrbisApp {
             return;
         }
         let job = self.job.take().unwrap();
+        let cancelled = job.progress.cancelled.load(Ordering::Relaxed);
         self.close_prompt = false;
         let label = job.label;
         let help = job.help;
@@ -150,19 +224,35 @@ impl OrbisApp {
                 if let Some(passcode) = self.pending_passcode.take() {
                     self.passcode = Some(passcode);
                 }
-                if !self.refreshing_package {
-                    self.action = if info.update_supported {
+                let from_game = matches!(self.base, UpdateBase::Game(_));
+                if from_game {
+                    self.action = Action::Update;
+                } else if !self.refreshing_package {
+                    self.action = if info.update.readiness.has_update_metadata() {
                         Action::Update
                     } else {
                         Action::Extract
                     };
                     self.folder_name = operations::suggested_folder(&info);
                     self.parent = info.path.parent().map(PathBuf::from);
-                } else if self.action == Action::Update && !info.update_supported {
+                } else if self.action == Action::Update
+                    && !info.update.readiness.has_update_metadata()
+                {
                     self.action = Action::Extract;
                 }
                 self.refreshing_package = false;
-                self.package = Some(info);
+                self.package = Some(*info);
+                if !cancelled && !self.close_after_job {
+                    self.update_target_changed();
+                } else {
+                    self.update_target = UpdateTargetState::Unchecked;
+                }
+            }
+            Ok(Outcome::UpdateTarget(result)) => {
+                self.update_target = match result {
+                    Ok(()) => UpdateTargetState::AwaitingPasscode,
+                    Err(error) => UpdateTargetState::Rejected(error),
+                };
             }
             Ok(Outcome::Verified(report)) => {
                 self.notice = Some(Notice {
@@ -170,7 +260,11 @@ impl OrbisApp {
                     message: String::new(),
                     details: report.error.clone().unwrap_or_default(),
                     output: None,
-                    attention: report.status != "complete",
+                    kind: if report.status == "complete" {
+                        NoticeKind::Success
+                    } else {
+                        NoticeKind::Attention
+                    },
                 });
                 self.verification = Some(report);
             }
@@ -179,29 +273,45 @@ impl OrbisApp {
                     export.preview = Some(plan);
                 }
             }
-            Ok(Outcome::Preview(plan)) => self.preview = Some(plan),
+            Ok(Outcome::Preview(plan)) => {
+                self.update_target = UpdateTargetState::Preview(Box::new(plan))
+            }
             Ok(Outcome::GameStatus {
-                base,
+                target,
                 status,
                 rollback,
             }) => {
-                self.preview = None;
-                self.game = Some(game::GameFolder::new(base, Some(status), rollback));
+                self.update_target = UpdateTargetState::Unchecked;
+                self.game = Some(game::GameFolder::new(target, Some(status), rollback));
             }
             Ok(Outcome::GameChanged {
-                base,
+                target,
                 title,
                 message,
             }) => {
-                self.preview = None;
-                self.game = Some(game::GameFolder::new(base.clone(), None, None));
-                self.notice = Some(Notice {
-                    title: title.into(),
-                    message,
-                    output: Some(base),
-                    details: String::new(),
-                    attention: false,
-                });
+                self.finish_game_action(title, message, target.path.clone(), Some(target));
+            }
+            Ok(Outcome::UpdateInstalled { target, plan }) => {
+                let from_game = matches!(self.base, UpdateBase::Game(_));
+                if from_game {
+                    self.reset_package(UpdateBase::default());
+                }
+                let (title, detail) = match plan.mode {
+                    InstallMode::Separate => (
+                        "Update installed",
+                        "You can restore the previous version from the game folder.",
+                    ),
+                    InstallMode::Merge => (
+                        "Update merged",
+                        "Keep the adjacent backup folder to restore the base.",
+                    ),
+                };
+                let message = format!(
+                    "{} is now at version {}. {detail}",
+                    plan.title_id, plan.update_version
+                );
+                let refresh = (from_game || plan.mode == InstallMode::Merge).then_some(target);
+                self.finish_game_action(title, message, plan.destination, refresh);
             }
             Ok(Outcome::Finished {
                 title,
@@ -209,13 +319,17 @@ impl OrbisApp {
                 output,
                 incomplete,
             }) => {
-                self.preview = None;
+                self.update_target.discard_preview();
                 self.notice = Some(Notice {
                     title,
                     message,
                     output: Some(output),
                     details: String::new(),
-                    attention: incomplete,
+                    kind: if incomplete {
+                        NoticeKind::Attention
+                    } else {
+                        NoticeKind::Success
+                    },
                 });
             }
             Err(failure) => {
@@ -224,7 +338,7 @@ impl OrbisApp {
                 if let Some(export) = &mut self.export {
                     export.preview = None;
                 }
-                self.preview = None;
+                self.update_target.discard_preview();
                 self.notice = Some(Notice {
                     title: if failure.cancelled {
                         "Operation cancelled".into()
@@ -234,7 +348,7 @@ impl OrbisApp {
                     message: help.into(),
                     details: failure.details,
                     output: None,
-                    attention: true,
+                    kind: NoticeKind::Attention,
                 });
             }
         }
@@ -250,14 +364,17 @@ impl OrbisApp {
         }
     }
 
-    fn choose_package(&mut self, frame: &eframe::Frame) {
+    fn choose_package(&mut self, frame: &eframe::Frame, base: UpdateBase) {
         if let Some(path) = rfd::FileDialog::new()
             .set_parent(frame)
-            .set_title("Open a PlayStation 4 package")
+            .set_title(match base {
+                UpdateBase::Game(_) => "Choose an update PKG for this game",
+                UpdateBase::Pick(_) => "Open a PlayStation 4 package",
+            })
             .add_filter("PlayStation 4 package", &["pkg"])
             .pick_file()
         {
-            self.open(path);
+            self.open_package(path, base);
         }
     }
 }
@@ -288,7 +405,16 @@ impl eframe::App for OrbisApp {
                     "Drop a PKG file or an extracted game folder onto the window.".into(),
                 );
             } else if let Some(file) = dropped.first() {
-                self.open(file.path().to_owned());
+                let path = file.path().to_owned();
+                if let UpdateBase::Game(base) = &self.base
+                    && self.game.is_none()
+                    && self.export.is_none()
+                    && !path.is_dir()
+                {
+                    self.open_package(path, UpdateBase::Game(base.clone()));
+                } else {
+                    self.open(path);
+                }
             }
         }
         if self.close_prompt {

@@ -69,8 +69,20 @@ impl OrbisApp {
             .data_mut(|data| data.remove::<egui::text_edit::TextEditState>(id));
     }
 
-    pub(super) fn passcode_settings(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new(if self.passcode.is_some() { "Package passcode · validated" } else { "Package passcode (optional)" })
+    pub(super) fn passcode_settings(&mut self, ui: &mut egui::Ui, prompt: PasscodePrompt) {
+        if prompt == PasscodePrompt::Hidden {
+            return;
+        }
+        let required = prompt == PasscodePrompt::Required;
+        let label = if self.passcode.is_some() {
+            "Package passcode · validated"
+        } else if required {
+            "Package passcode required"
+        } else {
+            "Package passcode (optional)"
+        };
+        egui::CollapsingHeader::new(label)
+            .default_open(required)
             .show(ui, |ui| {
                 ui.label(muted(ui, "Enter a known 32-character passcode to unlock encrypted metadata. It is kept only for this open package and is never saved in reports."));
                 ui.add(egui::TextEdit::singleline(&mut *self.passcode_input).id(Self::passcode_input_id()).password(true).char_limit(32).hint_text("32-character package passcode"));
@@ -112,9 +124,13 @@ impl OrbisApp {
         if let Some(info) = &self.package {
             let path = info.path.clone();
             self.verification = None;
-            self.preview = None;
+            self.update_target.discard_preview();
             self.refreshing_package = true;
-            self.start(path, Operation::Inspect);
+            let passcode = self
+                .pending_passcode
+                .clone()
+                .or_else(|| self.passcode.clone());
+            self.start(Operation::Inspect(PackageSource::new(path, passcode)));
         }
     }
 
@@ -177,8 +193,10 @@ impl OrbisApp {
                     title: "Verification report saved".into(),
                     message: destination.display().to_string(),
                     details: String::new(),
-                    output: destination.parent().map(PathBuf::from),
-                    attention: false,
+                    output: destination
+                        .parent()
+                        .map(|p| OutputFolder::Directory(p.to_owned())),
+                    kind: NoticeKind::Success,
                 });
             }
         }
@@ -296,7 +314,7 @@ impl OrbisApp {
             ui.label(muted(ui, "The original game and update stay unchanged.").size(12.0));
         });
         if let Some(operation) = operation {
-            self.start(PathBuf::new(), operation);
+            self.start(operation);
         }
     }
 }
@@ -328,12 +346,14 @@ mod tests {
         app.open(path);
         finish(&mut app);
         assert!(app.game.is_none());
-        app.base = Some(base.clone());
+        app.base = UpdateBase::Pick(Some(base.clone()));
         click(&mut app, "Check update");
         finish(&mut app);
         click(&mut app, "Install update");
         finish(&mut app);
         assert_eq!(app.notice.as_ref().unwrap().title, "Update installed");
+        click(&mut app, "Done");
+        assert!(app.package.is_some() && app.game.is_none() && app.job.is_none());
 
         frame(
             &mut app,
@@ -379,7 +399,7 @@ mod tests {
         click(&mut app, "Done");
         click(&mut app, "Back");
         assert!(app.export.is_none());
-        assert_eq!(app.game.as_ref().unwrap().base, base);
+        assert_eq!(app.game.as_ref().unwrap().target.path, base);
     }
 
     #[test]

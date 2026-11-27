@@ -79,7 +79,7 @@ pub struct Pkg<R: AsRef<[u8]>> {
     raw: R,
     header: PkgHeader,
     entry_key3: Vec<u8>,
-    passcode_keys: Option<[[u8; 32]; 7]>,
+    passcode_keys: Option<[[u8; 32]; passcode::ENTRY_KEY_COUNT]>,
     ekpfs: Vec<u8>,
 }
 
@@ -239,32 +239,13 @@ impl<R: AsRef<[u8]>> Pkg<R> {
     /// # }
     /// ```
     pub fn entry_data(&self, entry: &PkgEntry) -> Result<Vec<u8>, EntryDataError> {
-        // Check if we have a decryption key for encrypted entries.
-        if entry.is_encrypted() && self.entry_key(entry.key_index()).is_none() {
-            return Err(EntryDataError::NoDecryptionKey {
-                key_index: entry.key_index(),
-            });
-        }
-
-        // Get entry data offset and size.
-        let offset = entry.data_offset();
-        let padded_size = if entry.is_encrypted() {
-            (entry.data_size() + 15) & !15 // Include padding for decryption.
-        } else {
-            entry.data_size()
-        };
-
         let raw_data = self
-            .raw
-            .as_ref()
-            .get(offset..(offset + padded_size))
-            .ok_or(EntryDataError::InvalidDataOffset)?;
-
-        // Decrypt if needed.
+            .stored_entry_data(entry)
+            .map_err(|_| EntryDataError::InvalidDataOffset)?;
         if entry.is_encrypted() {
-            if raw_data.len() % 16 != 0 {
-                return Err(EntryDataError::MisalignedData {
-                    size: raw_data.len(),
+            if self.entry_key(entry.key_index()).is_none() {
+                return Err(EntryDataError::NoDecryptionKey {
+                    key_index: entry.key_index(),
                 });
             }
 
@@ -322,17 +303,22 @@ impl<R: AsRef<[u8]>> Pkg<R> {
         Err(FindEntryError::NotFound)
     }
 
-    fn load_ekpfs(&mut self) -> Result<(), OpenError> {
-        // Locate image key entry.
-        let (entry, _) = match self.find_entry(EntryId::PfsImageKey) {
-            Ok(v) => v,
-            Err(e) => match e {
-                FindEntryError::NotFound => return Err(OpenError::PfsImageKeyNotFound),
-                _ => return Err(OpenError::FindPfsImageKeyFailed { source: e }),
-            },
-        };
+    /// Locates a nonempty filesystem image key record without requiring its entry decryption key.
+    pub fn pfs_image_key_entry(&self) -> Result<PkgEntry, OpenError> {
+        let (entry, _) = self
+            .find_entry(EntryId::PfsImageKey)
+            .map_err(|source| match source {
+                FindEntryError::NotFound => OpenError::PfsImageKeyNotFound,
+                source => OpenError::FindPfsImageKeyFailed { source },
+            })?;
+        if entry.data_size() == 0 {
+            return Err(OpenError::EmptyPfsImageKey);
+        }
+        Ok(entry)
+    }
 
-        // Get and decrypt the entry data.
+    fn load_ekpfs(&mut self) -> Result<(), OpenError> {
+        let entry = self.pfs_image_key_entry()?;
         let data = self
             .entry_data(&entry)
             .context(open_error::GetPfsImageKeyFailedSnafu)?;
@@ -528,6 +514,9 @@ pub enum OpenError {
 
     #[snafu(display("no PFS image key in the PKG"))]
     PfsImageKeyNotFound,
+
+    #[snafu(display("empty PFS image key record"))]
+    EmptyPfsImageKey,
 
     #[snafu(display("failed to get PFS image key"))]
     GetPfsImageKeyFailed { source: EntryDataError },

@@ -85,10 +85,10 @@ pub fn rollback(base: &Path) -> Result<()> {
 /// Rolls back with cancellable checks of the active and previous file inventories.
 /// Final sync failures after commit are reported through [`ExtractProgress::warning`].
 pub fn rollback_with_progress<P: ExtractProgress>(base: &Path, progress: P) -> Result<()> {
-    let location = Layout::open(base, true)?;
+    let location = Layout::open_for_write(base)?;
     location.require_recovered()?;
     if merge::present(&location)? {
-        return merge::restore(&location, &progress);
+        return merge::restore(&location, None, &progress);
     }
     rollback_separate(&location, None, &progress)
 }

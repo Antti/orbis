@@ -24,6 +24,15 @@ struct MergeManifest {
     files: Vec<Replacement>,
     created_directories: Vec<String>,
 }
+
+impl MergeManifest {
+    fn check_update(&self, update: Option<&ContentId>) -> Result<()> {
+        if let Some(id) = update {
+            compatibility::check_identity(id, &self.title_id, &self.content_id)?;
+        }
+        Ok(())
+    }
+}
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Replacement {
@@ -61,13 +70,13 @@ pub(super) fn pending(layout: &Layout) -> Result<bool> {
 
 // Read-only status shares the writer's lock, including while PARAM.SFO is between
 // its backup and publish renames. Opening an untouched game creates no files.
-struct ReadLock(std::fs::File);
+pub(super) struct ReadLock(std::fs::File);
 impl Drop for ReadLock {
     fn drop(&mut self) {
         let _ = fs2::FileExt::unlock(&self.0);
     }
 }
-fn read_lock(layout: &Layout) -> Result<Option<ReadLock>> {
+pub(super) fn read_lock(layout: &Layout) -> Result<Option<ReadLock>> {
     let Some(root) = &layout.root else {
         return Ok(None);
     };
@@ -102,6 +111,7 @@ pub fn merge_status(base: &Path) -> Result<Option<MergeStatus>> {
 
 pub(super) fn status(
     base: &Path,
+    update: Option<&ContentId>,
     progress: &impl ExtractProgress,
 ) -> Result<Option<InstallationStatus>> {
     let layout = Layout::inspect(base)?;
@@ -116,6 +126,7 @@ pub(super) fn status(
         return Ok(None);
     }
     let (dir, manifest) = load(&layout)?;
+    manifest.check_update(update)?;
     let pending_recovery = pending(&layout)?;
     let mut issues = Vec::new();
     if pending_recovery {
@@ -152,16 +163,11 @@ pub(super) fn plan<R: AsRef<[u8]> + Sync>(
     base: &Path,
     progress: impl ExtractProgress,
 ) -> Result<InstallPlan> {
-    let layout = Layout::open(base, false)?;
+    let layout = Layout::open(base)?;
     let _guard = read_lock(&layout)?;
     make_plan(pkg, &layout, &progress)
 }
-fn make_plan<R: AsRef<[u8]> + Sync>(
-    pkg: &Pkg<R>,
-    layout: &Layout,
-    progress: &impl ExtractProgress,
-) -> Result<InstallPlan> {
-    layout.require_recovered()?;
+pub(super) fn require_original_base(layout: &Layout) -> Result<()> {
     if present(layout)? {
         return Err(invalid(
             "restore the merged base before applying another update",
@@ -177,6 +183,16 @@ fn make_plan<R: AsRef<[u8]> + Sync>(
             "merge requires an original base without a separate update; roll back or move the sibling -UPDATE folder first",
         ));
     }
+    Ok(())
+}
+
+pub(super) fn make_plan<R: AsRef<[u8]> + Sync>(
+    pkg: &Pkg<R>,
+    layout: &Layout,
+    progress: &impl ExtractProgress,
+) -> Result<InstallPlan> {
+    layout.require_recovered()?;
+    require_original_base(layout)?;
     let mut plan = super::make_plan(pkg, layout, progress)?;
     progress.phase("Checking game paths");
     let base = layout.base_dir()?;
@@ -202,18 +218,16 @@ fn make_plan<R: AsRef<[u8]> + Sync>(
     }
     plan.mode = InstallMode::Merge;
     plan.backup_bytes = backup_bytes;
-    plan.destination = layout.parent_path.join(&layout.base);
+    plan.destination = layout.install_destination(InstallMode::Merge);
     Ok(plan)
 }
 
-pub(super) fn install<R: AsRef<[u8]> + Sync>(
+pub(super) fn install_planned<R: AsRef<[u8]> + Sync>(
     pkg: &Pkg<R>,
-    base: &Path,
+    layout: Layout,
+    plan: InstallPlan,
     progress: impl ExtractProgress,
 ) -> Result<InstallPlan> {
-    let layout = Layout::open(base, true)?;
-    let plan = make_plan(pkg, &layout, &progress)?;
-    check_space(plan.required_free_bytes, plan.available_bytes)?;
     cleanup(&layout)?;
     let root = layout.manager()?;
     root.create_dir(PREPARING)?;
@@ -317,7 +331,7 @@ pub(super) fn install<R: AsRef<[u8]> + Sync>(
         Ok(())
     })();
     if let Err(error) = result {
-        if let Err(recovery) = recover(&layout, &NonCancelling(&progress)) {
+        if let Err(recovery) = recover(&layout, None, &NonCancelling(&progress)) {
             return Err(invalid(format!(
                 "{error}; automatic restoration could not finish: {recovery}. Keep the game closed and run recover --base <DIR>"
             )));
@@ -520,8 +534,13 @@ fn verify(
     Ok(states)
 }
 
-pub(super) fn restore(layout: &Layout, progress: &impl ExtractProgress) -> Result<()> {
+pub(super) fn restore(
+    layout: &Layout,
+    update: Option<&ContentId>,
+    progress: &impl ExtractProgress,
+) -> Result<()> {
     let (dir, manifest) = load(layout)?;
+    manifest.check_update(update)?;
     let states = verify(layout, &dir, &manifest, true, progress)?;
     cancelled(progress)?;
     write_json(&dir, "pending.json", &Pending::Restore)?;
@@ -530,12 +549,19 @@ pub(super) fn restore(layout: &Layout, progress: &impl ExtractProgress) -> Resul
     cleanup(layout)
 }
 
-pub(super) fn recover(layout: &Layout, progress: &impl ExtractProgress) -> Result<()> {
+pub(super) fn recover(
+    layout: &Layout,
+    update: Option<&ContentId>,
+    progress: &impl ExtractProgress,
+) -> Result<()> {
     if present(layout)? && pending(layout)? {
         let progress = NonCancelling(progress);
         let (dir, manifest) = load(layout)?;
+        manifest.check_update(update)?;
         let states = verify(layout, &dir, &manifest, false, &progress)?;
         restore_checked(layout, dir, &manifest, states, &progress)?;
+    } else if update.is_some() {
+        return Err(invalid("this game has no interrupted merge to recover"));
     }
     cleanup(layout)
 }

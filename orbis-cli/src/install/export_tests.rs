@@ -44,7 +44,7 @@ fn new_destination_shortfall_skips_update_and_source_hashing() {
     let base = base_game(temp.path());
     install_update(&base, "base.txt", b"PATCH");
     let output = temp.path().join("merged");
-    let location = storage::Layout::open(&base, false).unwrap();
+    let location = storage::Layout::open(&base).unwrap();
     let prepared = PreparedExport::new(&location, output.clone(), &NoHashing).unwrap();
     for resume in [false, true] {
         let mut filesystem = prepared.filesystem_plan(temp.path()).unwrap();
@@ -521,7 +521,7 @@ fn refuses_unmanaged_modified_pending_and_locked_installations() {
     assert!(export_merged(&base, &output, SilentProgress).is_err());
     fs::remove_dir(active(&base)).unwrap();
     install_update(&base, "new", b"NEW");
-    let lock = storage::Layout::open(&base, true).unwrap();
+    let lock = storage::Layout::open_for_write(&base).unwrap();
     assert!(
         export_merged(&base, &output, SilentProgress)
             .unwrap_err()

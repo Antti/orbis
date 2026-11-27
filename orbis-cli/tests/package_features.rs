@@ -426,6 +426,127 @@ fn named_unknown_entries_extract_and_unsafe_names_fail_before_writes() {
 }
 
 #[test]
+fn install_only_requires_an_image_key_record_for_an_encrypted_filesystem() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = base_game(dir.path());
+    std::fs::write(dir.path().join("passcode"), PASSCODE).unwrap();
+    let args = [
+        "install",
+        "update.pkg",
+        "--base",
+        base.to_str().unwrap(),
+        "--dry-run",
+    ];
+    let path = dir.path().join("update.pkg");
+    let unlocked = [&args[..], &["--passcode-file", "passcode"]].concat();
+    for (offset, value, reason) in [
+        (
+            0x1020,
+            orbis_pkg::entry::EntryId::Icon0Png.as_u32(),
+            "no PFS image key",
+        ),
+        (0x1034, 0, "empty PFS image key"),
+    ] {
+        let mut bytes = passcoded_pkg(2);
+        be32(&mut bytes, offset, value);
+        // A plaintext filesystem can be installed once the SFO is unlocked.
+        std::fs::write(&path, &bytes).unwrap();
+        assert_code(&run(dir.path(), &unlocked), 0);
+
+        bytes[0x201c] |= 4;
+        std::fs::write(&path, bytes).unwrap();
+        for args in [&args[..], &unlocked] {
+            let output = run(dir.path(), args);
+            assert_code(&output, 1);
+            let error = String::from_utf8_lossy(&output.stderr);
+            assert!(error.contains(reason), "{error}");
+        }
+    }
+}
+
+#[test]
+fn install_reports_an_unsupported_slot_even_when_param_sfo_needs_a_passcode() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = base_game(dir.path());
+    let mut bytes = passcoded_pkg(2);
+    // PARAM.SFO uses slot 2. The PFS image key needs slot 7.
+    be32(&mut bytes, 0x1028, 0x80000000);
+    be32(&mut bytes, 0x102c, 7 << 12);
+    std::fs::write(dir.path().join("locked.pkg"), bytes).unwrap();
+    let output = run(
+        dir.path(),
+        &[
+            "install",
+            "locked.pkg",
+            "--base",
+            base.to_str().unwrap(),
+            "--dry-run",
+        ],
+    );
+    assert_code(&output, 1);
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("unsupported key slot 7"), "{error}");
+    assert!(!dir.path().join(".CUSA00000.orbis-install").exists());
+}
+
+#[test]
+fn locked_merge_reports_the_active_separate_update() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = base_game(dir.path());
+    let active = orbis_pkg::Pkg::new(update("01.10", "game.txt", b"ACTIVE")).unwrap();
+    orbis_cli::install::install(&active, &base, orbis_cli::SilentProgress).unwrap();
+    std::fs::write(dir.path().join("locked.pkg"), passcoded_pkg(2)).unwrap();
+    let out = run(
+        dir.path(),
+        &[
+            "install",
+            "locked.pkg",
+            "--base",
+            base.to_str().unwrap(),
+            "--merge",
+            "--dry-run",
+        ],
+    );
+    assert_code(&out, 1);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("merge requires an original base"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn locked_update_reports_unusable_entry_keys_before_requesting_a_passcode() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = base_game(dir.path());
+    std::fs::write(dir.path().join("passcode"), PASSCODE).unwrap();
+    for (offset, value, reason) in [
+        (0x1000, 0x16, "missing entry-key record"),
+        (0x1008, 0x80000000, "encrypted entry-key record"),
+        (0x1014, 24, "entry-key record size"),
+        (0x1010, u32::MAX, "entry-key record data"),
+        (0x1100, 0, "entry-key record does not match"),
+    ] {
+        let mut bytes = passcoded_pkg(2);
+        be32(&mut bytes, offset, value);
+        std::fs::write(dir.path().join("locked.pkg"), bytes).unwrap();
+        let args = [
+            "install",
+            "locked.pkg",
+            "--base",
+            base.to_str().unwrap(),
+            "--dry-run",
+        ];
+        for extra in [&[][..], &["--passcode-file", "passcode"][..]] {
+            let out = run(dir.path(), &[&args[..], extra].concat());
+            assert_code(&out, 1);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(stderr.contains(reason), "{stderr}");
+        }
+    }
+}
+
+#[test]
 fn passcodes_unlock_every_entry_slot_and_wrong_passcodes_never_fall_back() {
     let dir = tempfile::tempdir().unwrap();
     for slot in 0..7 {

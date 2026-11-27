@@ -31,6 +31,7 @@ pub mod extract;
 mod fs_output;
 pub mod install;
 mod inventory;
+mod package_filesystem;
 pub mod progress;
 
 #[cfg(test)]
@@ -42,6 +43,7 @@ pub use self::extract::{
     SkippedEntry,
 };
 pub use self::fs_output::save_new_json;
+pub use self::package_filesystem::{PackageFilesystemError, prepare_filesystem};
 pub use self::progress::{ExtractProgress, SilentProgress};
 
 #[cfg(feature = "cli")]
@@ -49,6 +51,9 @@ pub use self::progress::ConsoleProgress;
 
 use snafu::{ResultExt, Snafu};
 use std::path::Path;
+
+/// A parsed package backed by a read-only file mapping.
+pub type MappedPackage = orbis_pkg::Pkg<memmap2::Mmap>;
 
 /// Errors that can occur when opening a PKG file from disk.
 #[derive(Debug, Snafu)]
@@ -80,7 +85,7 @@ pub enum OpenPkgError {
 /// This function uses `unsafe` internally to create a memory map. The caller
 /// must ensure the file is not modified or truncated while the returned `Pkg`
 /// is in use.
-pub unsafe fn open_pkg(path: &Path) -> Result<orbis_pkg::Pkg<memmap2::Mmap>, OpenPkgError> {
+pub unsafe fn open_pkg(path: &Path) -> Result<MappedPackage, OpenPkgError> {
     let mut pkg = unsafe { inspect_pkg(path)? };
     pkg.load_entry_keys().context(ParsePkgSnafu)?;
     pkg.load_pfs_key().context(ParsePkgSnafu)?;
@@ -93,7 +98,7 @@ pub unsafe fn open_pkg(path: &Path) -> Result<orbis_pkg::Pkg<memmap2::Mmap>, Ope
 ///
 /// The input file must not be modified or truncated while the returned package
 /// is in use, as with [`open_pkg`].
-pub unsafe fn inspect_pkg(path: &Path) -> Result<orbis_pkg::Pkg<memmap2::Mmap>, OpenPkgError> {
+pub unsafe fn inspect_pkg(path: &Path) -> Result<MappedPackage, OpenPkgError> {
     // Check before opening: opening a directory fails on Windows, and opening
     // a FIFO can block on Unix. Recheck the actual handle below as well.
     snafu::ensure!(

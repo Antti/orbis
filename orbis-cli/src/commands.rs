@@ -2,7 +2,8 @@ use crate::cli::{self, Cli, Command};
 use crate::output::{diagnostic, error_message, escaped, human_size};
 use clap::CommandFactory;
 use orbis_cli::{
-    ConsoleProgress, ExtractError, ExtractOptions, ListedItem, PkgExtractor, SilentProgress,
+    ConsoleProgress, ExtractError, ExtractOptions, ListedItem, MappedPackage as Package,
+    PkgExtractor, SilentProgress, prepare_filesystem,
 };
 use serde_json::{Value, json};
 use snafu::{ResultExt, Snafu};
@@ -18,7 +19,6 @@ mod install;
 mod verify;
 
 type Result<T> = std::result::Result<T, Box<dyn StdError>>;
-type Package = orbis_pkg::Pkg<memmap2::Mmap>;
 
 #[derive(Debug, Snafu)]
 enum Error {
@@ -172,21 +172,11 @@ fn open(path: &Path, passcode_file: Option<&Path>) -> Result<Package> {
             .strip_suffix(b"\r\n")
             .or_else(|| bytes.strip_suffix(b"\n"))
             .unwrap_or(&bytes);
-        let result = pkg.load_passcode(passcode);
+        let result = pkg.load_passcode_with_diagnostics(passcode);
         bytes.fill(0);
         result?;
     }
     Ok(pkg)
-}
-
-fn prepare_filesystem(pkg: &mut Package) -> Result<()> {
-    let image = pkg.get_pfs_image().ok_or(ExtractError::NoPfsImage)?;
-    if orbis_pfs::header::read_mode(image.data)?.is_encrypted() {
-        // An unencrypted IMAGE_KEY can be usable even if entry slot 3 is not.
-        let _ = pkg.load_entry_keys();
-        pkg.load_pfs_key()?;
-    }
-    Ok(())
 }
 
 fn process(
@@ -280,6 +270,7 @@ fn list(
     let mut warnings = Vec::new();
     if !entries_only {
         let filesystem = prepare_filesystem(&mut pkg)
+            .map_err(Box::<dyn StdError>::from)
             .and_then(|()| Ok(PkgExtractor::new(&pkg, SilentProgress, false).list_files()?));
         match filesystem {
             Ok(files) => items.extend(files),

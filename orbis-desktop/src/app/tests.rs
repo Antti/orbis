@@ -1,6 +1,7 @@
 use super::*;
 use eframe::App;
 use egui::accesskit::{Action as AccessibilityAction, ActionRequest, TreeId, TreeUpdate};
+use orbis_cli::install::UpdateReadiness;
 use std::{fs, time::Instant};
 
 use crate::features;
@@ -22,7 +23,7 @@ fn passcodes_are_accepted_only_after_validation_and_cleared_for_another_package(
     let mut app = OrbisApp::default();
     app.open(path.clone());
     finish(&mut app);
-    assert_eq!(app.package.as_ref().unwrap().missing_keys, 1);
+    assert_eq!(app.package.as_ref().unwrap().update.missing_keys, 1);
     app.passcode_input = String::from_utf8(features::PASSCODE.to_vec())
         .unwrap()
         .into();
@@ -32,20 +33,18 @@ fn passcodes_are_accepted_only_after_validation_and_cleared_for_another_package(
     finish(&mut app);
     assert!(app.passcode.is_some());
     assert!(app.pending_passcode.is_none());
-    assert_eq!(app.package.as_ref().unwrap().missing_keys, 0);
+    assert_eq!(app.package.as_ref().unwrap().update.missing_keys, 0);
     app.passcode_input = "x".repeat(32).into();
     app.validate_passcode();
     finish(&mut app);
-    assert!(app.notice.as_ref().unwrap().attention);
+    assert!(app.notice.as_ref().unwrap().needs_attention());
     assert!(app.pending_passcode.is_none());
     // A rejected replacement does not discard the previous validated value.
     assert!(app.passcode.is_some());
-    app.start(
-        path.clone(),
-        Operation::Verify {
-            metadata_only: true,
-        },
-    );
+    app.start(Operation::Verify {
+        source: PackageSource::new(path.clone(), app.passcode.clone()),
+        metadata_only: true,
+    });
     finish(&mut app);
     assert!(
         app.verification
@@ -57,15 +56,29 @@ fn passcodes_are_accepted_only_after_validation_and_cleared_for_another_package(
             .skipped
             .is_empty()
     );
-    assert!(app.package.as_ref().unwrap().update_supported);
+    assert!(
+        app.package
+            .as_ref()
+            .unwrap()
+            .update
+            .readiness
+            .has_update_metadata()
+    );
     app.action = Action::Update;
     app.clear_passcode();
     finish(&mut app);
-    assert!(!app.package.as_ref().unwrap().update_supported);
+    assert!(
+        !app.package
+            .as_ref()
+            .unwrap()
+            .update
+            .readiness
+            .has_update_metadata()
+    );
     assert!(app.action == Action::Extract);
     assert!(app.passcode.is_none());
     assert!(app.verification.is_none());
-    assert_eq!(app.package.as_ref().unwrap().missing_keys, 1);
+    assert_eq!(app.package.as_ref().unwrap().update.missing_keys, 1);
     app.passcode_input = String::from_utf8(features::PASSCODE.to_vec())
         .unwrap()
         .into();
@@ -76,7 +89,7 @@ fn passcodes_are_accepted_only_after_validation_and_cleared_for_another_package(
     assert!(app.passcode.is_none());
     assert!(app.verification.is_none());
     finish(&mut app);
-    assert_eq!(app.package.as_ref().unwrap().missing_keys, 1);
+    assert_eq!(app.package.as_ref().unwrap().update.missing_keys, 1);
 }
 
 #[test]
@@ -87,16 +100,14 @@ fn cancelled_verification_keeps_a_report_and_resets_the_worker() {
     let mut app = OrbisApp::default();
     app.open(path.clone());
     finish(&mut app);
-    app.start(
-        path,
-        Operation::Verify {
-            metadata_only: false,
-        },
-    );
+    app.start(Operation::Verify {
+        source: PackageSource::new(path, app.passcode.clone()),
+        metadata_only: false,
+    });
     app.job.as_ref().unwrap().cancel();
     finish(&mut app);
     assert_eq!(app.verification.as_ref().unwrap().status, "interrupted");
-    assert!(app.notice.as_ref().unwrap().attention);
+    assert!(app.notice.as_ref().unwrap().needs_attention());
     assert!(app.job.is_none());
 }
 
@@ -114,7 +125,7 @@ fn passcode_frame(app: &mut OrbisApp, events: Vec<egui::Event>) {
             events,
             ..Default::default()
         },
-        |ui| app.passcode_settings(ui),
+        |ui| app.passcode_settings(ui, PasscodePrompt::Optional),
     );
     // This headless test has no renderer to consume texture updates.
     output.textures_delta.clear();
@@ -196,7 +207,7 @@ fn passcode_editor_forgets_history_after_rejected_input() {
     assert_passcode_editor_reset(&"é".repeat(16), |app| {
         app.validate_passcode();
         assert!(app.pending_passcode.is_none());
-        assert!(app.notice.as_ref().unwrap().attention);
+        assert!(app.notice.as_ref().unwrap().needs_attention());
     });
 }
 
@@ -235,7 +246,8 @@ pub(super) fn click(app: &mut OrbisApp, label: &str) {
         .nodes
         .iter()
         // An action tab can have the same label as the footer button.
-        .find(|(_, node)| node.label() == Some(label) && node.toggled().is_none())
+        .filter(|(_, node)| node.label() == Some(label))
+        .min_by_key(|(_, node)| node.toggled().is_some())
         .unwrap_or_else(|| panic!("missing button {label}"));
     let event = egui::Event::AccessKitActionRequest(ActionRequest {
         action: AccessibilityAction::Click,
@@ -339,6 +351,973 @@ impl egui::DroppedFile for DroppedPath {
 }
 
 #[test]
+fn extracted_game_can_preview_retry_and_install_an_update() {
+    use crate::common;
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().join("CUSA00000");
+    let base_pkg = temp.path().join("base.pkg");
+    let mut bytes = common::update("01.00", "game.txt", b"BASE");
+    let sfo = common::sfo("CUSA00000", "gd", "01.00");
+    bytes[0x1a00..0x1a00 + sfo.len()].copy_from_slice(&sfo);
+    common::be32(&mut bytes, 0x78, 0);
+    fs::write(&base_pkg, bytes).unwrap();
+    let mut app = OrbisApp::default();
+    app.open(base_pkg);
+    finish(&mut app);
+    click(&mut app, "Extract files");
+    finish(&mut app);
+    click(&mut app, "Open game folder in Orbis");
+    finish(&mut app);
+    assert_eq!(app.game.as_ref().unwrap().target.path, base);
+    assert!(
+        frame(&mut app, Default::default())
+            .nodes
+            .iter()
+            .any(|(_, n)| n.label() == Some("Install update…"))
+    );
+
+    let wrong = temp.path().join("other-game.pkg");
+    let mut bytes = common::update("01.12", "game.txt", b"OTHER");
+    let sfo = common::sfo("CUSA12345", "gp", "01.12");
+    bytes[0x1a00..0x1a00 + sfo.len()].copy_from_slice(&sfo);
+    bytes[0x47..0x50].copy_from_slice(b"CUSA12345");
+    fs::write(&wrong, bytes).unwrap();
+    app.open_package(wrong, UpdateBase::Game(base.clone()));
+    finish(&mut app);
+    assert!(
+        app.notice
+            .as_ref()
+            .unwrap()
+            .details
+            .contains("does not match")
+    );
+    assert!(app.update_target.preview().is_none());
+    assert!(
+        frame(&mut app, Default::default())
+            .nodes
+            .iter()
+            .any(|(_, n)| n.label() == Some("Choose another PKG…"))
+    );
+
+    let update = temp.path().join("update.pkg");
+    fs::write(&update, common::update("01.12", "game.txt", b"PATCH")).unwrap();
+    frame(
+        &mut app,
+        egui::RawInput {
+            dropped_files: vec![Arc::new(DroppedPath(update))],
+            ..Default::default()
+        },
+    );
+    finish(&mut app);
+    let plan = app.update_target.preview().unwrap();
+    assert_eq!(plan.current_version, "01.00");
+    assert_eq!(plan.update_version, "01.12");
+    assert_eq!(
+        plan.destination,
+        base.canonicalize()
+            .unwrap()
+            .with_file_name("CUSA00000-UPDATE")
+    );
+    assert!(!plan.destination.exists());
+    click(&mut app, "Install update");
+    finish(&mut app);
+    click(&mut app, "Done");
+    finish(&mut app);
+    let game = app.game.as_ref().unwrap();
+    assert_eq!(game.target.path, base.canonicalize().unwrap());
+    assert_eq!(
+        game.status.as_ref().unwrap().active_version.as_deref(),
+        Some("01.12")
+    );
+    assert_eq!(fs::read(base.join("game.txt")).unwrap(), b"BASE");
+    assert_eq!(
+        fs::read(base.with_file_name("CUSA00000-UPDATE").join("game.txt")).unwrap(),
+        b"PATCH"
+    );
+}
+
+#[test]
+fn replacing_a_pkg_in_the_same_game_rechecks_the_selected_install_mode() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = crate::common::base_game(temp.path());
+    let first = temp.path().join("first.pkg");
+    let replacement = temp.path().join("replacement.pkg");
+    fs::write(&first, crate::common::update("01.10", "base.txt", b"FIRST")).unwrap();
+    fs::write(
+        &replacement,
+        crate::common::update("01.12", "base.txt", b"SECOND"),
+    )
+    .unwrap();
+    let mut app = OrbisApp::default();
+    app.open_package(first, UpdateBase::Game(base.clone()));
+    finish(&mut app);
+    click(&mut app, "Merge into game folder");
+    finish(&mut app);
+    assert_eq!(
+        app.update_target.preview().unwrap().mode,
+        InstallMode::Merge
+    );
+
+    app.open_package(replacement.clone(), UpdateBase::Game(base.clone()));
+    assert!(app.update_target.preview().is_none());
+    finish(&mut app);
+    let plan = app.update_target.preview().unwrap();
+    assert_eq!(plan.mode, InstallMode::Merge);
+    assert_eq!(plan.update_version, "01.12");
+    assert_eq!(plan.destination, base.canonicalize().unwrap());
+    assert_eq!(fs::read(base.join("base.txt")).unwrap(), b"BASE");
+
+    app.open(replacement);
+    finish(&mut app);
+    assert_eq!(app.mode, InstallMode::Separate);
+}
+
+fn assert_rejected_locked_update(app: &mut OrbisApp, reason: &str) {
+    assert_eq!(app.package.as_ref().unwrap().update.missing_keys, 1);
+    assert!(app.update_target.preview().is_none());
+    let replace = match app.base {
+        UpdateBase::Game(_) => "Choose another PKG…",
+        UpdateBase::Pick(_) => "Browse…",
+    };
+    assert!(app.action == Action::Update);
+    let tree = frame(app, Default::default());
+    assert!(
+        tree.nodes
+            .iter()
+            .any(|(_, n)| n.value().is_some_and(|v| v.contains(reason))),
+        "expected {reason}"
+    );
+    assert!(
+        tree.nodes
+            .iter()
+            .any(|(_, n)| n.label() == Some(replace) && !n.is_disabled()),
+        "expected {reason}"
+    );
+    assert!(
+        !tree.nodes.iter().any(|(_, n)| matches!(
+            n.label(),
+            Some("Validate passcode" | "Package passcode required")
+        )),
+        "unexpected passcode prompt for {reason}"
+    );
+}
+
+#[test]
+fn incompatible_packages_with_locked_entries_offer_a_replacement_without_a_passcode() {
+    use crate::common;
+    use orbis_pkg::entry::EntryId;
+
+    let temp = tempfile::tempdir().unwrap();
+    let base = common::base_game(temp.path());
+    let mut app = OrbisApp::default();
+
+    let mut base_pkg = features::passcoded_pkg_with_entry(2, EntryId::PfsImageKey);
+    common::be32(&mut base_pkg, 0x78, 0);
+    let mut delta = features::passcoded_pkg(2);
+    common::be32(&mut delta, 0x74, 0x1e);
+    let mut wrong_category = features::passcoded_pkg_with_entry(2, EntryId::PfsImageKey);
+    let sfo = common::sfo("CUSA00000", "gd", "01.12");
+    wrong_category[0x1a00..0x1a00 + sfo.len()].copy_from_slice(&sfo);
+    let mut unsupported_sfo = features::passcoded_pkg(2);
+    common::be32(&mut unsupported_sfo, 0x104c, 7 << 12);
+    let mut unsupported_entry = features::passcoded_pkg_with_entry(2, EntryId::PfsImageKey);
+    common::be32(&mut unsupported_entry, 0x102c, 7 << 12);
+
+    let mut missing_keys = features::passcoded_pkg(2);
+    common::be32(&mut missing_keys, 0x1000, 0x16); // No EntryKeys record.
+    let mut partial_sfo = features::passcoded_pkg(2);
+    partial_sfo.truncate(0x1a00); // The entry table and key record are complete.
+    let mut partial_key = features::passcoded_pkg_with_entry(2, EntryId::PfsImageKey);
+    // The logical byte is present at EOF, but the rest of the AES block is absent.
+    let last_byte = partial_key.len() as u32 - 1;
+    common::be32(&mut partial_key, 0x1030, last_byte);
+    common::be32(&mut partial_key, 0x1034, 1);
+    let mut partial_image = features::passcoded_pkg(2);
+    partial_image.truncate(partial_image.len() - 1);
+    let mut short_header = features::passcoded_pkg(2);
+    common::be64(&mut short_header, 0x418, 1); // In bounds, too small for the outer PFS header.
+    let mut invalid_header = features::passcoded_pkg(2);
+    invalid_header[0x2000] = 0; // Unsupported outer PFS version.
+    let mut missing_image_key = features::passcoded_pkg(2);
+    missing_image_key[0x201c] |= 4; // Encrypted PFS requires a PfsImageKey record.
+    common::be32(&mut missing_image_key, 0x1020, EntryId::Icon0Png.as_u32());
+    let mut empty_image_key = features::passcoded_pkg(2);
+    empty_image_key[0x201c] |= 4;
+    common::be32(&mut empty_image_key, 0x1034, 0);
+    let mut partial_plain_entry = features::passcoded_pkg(2);
+    let end = partial_plain_entry.len() as u32;
+    common::be32(&mut partial_plain_entry, 0x1030, end); // Unencrypted PfsImageKey.
+
+    for (file, bytes, reason) in [
+        ("base.pkg", base_pkg, "expected a PS4 full-file"),
+        ("delta.pkg", delta, "binary delta packages"),
+        ("category.pkg", wrong_category, "CATEGORY must be gp"),
+        ("missing-keys.pkg", missing_keys, "missing entry-key record"),
+        ("partial-sfo.pkg", partial_sfo, "extends beyond the end"),
+        ("partial-key.pkg", partial_key, "extends beyond the end"),
+        (
+            "partial-plain-entry.pkg",
+            partial_plain_entry,
+            "extends beyond the end",
+        ),
+        ("partial-image.pkg", partial_image, "filesystem image"),
+        (
+            "short-header.pkg",
+            short_header,
+            "too short to read the header",
+        ),
+        ("invalid-header.pkg", invalid_header, "invalid version"),
+        (
+            "missing-image-key.pkg",
+            missing_image_key,
+            "no PFS image key",
+        ),
+        (
+            "empty-image-key.pkg",
+            empty_image_key,
+            "empty PFS image key",
+        ),
+        (
+            "unsupported-sfo.pkg",
+            unsupported_sfo,
+            "unsupported key slot 7",
+        ),
+        (
+            "unsupported-entry.pkg",
+            unsupported_entry,
+            "unsupported key slot 7",
+        ),
+    ] {
+        let path = temp.path().join(file);
+        fs::write(&path, bytes).unwrap();
+        app.open_package(path, UpdateBase::Game(base.clone()));
+        finish(&mut app);
+        assert_rejected_locked_update(&mut app, reason);
+    }
+}
+
+#[test]
+fn metadata_only_verification_can_unlock_entries_when_the_filesystem_is_incomplete() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("partial-image.pkg");
+    let mut bytes = features::passcoded_pkg(2);
+    bytes.truncate(bytes.len() - 1);
+    fs::write(&path, bytes).unwrap();
+
+    let mut app = OrbisApp::default();
+    app.open(path);
+    finish(&mut app);
+    click(&mut app, "Verify package");
+    click(&mut app, "Metadata only (quicker)");
+    let tree = frame(&mut app, Default::default());
+    assert!(tree.nodes.iter().any(|(_, node)| {
+        node.value()
+            .is_some_and(|text| text.contains("filesystem image"))
+    }));
+    click(&mut app, "Package passcode (optional)");
+    app.passcode_input = String::from_utf8(features::PASSCODE.to_vec())
+        .unwrap()
+        .into();
+    click(&mut app, "Validate passcode");
+    finish(&mut app);
+    assert!(app.passcode.is_some());
+    assert!(
+        app.package
+            .as_ref()
+            .unwrap()
+            .update
+            .readiness
+            .rejection()
+            .is_some()
+    );
+
+    click(&mut app, "Verify package");
+    finish(&mut app);
+    let report = app.verification.as_ref().unwrap();
+    assert!(report.metadata_only);
+    let readability = report.readability.as_ref().unwrap();
+    assert_eq!(readability.files, 3);
+    assert!(readability.skipped.is_empty());
+}
+
+#[test]
+fn standalone_inspection_unlocks_intact_details_despite_a_truncated_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("partial-entry.pkg");
+    let mut bytes = features::passcoded_pkg(2);
+    let end = bytes.len() as u32;
+    crate::common::be32(&mut bytes, 0x1030, end); // Only the PfsImageKey entry is out of bounds.
+    fs::write(&path, bytes).unwrap();
+    let mut app = OrbisApp::default();
+    app.open(path);
+    finish(&mut app);
+    assert!(app.package.as_ref().unwrap().version.is_none());
+
+    click(&mut app, "Package passcode (optional)");
+    app.passcode_input = String::from_utf8(features::PASSCODE.to_vec())
+        .unwrap()
+        .into();
+    click(&mut app, "Validate passcode");
+    finish(&mut app);
+    assert_eq!(
+        app.package.as_ref().unwrap().version.as_deref(),
+        Some("01.12")
+    );
+    let tree = frame(&mut app, Default::default());
+    assert!(tree.nodes.iter().any(|(_, n)| {
+        n.value()
+            .is_some_and(|v| v.contains("extends beyond the end"))
+    }));
+    assert!(
+        tree.nodes
+            .iter()
+            .any(|(_, n)| n.label() == Some("Install update") && n.is_disabled())
+    );
+
+    click(&mut app, "Package passcode · validated");
+    click(&mut app, "Clear passcode");
+    finish(&mut app);
+    assert!(app.package.as_ref().unwrap().version.is_none());
+}
+
+#[test]
+fn truncated_details_show_the_damage_with_or_without_a_loaded_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("truncated.pkg");
+    for (slot, missing_keys) in [(2, 1), (3, 0)] {
+        let mut bytes = features::passcoded_pkg(slot);
+        bytes.truncate(0x1a01);
+        fs::write(&path, bytes).unwrap();
+        let mut app = OrbisApp::default();
+        app.open(path.clone());
+        finish(&mut app);
+        assert_eq!(
+            app.package.as_ref().unwrap().update.missing_keys,
+            missing_keys
+        );
+        let tree = frame(&mut app, Default::default());
+        assert!(tree.nodes.iter().any(|(_, n)| {
+            n.value()
+                .is_some_and(|v| v.contains("extends beyond the end"))
+        }));
+        assert!(!tree.nodes.iter().any(|(_, n)| matches!(
+            n.label(),
+            Some("Package passcode (optional)" | "Package passcode required" | "Validate passcode")
+        )));
+    }
+}
+
+#[test]
+fn locked_updates_for_another_edition_are_rejected_before_requesting_a_passcode() {
+    use crate::common;
+    let temp = tempfile::tempdir().unwrap();
+    let base = common::base_game(temp.path());
+    let mut metadata = common::sfo("CUSA00000", "gd", "01.00");
+    let region = metadata
+        .windows(7)
+        .position(|bytes| bytes == b"UP0000-")
+        .unwrap();
+    metadata[region..region + 2].copy_from_slice(b"EP");
+    fs::write(base.join("sce_sys/param.sfo"), metadata).unwrap();
+
+    let mut app = OrbisApp::default();
+    for entry in [
+        orbis_pkg::entry::EntryId::ParamSfo,
+        orbis_pkg::entry::EntryId::PfsImageKey,
+    ] {
+        let path = temp.path().join("locked.pkg");
+        fs::write(&path, features::passcoded_pkg_with_entry(2, entry)).unwrap();
+        app.open_package(path, UpdateBase::Game(base.clone()));
+        finish(&mut app);
+        assert_rejected_locked_update(&mut app, "does not match");
+    }
+}
+
+#[test]
+fn choosing_a_different_base_rechecks_the_locked_package() {
+    use crate::common;
+    let temp = tempfile::tempdir().unwrap();
+    let base = common::base_game(temp.path());
+    let wrong = temp.path().join("another-game");
+    fs::create_dir_all(wrong.join("sce_sys")).unwrap();
+    fs::write(
+        wrong.join("sce_sys/param.sfo"),
+        common::sfo("CUSA12345", "gd", "01.00"),
+    )
+    .unwrap();
+    let path = temp.path().join("locked.pkg");
+    fs::write(
+        &path,
+        features::passcoded_pkg_with_entry(2, orbis_pkg::entry::EntryId::PfsImageKey),
+    )
+    .unwrap();
+
+    let mut app = OrbisApp::default();
+    app.open(path);
+    finish(&mut app);
+    app.base = UpdateBase::Pick(Some(wrong));
+    app.update_target_changed();
+    finish(&mut app);
+    assert_rejected_locked_update(&mut app, "does not match");
+
+    let view = frame(&mut app, Default::default());
+    for label in ["Extract files", "Verify package"] {
+        assert!(
+            view.nodes
+                .iter()
+                .any(|(_, node)| node.label() == Some(label) && !node.is_disabled())
+        );
+    }
+
+    app.base = UpdateBase::Pick(Some(base));
+    app.update_target_changed();
+    finish(&mut app);
+    app.passcode_input = String::from_utf8(features::PASSCODE.to_vec())
+        .unwrap()
+        .into();
+    click(&mut app, "Validate passcode");
+    finish(&mut app);
+    click(&mut app, "Check update");
+    finish(&mut app);
+    assert_eq!(app.update_target.preview().unwrap().update_version, "01.12");
+}
+
+#[test]
+fn locked_updates_check_the_active_version_in_either_open_order() {
+    use crate::common;
+    use orbis_cli::{SilentProgress, install};
+    for installed in ["01.12", "01.15"] {
+        let temp = tempfile::tempdir().unwrap();
+        let base = common::base_game(temp.path());
+        let pkg = orbis_pkg::Pkg::new(common::update(installed, "game.txt", b"ACTIVE")).unwrap();
+        install::install(&pkg, &base, SilentProgress).unwrap();
+        let path = temp.path().join("locked.pkg");
+        fs::write(
+            &path,
+            features::passcoded_pkg_with_entry(2, orbis_pkg::entry::EntryId::PfsImageKey),
+        )
+        .unwrap();
+        let reason = format!("01.12 is not newer than installed {installed}");
+        let mut app = OrbisApp::default();
+        app.open_package(path.clone(), UpdateBase::Game(base.clone()));
+        finish(&mut app);
+        assert_rejected_locked_update(&mut app, &reason);
+        app.open(path);
+        finish(&mut app);
+        app.base = UpdateBase::Pick(Some(base));
+        app.update_target_changed();
+        finish(&mut app);
+        assert_rejected_locked_update(&mut app, &reason);
+    }
+}
+
+#[test]
+fn returning_to_a_locked_pkg_after_rollback_rechecks_the_active_version() {
+    use crate::common;
+    use orbis_cli::{SilentProgress, install};
+    let temp = tempfile::tempdir().unwrap();
+    let base = common::base_game(temp.path());
+    let active = orbis_pkg::Pkg::new(common::update("01.12", "game.txt", b"ACTIVE")).unwrap();
+    install::install(&active, &base, SilentProgress).unwrap();
+    let path = temp.path().join("locked.pkg");
+    fs::write(
+        &path,
+        features::passcoded_pkg_with_entry(2, orbis_pkg::entry::EntryId::PfsImageKey),
+    )
+    .unwrap();
+    let mut app = OrbisApp::default();
+    app.open_package(path, UpdateBase::Pick(Some(base.clone())));
+    finish(&mut app);
+    assert_rejected_locked_update(&mut app, "01.12 is not newer than installed 01.12");
+
+    app.open_game(base);
+    finish(&mut app);
+    click(&mut app, "Restore base 01.00…");
+    click(&mut app, "Confirm restore");
+    finish(&mut app);
+    click(&mut app, "Done");
+    finish(&mut app);
+    click(&mut app, "Back");
+    assert!(app.job.is_none() && matches!(app.update_target, UpdateTargetState::Unchecked));
+    click(&mut app, "Check update");
+    finish(&mut app);
+    app.passcode_input = String::from_utf8(features::PASSCODE.to_vec())
+        .unwrap()
+        .into();
+    click(&mut app, "Validate passcode");
+    finish(&mut app);
+    click(&mut app, "Check update");
+    finish(&mut app);
+    assert_eq!(
+        app.update_target.preview().unwrap().current_version,
+        "01.00"
+    );
+}
+
+#[test]
+fn switching_install_modes_rechecks_a_locked_update_in_both_open_orders() {
+    use crate::common;
+    use orbis_cli::{SilentProgress, install};
+    let temp = tempfile::tempdir().unwrap();
+    let base = common::base_game(temp.path());
+    let active = orbis_pkg::Pkg::new(common::update("01.10", "game.txt", b"ACTIVE")).unwrap();
+    install::install(&active, &base, SilentProgress).unwrap();
+    let path = temp.path().join("locked.pkg");
+    use orbis_pkg::entry::EntryId;
+    for entry in [EntryId::ParamSfo, EntryId::PfsImageKey] {
+        fs::write(&path, features::passcoded_pkg_with_entry(2, entry)).unwrap();
+        for selection in [
+            UpdateBase::Game(base.clone()),
+            UpdateBase::Pick(Some(base.clone())),
+        ] {
+            let mut app = OrbisApp::default();
+            app.open_package(path.clone(), selection);
+            finish(&mut app);
+            if app.action != Action::Update {
+                click(&mut app, "Install update");
+            }
+            click(&mut app, "Merge into game folder");
+            finish(&mut app);
+            assert_rejected_locked_update(&mut app, "merge requires an original base");
+            click(&mut app, "Keep update separate");
+            finish(&mut app);
+            let tree = frame(&mut app, Default::default());
+            assert!(
+                tree.nodes
+                    .iter()
+                    .any(|(_, n)| n.label() == Some("Validate passcode"))
+            );
+        }
+    }
+}
+
+#[test]
+fn target_warnings_show_the_field_that_failed_validation() {
+    use crate::common;
+    let temp = tempfile::tempdir().unwrap();
+    let base = common::base_game(temp.path());
+    fs::write(
+        base.join("sce_sys/param.sfo"),
+        common::sfo("CUSA00000", "gd", "bad"),
+    )
+    .unwrap();
+    let path = temp.path().join("locked.pkg");
+    fs::write(&path, features::passcoded_pkg(2)).unwrap();
+    let mut app = OrbisApp::default();
+    app.open_package(path, UpdateBase::Game(base));
+    finish(&mut app);
+    assert_rejected_locked_update(&mut app, "APP_VER must use NN.NN");
+}
+
+#[test]
+fn a_locked_update_version_is_checked_after_the_passcode_reveals_it() {
+    use crate::common;
+    use orbis_cli::{SilentProgress, install};
+    let temp = tempfile::tempdir().unwrap();
+    let base = common::base_game(temp.path());
+    let installed = orbis_pkg::Pkg::new(common::update("01.15", "game.txt", b"ACTIVE")).unwrap();
+    install::install(&installed, &base, SilentProgress).unwrap();
+    let path = temp.path().join("locked-sfo.pkg");
+    fs::write(&path, features::passcoded_pkg(2)).unwrap();
+    let mut app = OrbisApp::default();
+    app.open_package(path, UpdateBase::Game(base));
+    finish(&mut app);
+    app.passcode_input = String::from_utf8(features::PASSCODE.to_vec())
+        .unwrap()
+        .into();
+    click(&mut app, "Validate passcode");
+    finish(&mut app);
+    assert!(app.update_target.preview().is_none());
+    assert!(
+        app.notice
+            .as_ref()
+            .unwrap()
+            .details
+            .contains("01.12 is not newer than installed 01.15")
+    );
+}
+
+#[test]
+fn update_with_locked_metadata_requires_a_passcode_even_with_readable_sfo() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = crate::common::base_game(temp.path());
+    let path = temp.path().join("locked-metadata.pkg");
+    let bytes = features::passcoded_pkg_with_entry(2, orbis_pkg::entry::EntryId::PfsImageKey);
+    fs::write(&path, bytes).unwrap();
+    let mut app = OrbisApp::default();
+    app.open_package(path.clone(), UpdateBase::Game(base.clone()));
+    finish(&mut app);
+    let info = app.package.as_ref().unwrap();
+    assert!(info.update.readiness.has_update_metadata());
+    assert_eq!(info.update.missing_keys, 1);
+    assert!(app.update_target.preview().is_none());
+    let tree = frame(&mut app, Default::default());
+    assert!(
+        tree.nodes
+            .iter()
+            .any(|(_, node)| node.value().is_some_and(|value| {
+                value.contains("1 encrypted metadata entry cannot be read")
+                    && value.contains("passcode")
+            }))
+    );
+    assert!(
+        tree.nodes
+            .iter()
+            .any(|(_, node)| node.label() == Some("Validate passcode"))
+    );
+    assert!(
+        tree.nodes
+            .iter()
+            .any(|(_, node)| node.label() == Some("Check update") && node.is_disabled())
+    );
+
+    let error = operations::run(
+        Operation::PreviewUpdate {
+            package: operations::UpdatePackage::Readable {
+                source: PackageSource::new(path.clone(), None),
+                id: app.package.as_ref().unwrap().content_id,
+            },
+            base: base.clone(),
+            mode: InstallMode::Separate,
+        },
+        &orbis_cli::SilentProgress,
+    )
+    .unwrap_err();
+    assert!(error.details.contains("decryption key for slot 2"));
+    assert!(!temp.path().join(".CUSA00000.orbis-install").exists());
+
+    app.passcode_input = String::from_utf8(features::PASSCODE.to_vec())
+        .unwrap()
+        .into();
+    click(&mut app, "Validate passcode");
+    finish(&mut app);
+    assert_eq!(app.package.as_ref().unwrap().update.missing_keys, 0);
+    assert_eq!(app.update_target.preview().unwrap().update_version, "01.12");
+    click(&mut app, "Install update");
+    finish(&mut app);
+    assert_eq!(app.notice.as_ref().unwrap().title, "Update installed");
+}
+
+#[test]
+fn contextual_update_accepts_a_passcode_and_rereads_the_game_on_back() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = crate::common::base_game(temp.path());
+    let path = temp.path().join("locked.pkg");
+    fs::write(&path, features::passcoded_pkg(2)).unwrap();
+    let mut app = OrbisApp::default();
+    app.open_package(path, UpdateBase::Game(base.clone()));
+    finish(&mut app);
+    assert!(app.update_target.preview().is_none() && app.action == Action::Update);
+    assert!(matches!(
+        app.package.as_ref().unwrap().update.readiness,
+        UpdateReadiness::NeedsPasscode(_)
+    ));
+    app.passcode_input = "x".repeat(32).into();
+    click(&mut app, "Validate passcode");
+    finish(&mut app);
+    assert!(app.notice.as_ref().unwrap().needs_attention());
+    click(&mut app, "Done");
+    assert!(matches!(
+        app.update_target,
+        UpdateTargetState::AwaitingPasscode
+    ));
+    app.passcode_input = String::from_utf8(features::PASSCODE.to_vec())
+        .unwrap()
+        .into();
+    click(&mut app, "Validate passcode");
+    finish(&mut app);
+    assert!(app.update_target.preview().is_some());
+    click(&mut app, "Back to game");
+    finish(&mut app);
+    assert_eq!(app.game.as_ref().unwrap().target.path, base);
+    assert!(
+        app.package.is_none() && app.passcode.is_none() && app.update_target.preview().is_none()
+    );
+}
+
+fn merged_edition(parent: &std::path::Path, region: &[u8; 2]) -> PathBuf {
+    use crate::common;
+    use orbis_cli::{SilentProgress, install};
+    let base = common::base_game(parent);
+    let param = base.join("sce_sys/param.sfo");
+    let mut base_sfo = fs::read(&param).unwrap();
+    let mut active = common::update("01.10", "new.txt", b"ACTIVE");
+    active[0x40..0x42].copy_from_slice(region);
+    for sfo in [&mut base_sfo[..], &mut active[0x1a00..0x2000]] {
+        let offset = sfo.windows(7).position(|s| s == b"UP0000-").unwrap();
+        sfo[offset..offset + 2].copy_from_slice(region);
+    }
+    fs::write(param, base_sfo).unwrap();
+    let active = orbis_pkg::Pkg::new(active).unwrap();
+    install::install_with_mode(&active, &base, InstallMode::Merge, SilentProgress).unwrap();
+    base
+}
+
+#[test]
+fn update_checks_reject_a_merged_game_from_another_edition() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = merged_edition(temp.path(), b"EP");
+    let path = temp.path().join("update.pkg");
+    for bytes in [
+        features::passcoded_pkg(2),
+        crate::common::update("01.12", "new.txt", b"NEXT"),
+    ] {
+        fs::write(&path, bytes).unwrap();
+        let mut app = OrbisApp::default();
+        app.open_package(path.clone(), UpdateBase::Game(base.clone()));
+        finish(&mut app);
+        assert!(
+            app.game.is_none(),
+            "a mismatched PKG opened the recovery screen"
+        );
+        let tree = frame(&mut app, Default::default());
+        assert!(
+            tree.nodes
+                .iter()
+                .any(|(_, n)| n.value().is_some_and(|v| v.contains("does not match")))
+        );
+        assert!(
+            !tree
+                .nodes
+                .iter()
+                .any(|(_, n)| matches!(n.label(), Some("Restore base" | "Recover base")))
+        );
+    }
+    assert_eq!(fs::read(base.join("new.txt")).unwrap(), b"ACTIVE");
+}
+
+#[test]
+fn done_after_a_separate_install_rechecks_the_confirmed_edition() {
+    let temp = tempfile::tempdir().unwrap();
+    let live = temp.path().join("live");
+    let replacement = temp.path().join("replacement");
+    let base = crate::common::base_game(&live);
+    merged_edition(&replacement, b"EP");
+    let path = temp.path().join("update.pkg");
+    fs::write(&path, crate::common::update("01.12", "next.txt", b"NEXT")).unwrap();
+    let mut app = OrbisApp::default();
+    app.open_package(path, UpdateBase::Game(base));
+    finish(&mut app);
+    click(&mut app, "Install update");
+    finish(&mut app);
+    assert_eq!(app.notice.as_ref().unwrap().title, "Update installed");
+
+    fs::rename(&live, temp.path().join("original")).unwrap();
+    fs::rename(&replacement, &live).unwrap();
+    click(&mut app, "Done");
+    finish(&mut app);
+    assert!(
+        app.notice
+            .as_ref()
+            .is_some_and(|n| n.details.contains("does not match"))
+    );
+    assert!(app.game.as_ref().unwrap().status.is_none());
+    click(&mut app, "Done");
+    let tree = frame(&mut app, Default::default());
+    assert!(
+        !tree
+            .nodes
+            .iter()
+            .any(|(_, node)| node.label() == Some("Restore base"))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn redirecting_a_link_after_install_keeps_refresh_and_restore_on_the_installed_game() {
+    use crate::common;
+    use orbis_cli::{SilentProgress, install};
+    use std::os::unix::fs::symlink;
+
+    for mode in [InstallMode::Separate, InstallMode::Merge] {
+        let temp = tempfile::tempdir().unwrap();
+        let first = common::base_game(&temp.path().join("first"));
+        let second = common::base_game(&temp.path().join("second"));
+        let other_update =
+            orbis_pkg::Pkg::new(common::update("01.10", "new.txt", b"OTHER")).unwrap();
+        install::install_with_mode(&other_update, &second, mode, SilentProgress).unwrap();
+        let link = temp.path().join("selected-game");
+        symlink(&first, &link).unwrap();
+        let path = temp.path().join("update.pkg");
+        fs::write(&path, common::update("01.12", "new.txt", b"SELECTED")).unwrap();
+        let mut app = OrbisApp::default();
+        app.open_package(path, UpdateBase::Game(link.clone()));
+        finish(&mut app);
+        if mode == InstallMode::Merge {
+            click(&mut app, "Merge into game folder");
+            finish(&mut app);
+            click(&mut app, "Merge update");
+        } else {
+            click(&mut app, "Install update");
+        }
+        finish(&mut app);
+
+        fs::remove_file(&link).unwrap();
+        symlink(&second, &link).unwrap();
+        click(&mut app, "Done");
+        finish(&mut app);
+        let game = app.game.as_ref().unwrap();
+        assert_eq!(
+            game.status.as_ref().unwrap().active_version.as_deref(),
+            Some("01.12")
+        );
+        assert_eq!(game.target.path, first.canonicalize().unwrap());
+        if mode == InstallMode::Merge {
+            click(&mut app, "Restore base");
+        } else {
+            click(&mut app, "Restore base 01.00…");
+            click(&mut app, "Confirm restore");
+        }
+        finish(&mut app);
+        assert!(
+            install::status(&first, SilentProgress)
+                .unwrap()
+                .active_version
+                .is_none()
+        );
+        assert_eq!(
+            install::status(&second, SilentProgress)
+                .unwrap()
+                .active_version
+                .as_deref(),
+            Some("01.10")
+        );
+    }
+}
+
+#[test]
+fn package_recovery_rechecks_the_edition_after_the_game_folder_is_replaced() {
+    for (pending, button) in [(false, "Restore base"), (true, "Recover base")] {
+        let temp = tempfile::tempdir().unwrap();
+        let live = temp.path().join("live");
+        let replacement = temp.path().join("replacement");
+        let base = merged_edition(&live, b"UP");
+        merged_edition(&replacement, b"EP");
+        if pending {
+            for parent in [&live, &replacement] {
+                fs::write(
+                    parent.join(".CUSA00000.orbis-install/merge/pending.json"),
+                    br#""restore""#,
+                )
+                .unwrap();
+            }
+        }
+        let path = temp.path().join("next.pkg");
+        fs::write(&path, crate::common::update("01.12", "new.txt", b"NEXT")).unwrap();
+        let mut app = OrbisApp::default();
+        app.open_package(path, UpdateBase::Game(base.clone()));
+        finish(&mut app);
+        fs::rename(&live, temp.path().join("original")).unwrap();
+        fs::rename(&replacement, &live).unwrap();
+
+        for action in [button, "Refresh"] {
+            click(&mut app, action);
+            finish(&mut app);
+            assert!(
+                app.notice
+                    .as_ref()
+                    .unwrap()
+                    .details
+                    .contains("does not match")
+            );
+            assert_eq!(fs::read(base.join("new.txt")).unwrap(), b"ACTIVE");
+            click(&mut app, "Done");
+        }
+        app.open_game(base.clone());
+        finish(&mut app);
+        click(&mut app, button);
+        finish(&mut app);
+        assert!(!app.notice.as_ref().unwrap().needs_attention());
+        assert!(!base.join("new.txt").exists());
+    }
+}
+
+#[test]
+fn locked_update_can_restore_or_recover_a_merged_target_without_the_pkg() {
+    use orbis_cli::install;
+    for (pending, button) in [(false, "Restore base"), (true, "Recover base")] {
+        let dir = tempfile::tempdir().unwrap();
+        let base = merged_edition(dir.path(), b"UP");
+        if pending {
+            fs::write(
+                dir.path()
+                    .join(".CUSA00000.orbis-install/merge/pending.json"),
+                br#""restore""#,
+            )
+            .unwrap();
+        }
+        let path = dir.path().join("locked.pkg");
+        fs::write(
+            &path,
+            features::passcoded_pkg_with_entry(2, orbis_pkg::entry::EntryId::PfsImageKey),
+        )
+        .unwrap();
+        let mut app = OrbisApp::default();
+        app.open(path.clone());
+        finish(&mut app);
+        fs::remove_file(&path).unwrap();
+        app.base = UpdateBase::Pick(Some(base.clone()));
+        app.update_target_changed();
+        finish(&mut app);
+
+        click(&mut app, "Back");
+        assert!(app.game.is_none() && app.job.is_none());
+        click(&mut app, "Check update");
+        finish(&mut app);
+        click(&mut app, button);
+        finish(&mut app);
+        click(&mut app, "Done");
+        finish(&mut app);
+        assert!(install::merge_status(&base).unwrap().is_none());
+        assert!(!base.join("new.txt").exists());
+        click(&mut app, "Back");
+        assert_eq!(app.package.as_ref().unwrap().path, path);
+    }
+}
+
+#[test]
+fn back_from_a_merged_target_waits_for_an_explicit_update_check() {
+    use crate::common;
+    use orbis_cli::{SilentProgress, install};
+    let dir = tempfile::tempdir().unwrap();
+    let base = common::base_game(dir.path());
+    let mut app = OrbisApp::default();
+    app.open_game(base.clone());
+    finish(&mut app);
+
+    // Another process merges an update while the PKG picker is open.
+    let active = orbis_pkg::Pkg::new(common::update("01.10", "new.txt", b"ACTIVE")).unwrap();
+    install::install_with_mode(&active, &base, InstallMode::Merge, SilentProgress).unwrap();
+    let path = dir.path().join("next.pkg");
+    fs::write(&path, common::update("01.12", "new.txt", b"NEXT")).unwrap();
+    app.open_package(path.clone(), UpdateBase::Game(base.clone()));
+    finish(&mut app);
+    click(&mut app, "Back");
+    assert!(app.game.is_none() && app.job.is_none() && app.update_target.preview().is_none());
+    assert_eq!(app.package.as_ref().unwrap().path, path);
+    assert_eq!(app.base.path(), Some(&base));
+    click(&mut app, "Check update");
+    finish(&mut app);
+    assert_eq!(
+        app.game.as_ref().unwrap().status.as_ref().unwrap().mode,
+        InstallMode::Merge
+    );
+    click(&mut app, "Refresh");
+    finish(&mut app);
+    click(&mut app, "Restore base");
+    finish(&mut app);
+    click(&mut app, "Done");
+    finish(&mut app);
+    click(&mut app, "Back");
+    click(&mut app, "Check update");
+    finish(&mut app);
+    assert_eq!(
+        app.update_target.preview().unwrap().current_version,
+        "01.00"
+    );
+}
+
+#[test]
 fn interrupted_merge_offers_recovery_and_refreshes_the_restored_base() {
     let temp = tempfile::tempdir().unwrap();
     let base = crate::common::base_game(temp.path());
@@ -363,7 +1342,7 @@ fn interrupted_merge_offers_recovery_and_refreshes_the_restored_base() {
         !view
             .nodes
             .iter()
-            .any(|(_, node)| node.label() == Some("Export this game…"))
+            .any(|(_, node)| matches!(node.label(), Some("Export this game…" | "Install update…")))
     );
 
     fs::write(

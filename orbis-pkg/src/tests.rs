@@ -91,7 +91,7 @@ fn truncated_entry_tables_and_missing_entries_return_errors() {
 }
 
 #[test]
-fn encrypted_entries_reject_missing_keys_and_truncated_padding() {
+fn truncated_encrypted_padding_is_rejected_with_or_without_the_key() {
     let mut bytes = raw_pkg();
     put_u32(&mut bytes, 0x1008, 0x80000000);
     put_u32(&mut bytes, 0x100c, 0x3000);
@@ -101,7 +101,7 @@ fn encrypted_entries_reject_missing_keys_and_truncated_padding() {
     let (entry, _) = pkg.find_entry(EntryId::ParamSfo).unwrap();
     assert!(matches!(
         pkg.entry_data(&entry),
-        Err(EntryDataError::NoDecryptionKey { key_index: 3 })
+        Err(EntryDataError::InvalidDataOffset)
     ));
     pkg.entry_key3 = vec![0x42; 32];
     assert!(matches!(

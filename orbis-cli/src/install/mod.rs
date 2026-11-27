@@ -3,6 +3,12 @@
 //!
 //! Separate updates preserve the base. Merge mode journals per-file replacements
 //! and retains original files for restoration. Stop the emulator first.
+mod compatibility;
+use compatibility::check_update_version;
+pub use compatibility::{
+    LockedUpdate, UpdateCheck, UpdateReadiness, check_update_identity, inspect_update,
+    update_metadata,
+};
 mod directory;
 mod export;
 mod merge;
@@ -14,7 +20,7 @@ mod status;
 mod storage;
 mod transaction;
 pub use rollback::{SeparateRollback, rollback, rollback_with_progress};
-pub use status::{InstallationStatus, status, status_with_rollback};
+pub use status::{GameTarget, InstallationStatus, status, status_with_rollback};
 
 pub use export::{
     ExportEstimate, ExportPlan, ExportPreview, ExportReport, ExportedDirectory, ResumePlan,
@@ -25,8 +31,8 @@ pub use preflight::FilesystemPlan;
 use crate::{ExtractError, ExtractOptions, ExtractProgress, PkgExtractor, SilentProgress};
 use cap_std::fs::Dir;
 use orbis_pkg::{
-    Pkg,
-    header::ContentFlags,
+    EntryDataError, ParamSfoError, Pkg,
+    header::{ContentFlags, ContentId},
     sfo::{AppMetadata, AppVersion},
 };
 use serde::{Deserialize, Serialize};
@@ -41,8 +47,26 @@ pub(crate) type Result<T> = std::result::Result<T, InstallError>;
 
 #[derive(Debug, Snafu)]
 pub enum InstallError {
+    #[snafu(display("update does not match the base game's title and content ID"))]
+    UpdateIdentityMismatch,
     #[snafu(display("{message}"))]
     Invalid { message: String },
+    #[snafu(display("update metadata needs a decryption key for slot {slot}"))]
+    MissingUpdateKey { slot: usize },
+    #[snafu(display("update metadata uses unsupported key slot {slot}"))]
+    UnsupportedUpdateKey { slot: usize },
+    #[snafu(display(
+        "PKG entry 0x{id:08x} extends beyond the end of the file. The package is incomplete or damaged."
+    ))]
+    TruncatedEntry { id: u32 },
+    #[snafu(transparent)]
+    PackageFilesystem {
+        source: crate::PackageFilesystemError,
+    },
+    #[snafu(display("cannot unlock update metadata"))]
+    PasscodeMetadata {
+        source: orbis_pkg::passcode::PasscodeValidationError,
+    },
     #[snafu(display("installation filesystem operation failed"))]
     Io { source: std::io::Error },
     #[snafu(display("invalid installation metadata"))]
@@ -51,6 +75,15 @@ pub enum InstallError {
     Extract { source: ExtractError },
     #[snafu(display("invalid installation state"))]
     State { source: serde_json::Error },
+}
+impl InstallError {
+    fn missing_update_key(slot: usize) -> Self {
+        if slot < orbis_pkg::passcode::ENTRY_KEY_COUNT {
+            Self::MissingUpdateKey { slot }
+        } else {
+            Self::UnsupportedUpdateKey { slot }
+        }
+    }
 }
 impl From<std::io::Error> for InstallError {
     fn from(source: std::io::Error) -> Self {
@@ -100,7 +133,7 @@ pub enum ChangeKind {
     RemoveFromUpdate,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct FileChange {
     pub path: String,
     pub change: ChangeKind,
@@ -132,6 +165,61 @@ pub struct InstallPlan {
     pub files: Vec<FileChange>,
 }
 
+impl InstallPlan {
+    /// Whether the free space measured during planning covers the estimated installation size.
+    pub fn has_sufficient_space(&self) -> bool {
+        self.available_bytes >= self.required_free_bytes
+    }
+
+    fn check_space(&self) -> Result<()> {
+        if self.has_sufficient_space() {
+            return Ok(());
+        }
+        Err(invalid(format!(
+            "insufficient free space: need approximately {} bytes, available {}",
+            self.required_free_bytes, self.available_bytes
+        )))
+    }
+
+    /// Rebuilds the preview under the installation lock and applies it if the planned changes match.
+    pub fn apply<R: AsRef<[u8]> + Sync>(
+        &self,
+        pkg: &Pkg<R>,
+        base: &Path,
+        progress: impl ExtractProgress,
+    ) -> Result<InstallPlan> {
+        run_install(pkg, base, self.mode, Some(self), progress)
+    }
+
+    fn matches_preview(&self, preview: &Self) -> bool {
+        // Free space can change independently. Check the current value before staging.
+        self.mode == preview.mode
+            && self.title_id == preview.title_id
+            && self.content_id == preview.content_id
+            && self.current_version == preview.current_version
+            && self.update_version == preview.update_version
+            && self.destination == preview.destination
+            && self.backup_bytes == preview.backup_bytes
+            && self.extracted_bytes == preview.extracted_bytes
+            && self.required_free_bytes == preview.required_free_bytes
+            && self.files == preview.files
+    }
+
+    fn check_target(&self, layout: &Layout, id: &ContentId) -> Result<()> {
+        if self.destination != layout.install_destination(self.mode)
+            || self.content_id != id.as_str()
+        {
+            return Err(invalid(
+                "The update destination or package changed after the preview. Check the update again before installing.",
+            ));
+        }
+        let _guard = merge::read_lock(layout)?;
+        layout.require_recovered()?;
+        let base = layout.base_metadata()?;
+        compatibility::check_identity(id, &base.title_id, &base.content_id)
+    }
+}
+
 fn serialize_path<S: serde::Serializer>(
     path: &Path,
     serializer: S,
@@ -139,8 +227,14 @@ fn serialize_path<S: serde::Serializer>(
     serializer.serialize_str(&path.to_string_lossy())
 }
 
-/// Inspects compatibility and affected paths without creating directories or locks.
-/// `pkg` must have the keys required to list its filesystem.
+/// Reads the original base's extracted PARAM.SFO without hashing installed updates.
+pub fn base_metadata(base: &Path) -> Result<AppMetadata> {
+    Layout::inspect(base)?.base_metadata()
+}
+
+/// Inspects compatibility and affected paths under the existing installation's shared lock.
+/// Previewing an untouched game creates no files.
+/// `pkg` must have the keys required to read its metadata and list its filesystem.
 pub fn plan<R: AsRef<[u8]> + Sync>(pkg: &Pkg<R>, base: &Path) -> Result<InstallPlan> {
     plan_with_progress(pkg, base, SilentProgress)
 }
@@ -151,7 +245,8 @@ pub fn plan_with_progress<R: AsRef<[u8]> + Sync, P: ExtractProgress>(
     base: &Path,
     progress: P,
 ) -> Result<InstallPlan> {
-    let location = Layout::open(base, false)?;
+    let location = Layout::open(base)?;
+    let _guard = merge::read_lock(&location)?;
     make_plan(pkg, &location, &progress)
 }
 
@@ -176,42 +271,35 @@ pub fn install_with_mode<R: AsRef<[u8]> + Sync, P: ExtractProgress>(
     mode: InstallMode,
     progress: P,
 ) -> Result<InstallPlan> {
-    match mode {
-        InstallMode::Separate => install(pkg, base, progress),
-        InstallMode::Merge => merge::install(pkg, base, progress),
-    }
+    run_install(pkg, base, mode, None, progress)
 }
 
-/// Validates the supported update format and identity before opening the filesystem.
-pub fn update_metadata<R: AsRef<[u8]>>(pkg: &Pkg<R>) -> Result<AppMetadata> {
-    let header = pkg.header();
-    let flags = header.content_flags();
-    if header.content_type() == 0x1e || flags.intersects(ContentFlags::DELTA_PATCH_X) {
+fn run_install<R: AsRef<[u8]> + Sync>(
+    pkg: &Pkg<R>,
+    base: &Path,
+    mode: InstallMode,
+    preview: Option<&InstallPlan>,
+    progress: impl ExtractProgress,
+) -> Result<InstallPlan> {
+    let layout = Layout::open(base)?;
+    if let Some(preview) = preview {
+        preview.check_target(&layout, pkg.header().content_id())?;
+    }
+    let layout = layout.lock_for_write()?;
+    let plan = match mode {
+        InstallMode::Separate => make_plan(pkg, &layout, &progress)?,
+        InstallMode::Merge => merge::make_plan(pkg, &layout, &progress)?,
+    };
+    if preview.is_some_and(|preview| !plan.matches_preview(preview)) {
         return Err(invalid(
-            "binary delta packages are not supported; provide a full-file update",
+            "The package or installed game changed after the preview. Check the update again before installing.",
         ));
     }
-    if header.content_type() != 0x1a
-        || !(flags.contains(ContentFlags::CUMULATIVE_PATCH)
-            || (flags.contains(ContentFlags::FIRST_PATCH)
-                && !flags.contains(ContentFlags::SUBSEQUENT_PATCH)))
-    {
-        return Err(invalid(
-            "expected a PS4 full-file cumulative or first update package",
-        ));
+    plan.check_space()?;
+    match mode {
+        InstallMode::Separate => install_separate(pkg, layout, plan, progress),
+        InstallMode::Merge => merge::install_planned(pkg, layout, plan, progress),
     }
-    let data = pkg
-        .param_sfo_data()
-        .map_err(|e| invalid(e.to_string()))?
-        .ok_or_else(|| invalid("update has no PARAM.SFO"))?;
-    let metadata = AppMetadata::parse(&data)?;
-    if metadata.category != "gp" {
-        return Err(invalid("update PARAM.SFO CATEGORY must be gp"));
-    }
-    if metadata.content_id != header.content_id().as_str() {
-        return Err(invalid("PKG header and PARAM.SFO content IDs disagree"));
-    }
-    Ok(metadata)
 }
 
 fn make_plan<R: AsRef<[u8]> + Sync, P: ExtractProgress>(
@@ -224,24 +312,19 @@ fn make_plan<R: AsRef<[u8]> + Sync, P: ExtractProgress>(
     }
     location.require_recovered()?;
     let base = location.base_metadata()?;
-    let update = update_metadata(pkg)?;
-    if update.content_id != base.content_id || update.title_id != base.title_id {
-        return Err(invalid(
-            "update does not match the base game's title and content ID",
-        ));
+    check_update_identity(pkg, &base)?;
+    let package = inspect_update(pkg);
+    if let UpdateReadiness::NeedsPasscode(locked) = &package.readiness {
+        locked.check_version(location, &base)?;
     }
+    let update = package.readiness.into_ready()?;
     let state = location.state()?;
     let current = location.active_manifest(&state, &base, progress)?;
     location.verify_previous(&state, &base, progress)?;
     let current_version = current
         .as_ref()
         .map_or(Ok(base.version), |m| m.app_version.parse::<AppVersion>())?;
-    if update.version <= current_version {
-        return Err(invalid(format!(
-            "update {} is not newer than installed {}; repeated installs and downgrades are refused",
-            update.version, current_version
-        )));
-    }
+    check_update_version(update.version, current_version)?;
     let extractor = PkgExtractor::new(pkg, SilentProgress, false);
     let entries = extractor.list_entries()?;
     if entries.iter().any(|e| e.path.is_none()) {
@@ -325,21 +408,12 @@ fn make_plan<R: AsRef<[u8]> + Sync, P: ExtractProgress>(
         content_id: update.content_id,
         current_version: current_version.to_string(),
         update_version: update.version.to_string(),
-        destination: location.active_path(),
+        destination: location.install_destination(InstallMode::Separate),
         extracted_bytes: bytes,
         required_free_bytes: required,
         available_bytes: fs2::available_space(&location.parent_path)?,
         files: changes,
     })
-}
-
-fn check_space(required: u64, available: u64) -> Result<()> {
-    if available < required {
-        return Err(invalid(format!(
-            "insufficient free space: need approximately {required} bytes, available {available}"
-        )));
-    }
-    Ok(())
 }
 
 /// Installs a complete update. A failed extraction never changes the active update.
@@ -350,10 +424,15 @@ pub fn install<R: AsRef<[u8]> + Sync, P: ExtractProgress>(
     base: &Path,
     progress: P,
 ) -> Result<InstallPlan> {
-    let location = Layout::open(base, true)?;
-    location.require_recovered()?;
-    let plan = make_plan(pkg, &location, &progress)?;
-    check_space(plan.required_free_bytes, plan.available_bytes)?;
+    install_with_mode(pkg, base, InstallMode::Separate, progress)
+}
+
+fn install_separate<R: AsRef<[u8]> + Sync>(
+    pkg: &Pkg<R>,
+    location: Layout,
+    plan: InstallPlan,
+    progress: impl ExtractProgress,
+) -> Result<InstallPlan> {
     location.clean_uncommitted()?;
     let manager = location.manager()?;
     manager.create_dir("staging")?;
@@ -422,12 +501,7 @@ pub fn install<R: AsRef<[u8]> + Sync, P: ExtractProgress>(
 /// Restores a merged game's originals. Refuses separate updates and pending
 /// merges; use [`recover`] to finish an interrupted merge or restoration.
 pub fn restore_merged(base: &Path, progress: impl ExtractProgress) -> Result<()> {
-    let location = Layout::open(base, true)?;
-    location.require_recovered()?;
-    if !merge::present(&location)? {
-        return Err(invalid("this game has no merged update to restore"));
-    }
-    merge::restore(&location, &progress)
+    GameTarget::open(base.to_owned()).restore_merged(&progress)
 }
 
 /// Recovers an interrupted activation/rollback and removes abandoned staging data.
@@ -439,10 +513,7 @@ pub fn recover(base: &Path) -> Result<()> {
 /// Recovers with non-fatal warnings through [`ExtractProgress::warning`].
 /// Recovery is not cancellable once directory restoration begins.
 pub fn recover_with_progress<P: ExtractProgress>(base: &Path, progress: P) -> Result<()> {
-    let location = Layout::open(base, true)?;
-    merge::recover(&location, &progress)?;
-    location.recover_transaction(&progress)?;
-    location.clean_uncommitted()
+    GameTarget::open(base.to_owned()).recover(&progress)
 }
 
 #[cfg(test)]
